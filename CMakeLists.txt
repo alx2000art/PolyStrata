@@ -2163,6 +2163,11 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   target_include_directories(poly_mxfp4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gg}/include
                                                     ${_strata_gpu_include_directories})
   target_link_libraries(poly_mxfp4_test PRIVATE strata_kernels ggml-base ${_strata_gpu_runtime_target})
+  # MXFP4 experts converted to Q5_0 at load, against ggml-cpu's arithmetic on random blocks, without a model
+  add_executable(poly_mxfp4_q50_test src/poly/mxfp4_test.cpp src/poly/cpu_experts.cpp)
+  target_include_directories(poly_mxfp4_q50_test PRIVATE ${_strata_gg}/include)
+  target_link_libraries(poly_mxfp4_q50_test PRIVATE ggml-cpu ggml-base Threads::Threads)
+  add_test(NAME poly_mxfp4_q50_test COMMAND poly_mxfp4_q50_test)
   # the Q8_0 KV cache kernels (store_q8 / store_q8_at) against a host reference (GPU, synthetic, no model)
   if(STRATA_BUILD_TESTS)
     add_executable(poly_kv_q8_test src/poly/kv_q8_test.cpp src/poly/kernels.cu)
