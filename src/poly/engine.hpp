@@ -506,6 +506,7 @@ protected:
     void load_shape();
     void load_moe(int il, bool shared = true);
     void mxfp4_to_q5_0(int il);
+    std::unique_ptr<uint8_t[]> q5_0_copy(int il, const uint8_t* src, size_t blocks);
     void alloc();
     void shared_scratch();
     float* draft_input(const int32_t* tokens, int64_t row, const float* h, int n);
@@ -662,7 +663,8 @@ protected:
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block
-    std::vector<std::unique_ptr<uint8_t[]>> converted_;   ///< experts converted at load (mxfp4_to_q5_0), in RAM
+    /// per layer mxfp4_to_q5_0() decided on: its down experts converted, in RAM, or null when they stay MXFP4
+    std::map<int, std::unique_ptr<uint8_t[]>> converted_;
     Dev out_norm_, output_;
     bool draft_ = false;
     bool block_layer_ = false;    ///< what guesses ahead is a block after the model's layers (layers_' last)
