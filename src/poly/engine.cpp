@@ -375,6 +375,7 @@ Engine::~Engine() {
     if (up_) cudaStreamSynchronize(cs(up_));
     if (rs_) cudaStreamSynchronize(cs(rs_));
     if (st_) cudaStreamSynchronize(cs(st_));
+    for (void* p : host_registered_) cudaHostUnregister(p);
     workers_.reset();
     mmq_.reset();
     for (void* p : dev_allocs_) cudaFree(p);
@@ -1256,6 +1257,52 @@ void Engine::fill_expert_cache() {
     }
 }
 
+// STRATA_POLY_PIN_EXPERTS=<MiB> (opt-in): the mapped experts of the MoE layers registered with the driver, layer by
+// layer in order, up to that many MiB (0: as many as it takes) and as long as the system lets it lock them.  A
+// registered layer's experts go from the file cache to the card in one copy: a prompt's staging (stage()) skips the
+// workers' copy into the pinned buffers, and a swap (follow_loop()) skips its copy into a slot's pinned buffer.  The
+// pages stay locked in RAM, so the budget is RAM the system cannot page out.
+void Engine::pin_experts() {
+    pinned_layer_.assign(layers_.size(), 0);
+    const char* env = std::getenv("STRATA_POLY_PIN_EXPERTS");
+    if (!env || all_cached()) return;
+    const Clock::time_point t0 = Clock::now();
+    const size_t budget = (size_t) std::max(0LL, std::atoll(env)) << 20;
+    size_t done = 0;
+    int n_pinned = 0;
+    const auto reg = [&](const uint8_t* p, size_t n) -> void* {
+        const uintptr_t lo = (uintptr_t) p & ~uintptr_t(4095), hi = ((uintptr_t) p + n + 4095) & ~uintptr_t(4095);
+        if (cudaHostRegister((void*) lo, hi - lo, cudaHostRegisterReadOnly) != cudaSuccess) {
+            cudaGetLastError();
+            return nullptr;
+        }
+        done += hi - lo;
+        return (void*) lo;
+    };
+    for (size_t il = 0; il < layers_.size(); ++il) {
+        const Layer& L = layers_[il];
+        if (!L.moe) continue;
+        const bool fused = L.gu_stride != L.gu_bytes;   // gate and up of an expert side by side, as one array
+        const size_t need = (size_t) n_expert_ * ((fused ? L.gu_stride : 2 * L.gu_bytes) + L.d_bytes);
+        if (budget && done + need > budget) break;
+        void* a = reg(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
+        void* b = a && !fused ? reg(L.exp_up, (size_t) n_expert_ * L.gu_bytes) : a;
+        void* d = b ? reg(L.exp_down, (size_t) n_expert_ * L.d_bytes) : nullptr;
+        if (!d) {   // this layer's are given back, and no later layer is tried
+            if (b && b != a) cudaHostUnregister(b);
+            if (a) cudaHostUnregister(a);
+            break;
+        }
+        host_registered_.push_back(a);
+        if (b != a) host_registered_.push_back(b);
+        host_registered_.push_back(d);
+        pinned_layer_[il] = 1;
+        ++n_pinned;
+    }
+    std::fprintf(stderr, "strata-poly: the experts of %d layers pinned (%zu MiB) in %.1f s (STRATA_POLY_PIN_EXPERTS)\n",
+                 n_pinned, done >> 20, ms_since(t0) / 1000.0);
+}
+
 // The thread and the stream that bring experts into the cache while an answer is written (follow()).
 void Engine::start_swaps() {
     if (swap_ || cached_ == 0 || opt_.expert_swaps == 0) return;
@@ -1519,28 +1566,44 @@ void Engine::follow_loop() {
         lk.unlock();
         const Layer& L = layers_[(size_t) s->il];
         const size_t e = (size_t) s->e, gu = L.gu_bytes;
-        // Out of the file by position where that is asked, in place of a copy through the mapping: a page the
-        // cache lacks then arrives as one read of the expert's whole row, not a fault every few pages.  The
-        // reads are positioned, so the follower reads beside the stagers and the workers in the one file.  A
-        // read that fails ends the follower as an upload that fails does: the error goes to the engine's thread
-        // in swap_error_, which follow() throws.
-        try {
-            if (opt_.file_reads) {
-                L.gu_file->read(L.gu_at + e * L.gu_stride, s->pinned, gu);
-                L.up_file->read(L.up_at + e * L.gu_stride, s->pinned + gu, gu);
-                L.d_file->read(L.d_at + e * L.d_bytes, s->pinned + 2 * gu, L.d_bytes);
+        const cudaStream_t ss = cs(swap_st_);
+        cudaError_t err = cudaSuccess;
+        if ((size_t) s->il < pinned_layer_.size() && pinned_layer_[(size_t) s->il]) {
+            // straight from the registered file view: the expert crosses RAM once, not three times (read, written to
+            // the pinned buffer, read again), which the CPU's experts beside it feel (GLM 5.3 Flash: ~4 swaps a token)
+            if (L.exp_up == L.exp_gate + gu && L.gu_stride == 2 * gu) {
+                err = cudaMemcpyAsync(s->slot, L.exp_gate + e * L.gu_stride, 2 * gu, cudaMemcpyHostToDevice, ss);
             } else {
-                std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
-                std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
-                std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+                err = cudaMemcpyAsync(s->slot, L.exp_gate + e * L.gu_stride, gu, cudaMemcpyHostToDevice, ss);
+                if (err == cudaSuccess)
+                    err = cudaMemcpyAsync(s->slot + gu, L.exp_up + e * L.gu_stride, gu, cudaMemcpyHostToDevice, ss);
             }
-        } catch (const std::runtime_error& err) {
-            lk.lock();
-            swap_error_ = err.what();
-            return;
+            if (err == cudaSuccess)
+                err = cudaMemcpyAsync(s->slot + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice, ss);
+        } else {
+            // Out of the file by position where that is asked, in place of a copy through the mapping: a page the
+            // cache lacks then arrives as one read of the expert's whole row, not a fault every few pages.  The
+            // reads are positioned, so the follower reads beside the stagers and the workers in the one file.  A
+            // read that fails ends the follower as an upload that fails does: the error goes to the engine's thread
+            // in swap_error_, which follow() throws.
+            try {
+                if (opt_.file_reads) {
+                    L.gu_file->read(L.gu_at + e * L.gu_stride, s->pinned, gu);
+                    L.up_file->read(L.up_at + e * L.gu_stride, s->pinned + gu, gu);
+                    L.d_file->read(L.d_at + e * L.d_bytes, s->pinned + 2 * gu, L.d_bytes);
+                } else {
+                    std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
+                    std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
+                    std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+                }
+            } catch (const std::runtime_error& read_err) {
+                lk.lock();
+                swap_error_ = read_err.what();
+                return;
+            }
+            err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, ss);
         }
-        cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, cs(swap_st_));
-        if (err == cudaSuccess) err = cudaEventRecord(s->done, cs(swap_st_));
+        if (err == cudaSuccess) err = cudaEventRecord(s->done, ss);
         lk.lock();
         if (err != cudaSuccess) {
             swap_error_ = cudaGetErrorString(err);
@@ -1836,6 +1899,7 @@ void Engine::load(const Options& o) {
     route_tmp_.assign((size_t) workers_->threads() * 2 * n_expert_, 0.f);
     start_swaps();
     reset();
+    pin_experts();
     // nothing is read from the files when every expert is in VRAM
     if (!all_cached())
         mapper_ = std::thread([this, spans = std::move(spans)] { map_pages(spans, map_quit_); });
@@ -2410,6 +2474,36 @@ bool Engine::moe_card(Layer& L, int il, int n) {
 void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone) {
     staged_il_ = -1;   // whatever the buffer held
     const size_t gu2 = 2 * L.gu_bytes, down_at = pad((size_t) m * gu2);
+    // a layer of layers_ (not a draft block's) whose experts are registered: straight from the file view, a run of
+    // experts in a row as one copy, and no pinned buffer between
+    const bool own = !layers_.empty() && std::less_equal<const Layer*>()(layers_.data(), &L) &&
+                     std::less<const Layer*>()(&L, layers_.data() + layers_.size());
+    if (own && pinned_layer_.size() == layers_.size() && pinned_layer_[(size_t) (&L - layers_.data())]) {
+        const cudaStream_t s = cs(stream);
+        const bool fused = L.exp_up == L.exp_gate + L.gu_bytes && L.gu_stride == gu2;
+        for (int j = 0; j < m;) {
+            int k = j + 1;
+            while (k < m && experts[k] == experts[k - 1] + 1) ++k;
+            const size_t e = (size_t) experts[j], n = (size_t) (k - j);
+            if (fused) {
+                ck(cudaMemcpyAsync(stage_ + (size_t) j * gu2, L.exp_gate + e * L.gu_stride, n * gu2,
+                                   cudaMemcpyHostToDevice, s), "expert staging");
+            } else {
+                for (size_t q = 0; q < n; ++q) {
+                    ck(cudaMemcpyAsync(stage_ + (size_t) (j + q) * gu2, L.exp_gate + (e + q) * L.gu_stride,
+                                       L.gu_bytes, cudaMemcpyHostToDevice, s), "expert staging");
+                    ck(cudaMemcpyAsync(stage_ + (size_t) (j + q) * gu2 + L.gu_bytes, L.exp_up + (e + q) * L.gu_stride,
+                                       L.gu_bytes, cudaMemcpyHostToDevice, s), "expert staging");
+                }
+            }
+            ck(cudaMemcpyAsync(stage_ + down_at + (size_t) j * L.d_bytes, L.exp_down + e * L.d_bytes, n * L.d_bytes,
+                               cudaMemcpyHostToDevice, s), "expert staging");
+            j = k;
+        }
+        ck(cudaMemsetAsync(stage_ + down_at + (size_t) m * L.d_bytes, 0, kTail, s), "expert staging");
+        (void) alone;
+        return;
+    }
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
     const bool by_file = opt_.file_reads;
     // A task of the pool must not throw - a worker takes no exception out of it - so the first read that fails
