@@ -765,7 +765,7 @@ GLM_ROW_BYTES = 28160           # VRAM per context token: a row in each of the 1
 GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve):
                                 # the 3.0BIT file's; a size with other dense weights has its own "vram_beside_gb"
 POLY_RAM_BESIDE_GB = 10          # RAM beside the experts in the file cache: the OS, the server, the engine's buffers
-POLY_CONV_CACHE_MIB = 8192       # --conversation-cache-mib when setup turns it on
+POLY_CONV_CACHE_MIB = 8192       # the most the engine's "auto" conversation cache takes (engine: auto_conversation_cache_mib)
 # MODEL-UPDATE Phase 1: the K-quant prompt kernels (Unsloth's UD-Q4/Q5/Q6_K_XL experts) are a library next to the CUDA
 # engine, opened only for those models; an engine without it runs them on the FP16 prompt path
 KQ_LIB = "strata_kq.dll" if WIN else "libstrata_kq.so"
@@ -5445,7 +5445,7 @@ def update_install(have: list, a) -> int:
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
         if poly_config(cfg):
-            update_poly_engine(cfg, cfg_path=cfg_path)
+            update_poly_engine(cfg, cfg_path=cfg_path, force=a.rebuild_engine, toolkit=(int(a.cuda) if str(a.cuda) in ("12", "13") else None))
             poly_tail_skip(cfg, cfg_path)
             poly_kv_whole(cfg, cfg_path)
         if not own_path_config(cfg):
@@ -5486,7 +5486,7 @@ def settings_summary(cfg: dict, port=None) -> str:
 
 
 def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
-          layer_split=None, keep=None) -> int:
+          layer_split=None, keep=None, rebuild=False, cuda=None) -> int:
     """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab,
     --vram-reserve-mib)."""
     cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
@@ -5497,7 +5497,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     if glm:
         if isinstance(gpu, list):                      # update_poly_engine() wants code for these cards
             cfg["gpu"] = gpu
-        update_poly_engine(cfg, yes, cfg_path)
+        update_poly_engine(cfg, yes, cfg_path, force=rebuild, toolkit=cuda)
         poly_tail_skip(cfg, cfg_path)
         poly_kv_whole(cfg, cfg_path)
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
@@ -6147,9 +6147,9 @@ def poly_verdict(d, ram, vram_gb, hip, windows=False) -> str:
         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
 
 
-def poly_saved_conv(paths) -> int | None:
-    """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is), 0 when that
-    config has none; None without an earlier config: setup then asks."""
+def poly_saved_conv(paths) -> int | str | None:
+    """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is): MiB, or "auto";
+    0 when that config has none; None without an earlier config: setup then asks."""
     for p in paths:
         if p is None or not p.is_file():
             continue
@@ -6159,7 +6159,7 @@ def poly_saved_conv(paths) -> int | None:
             continue
         if isinstance(args, list):
             v = str(args[args.index("--conversation-cache-mib") + 1]) if "--conversation-cache-mib" in args[:-1] else ""
-            return int(v) if v.isdigit() else 0
+            return int(v) if v.isdigit() else "auto" if v == "auto" else 0
     return None
 
 
@@ -6394,7 +6394,8 @@ def build_engine_poly_hip_win(gpu, llama) -> Path:
     return eng
 
 
-def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> None:
+def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None, force: bool = False,
+                       toolkit: int | None = None) -> None:
     """Before a model of strata-poly starts: the engine setup installed is replaced when its source changed (a `git
     pull`) or the card is another generation, a ready-made one by the release's for the new source, one compiled here
     by a compile.  A ready-made one stays while no release has the new source: a compile would first install the
@@ -6406,8 +6407,10 @@ def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> No
     if renamed:
         eng = ROOT / ENGINE_POLY_DIR
     stamp = eng / "BUILD.json"
-    if eng != ROOT / ENGINE_POLY_DIR or not (stamp.exists() or renamed):   # an engine of the user's own
-        return
+    if eng != ROOT / ENGINE_POLY_DIR:
+        return                                          # an engine of the user's own, in a folder of its own
+    if not (stamp.exists() or renamed) and not force:
+        return                                          # an engine of the user's own
     try:
         meta = json.loads(stamp.read_text()) if stamp.exists() else {}
         if meta.get("backend") == "hip":   # the AMD engine compiled here: the same way again when the source moved
@@ -6430,16 +6433,36 @@ def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> No
         vision = ("gpu" if meta.get("vision") == "gpu" or vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none"
         changed = renamed
         fits = set(gpu["archs"]) <= {int(x) for x in meta.get("archs", [])}
-        if not (meta.get("src") == source_hash(ENGINE_SOURCES) and (eng / POLY_EXE).exists() and fits
+        tk = int(toolkit) if toolkit else int(meta.get("toolkit", 13))
+        if force or not (meta.get("src") == source_hash(ENGINE_SOURCES) and (eng / POLY_EXE).exists() and fits
                 and (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES))):
+            if force:
+                say(f"  Compiling the strata-poly engine again with CUDA {tk} (some minutes) ...")
+                # a build folder is configured for one compiler: another toolkit needs another folder
+                bdir = ROOT / ("build-poly" if tk == 13 else "build-poly-cuda12")
+                if bdir.exists():
+                    shutil.rmtree(bdir, ignore_errors=True)
+                # CMake takes cuBLAS and cuBLASLt from the toolkit it is told about, not from another CUDA that
+                # the distribution also installs (that is how a 13 build ends up asking for libcublas.so.12)
+                if tk == 13:
+                    nvcc_path, _ = find_nvcc()
+                    if nvcc_path:
+                        root = str(Path(nvcc_path).resolve().parent.parent)
+                        os.environ["CUDAToolkit_ROOT"] = root
+                        os.environ["STRATA_NVCC"] = str(nvcc_path)
             # one compiled here (--build, a CPU without AVX2) stays so
-            if meta.get("source") == "release" and not get_poly_prebuilt(gpu) and fits:
+            if not force and meta.get("source") == "release" and not get_poly_prebuilt(gpu) and fits:
                 warn("the latest release has no ready-made strata-poly of this source: the one installed starts "
                      "(START-HERE.bat --setup --build compiles this source)")
                 return
-            build_engine_poly(gpu, yes, get_llama_cpp(), vision, int(meta.get("toolkit", 13)))
+            build_engine_poly(gpu, yes, get_llama_cpp(), vision, tk)
             # a ready-made engine loads CUDA from pip, one compiled here from the toolkit it was compiled with
             cfg["lib_dirs"], changed = engine_lib_dirs(eng), True
+            root = os.environ.get("CUDAToolkit_ROOT")
+            if root:                                     # the toolkit's real library folder (the runfile's)
+                tgt = Path(root) / "targets" / "x86_64-linux" / "lib"
+                if tgt.is_dir() and str(tgt) not in cfg["lib_dirs"]:
+                    cfg["lib_dirs"].append(str(tgt))
         if changed:
             cfg["exe"] = str(eng / POLY_EXE)
             if cfg_path is not None:
@@ -6613,11 +6636,15 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         say()
         say("  Conversation cache: a coding agent sends several conversations in turn (the main one, its subagents,")
         say("  short side requests). With the cache, one that makes room for another is kept in RAM and comes back")
-        say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM.")
+        say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM, and")
+        say("  less when little RAM is left free once the model is loaded.")
         room = ram >= need_ram + POLY_CONV_CACHE_MIB / 1024
-        conv = POLY_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
-                                         a.yes) == "y" else 0
-    ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
+        conv = "auto" if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
+                             a.yes) == "y" else 0
+    if conv == "auto":
+        ok(f"conversation cache: 40% of the RAM free once the model is loaded, up to {POLY_CONV_CACHE_MIB} MiB")
+    else:
+        ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
 
     # one file, or the numbered files of a split GGUF: the engine is given the first and finds the others by name
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
@@ -7310,6 +7337,8 @@ def main() -> int:
     ap.add_argument("--rollback-engine", action="store_true",
                     help="put back the engine an update replaced (kept in engine/.previous), and keep the current one there")
     ap.add_argument("--build", action="store_true", help="compile the engine instead of using the ready-made one")
+    ap.add_argument("--rebuild-engine", action="store_true",
+                    help="compile the strata-poly engine again (after a CUDA upgrade, for example) and start the model")
     ap.add_argument("--source", choices=SOURCES, default=None,
                     help="where the model files come from: auto (default: Hugging Face), huggingface or modelscope "
                          "(mainland China: the same files, checked against ModelScope's published SHA-256; "
@@ -7453,6 +7482,7 @@ def main() -> int:
             warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
                  + ("keeps" if a.no_start else "starts with") + " the default settings")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+                     rebuild=a.rebuild_engine, cuda=(int(a.cuda) if str(a.cuda) in ("12", "13") else None),
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
@@ -7460,6 +7490,7 @@ def main() -> int:
             update_installed_engine(a.prebuilt)
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+                     rebuild=a.rebuild_engine, cuda=(int(a.cuda) if str(a.cuda) in ("12", "13") else None),
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
         say()
@@ -7469,6 +7500,7 @@ def main() -> int:
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
             return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+                     rebuild=a.rebuild_engine, cuda=(int(a.cuda) if str(a.cuda) in ("12", "13") else None),
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
 

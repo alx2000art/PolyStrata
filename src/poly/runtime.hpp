@@ -43,6 +43,11 @@ constexpr size_t kTail = 256;
 // noisy, and an upload gets in the way of the work: a slot goes to an expert that will clearly be used more.
 constexpr float kSwapMin = 2.f;
 constexpr int kSwapHalf = 128;
+// Engine::read() folds what the read routed to into recent_ at its end, at most this a (layer, expert): enough
+// that follow() brings the prompt's busiest experts in over a cached one the answer uses less at its first
+// windows, not so much that the answer waits behind a stampede of uploads.  A read's staging (plan_ahead) also
+// orders by the counts, so the staging buffer holds what this prompt, not only the profile, reads most.
+constexpr int64_t kSwapHeat = 8;
 // Engine::pick_way(): each way of a window is timed this many times before the faster one is taken.  What a way
 // takes moves, most in an answer's first windows, while the cache comes to hold the answer's experts, so the way
 // behind is timed again after kWayAgain windows of that size, then after twice as many each time it is still
@@ -153,6 +158,9 @@ public:
         return it == where_.end() ? nullptr : it->second.t;
     }
     const uint8_t* data(const TensorInfo& t) const { return where_.at(t.name).file->tensor_data(t); }
+    /// The file a tensor's bytes are in, for reading them by position beside the mapping of them
+    /// (GgufFile::read, GgufFile::tensor_at).
+    const GgufFile& file_of(const TensorInfo& t) const { return *where_.at(t.name).file; }
     /// The files' bytes together.
     uint64_t bytes() const {
         uint64_t n = 0;

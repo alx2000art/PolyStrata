@@ -59,6 +59,10 @@ private:
         uint16_t* raw = nullptr;    ///< raw_ring_ rows of the last positions, fp16
         uint16_t* rows = nullptr;   ///< a compressed row a block of ratio positions, fp16
         uint16_t* keys = nullptr;   ///< the indexer's key of each 4-to-1 row, fp16
+        // q8_0 cache (opt-in): codes are head_dim int8 a row; scales are one fp16 per 32-value block
+        // (head_dim/32 a row).  Used instead of raw when Options::kv_format == kQ8_0.
+        int8_t*   k_codes  = nullptr;
+        uint16_t* k_scales = nullptr;
         int ring = 0;               ///< the compressors' ring rows
         Rope rope;                  ///< the queries' and keys' turn
         std::vector<float> probs_b;      ///< what the routing adds to each expert's score before it picks

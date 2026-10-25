@@ -322,6 +322,7 @@ private:
 struct CacheFlags {
     CacheOptions o;
     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
+    bool park_auto = false;          // --conversation-cache-mib auto: park_mib from the RAM free once loaded
 };
 
 struct Session {
@@ -1067,6 +1068,26 @@ void usage() {
                  "  --stage-read-mib N     a prompt read of several batches grows the staging buffer to N MiB (at\n"
                  "                         most a layer's experts) with VRAM the expert cache lends it until the\n"
                  "                         answer starts (default 0 = never)\n"
+                 "  --read-overlap N       1: the next chunk of a long prompt's read overlaps the last layers of the\n"
+                 "                         chunk before, its uploads waiting by an event and not the card draining\n"
+                 "                         (default 1; 0 = the card drains between the chunks)\n"
+                 "  --file-reads N         1: routed experts are read from their file by position into the pinned\n"
+                 "                         buffers, and not copied through the mapped file, whose missing pages\n"
+                 "                         arrive a fault at a time when RAM is tight for the model (default 1;\n"
+                 "                         0 = copies through the mapping)\n"
+                 "  --read-heat N          1: what a prompt routes to warms the expert cache: the staging buffer\n"
+                 "                         holds what this prompt reads most, and after the read the cache takes\n"
+                 "                         its busiest experts in (default 1; 0 = reads change nothing)\n"
+                 "  --attend-batch N       1: DeepSeek V4's attention takes two tokens a block, their raw windows'\n"
+                 "                         union staged once (default 1; 0 = a token a block)\n"
+                 "  --group-heads N        the heads an attention block takes: 16 (default) or 8, as the kernel\n"
+                 "                         first was\n"
+                 "  --q8-dequant N         with --kv q8_0: 1 = the packed dequant of a staged key row, 0 = a\n"
+                 "                         value at a time\n"
+                 "  --attend-chunks N      1: a batch above 65535 rows is attended in launches of that many\n"
+                 "                         (default 1; 0 = one launch, which that many rows fail)\n"
+                 "  --idx-mma N            1: the indexer's scores on the tensor cores where the card has them\n"
+                 "                         (default 1; 0 = the scalar kernel)\n"
                  "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -1074,7 +1095,8 @@ void usage() {
                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
                  "                         (default 2048, 0 = none)\n"
                  "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
-                 "                         without being read again (default 0 = off)\n"
+                 "                         without being read again (default 0 = off; auto: 40%% of the RAM free\n"
+                 "                         once loaded, above the floor below, at most 8192)\n"
                  "  --conversation-cache-slots N        parked conversations at most (default 4)\n"
                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
@@ -1171,10 +1193,22 @@ int main(int argc, char** argv) {
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--stage-read-mib") o.stage_read_mib = std::atoi(val());
+        else if (a == "--read-overlap") o.read_overlap = std::atoi(val());
+        else if (a == "--file-reads") o.file_reads = std::atoi(val()) != 0;
+        else if (a == "--read-heat") o.read_heat = std::atoi(val());
+        else if (a == "--attend-batch") o.attend_batch = std::atoi(val());
+        else if (a == "--group-heads") o.group_heads = std::atoi(val());
+        else if (a == "--q8-dequant") o.q8_dequant = std::atoi(val());
+        else if (a == "--attend-chunks") o.attend_chunks = std::atoi(val());
+        else if (a == "--idx-mma") o.idx_mma = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
-        else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());
+        else if (a == "--conversation-cache-mib") {
+            const std::string v = val();
+            cache.park_auto = v == "auto";
+            cache.o.park_mib = cache.park_auto ? 0 : std::atoll(v.c_str());
+        }
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
@@ -1254,6 +1288,19 @@ int main(int argc, char** argv) {
                 const int64_t id = engine.meta_u(key, -1);
                 if (id >= 0 && std::find(eos.begin(), eos.end(), (int32_t) id) == eos.end()) eos.push_back((int32_t) id);
             }
+        // A fixed 8 GiB on a PC whose RAM the model's file already fills pushed that file out of the file cache.
+        // Sized as Strata's engine sizes it (#3493); admit() still keeps min_free_mib free at every park.
+        if (cache.park_auto && want_serve && cache.o.checkpoints > 0 && cache.o.park_slots > 0) {
+            cache.o.park_mib = strata::core::auto_conversation_cache_mib(strata::core::available_host_bytes(),
+                                                                        cache.min_free_mib);
+            if (cache.o.park_mib > 0)
+                std::fprintf(stderr, "strata-poly: conversation cache sized from the free RAM: %lld MiB for up to %d "
+                                     "parked conversations (--conversation-cache-mib N sets it, 0 turns it off)\n",
+                             (long long) cache.o.park_mib, cache.o.park_slots);
+            else
+                std::fprintf(stderr, "strata-poly: conversation cache off: not enough free RAM to park conversations "
+                                     "(--conversation-cache-mib N asks for one anyway)\n");
+        }
         Session ss(engine, eos, cache, lookup);
         int rc = 0;
         if (want_serve) {

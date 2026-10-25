@@ -383,7 +383,8 @@ Engine::~Engine() {
     vmm_free(arena_);
     vmm_free(stage_map_);
     for (void* p : host_allocs_) cudaFreeHost(p);
-    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1], ev_hr_})
+    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1],
+                    ev_tail_, ev_hr_})
         if (e) cudaEventDestroy((cudaEvent_t) e);
     for (void* e : ev_row_)
         if (e) cudaEventDestroy((cudaEvent_t) e);
@@ -956,6 +957,11 @@ void Engine::load_moe(int il, bool shared) {
     L.d_type = td.type;
     L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
     L.exp_down = home(td).data(td);
+    {
+        const GgufFile& df = home(td).file_of(td);
+        L.d_file = &df;
+        L.d_at = df.tensor_at(td);
+    }
     if (tensor(il, "ffn_gate_up_exps.weight")) {
         const TensorInfo& gu = exps("ffn_gate_up_exps.weight", n_embd_, 2 * n_ff_exp_);
         L.gu_type = gu.type;
@@ -963,6 +969,10 @@ void Engine::load_moe(int il, bool shared) {
         L.gu_bytes = L.gu_stride / 2;
         L.exp_gate = home(gu).data(gu);
         L.exp_up = L.exp_gate + L.gu_bytes;
+        const GgufFile& gf = home(gu).file_of(gu);
+        L.gu_file = L.up_file = &gf;
+        L.gu_at = gf.tensor_at(gu);
+        L.up_at = L.gu_at + L.gu_bytes;
     } else {
         const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
         const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
@@ -974,6 +984,11 @@ void Engine::load_moe(int il, bool shared) {
         home(tu).payload(tu);
         L.exp_gate = home(tg).data(tg);
         L.exp_up = home(tu).data(tu);
+        const GgufFile& gf = home(tg).file_of(tg), &uf = home(tu).file_of(tu);
+        L.gu_file = &gf;
+        L.up_file = &uf;
+        L.gu_at = gf.tensor_at(tg);
+        L.up_at = uf.tensor_at(tu);
     }
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
@@ -987,8 +1002,8 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const Shards file(o.model);
     const MetaValue* arch = file.get("general.architecture");
     const std::string name = arch ? arch->s : std::string();
-    if (o.kv_format == KvFmt::kQ8_0 && name != "qwen35moe")
-        throw std::runtime_error("--kv q8_0 is only supported for qwen35moe models in v1; this is a '" + name + "' model");
+    if (o.kv_format == KvFmt::kQ8_0 && name != "qwen35moe" && name != "deepseek4")
+        throw std::runtime_error("--kv q8_0 is only supported for qwen35moe and deepseek4 models in v1; this is a '" + name + "' model");
     const auto make = [&]() -> std::unique_ptr<Engine> {
         if (name == "glm5-next" || name == "glm5next") return std::make_unique<Glm5Next>();   // Unsloth: no hyphen
         if (name == "qwen35moe") return std::make_unique<Qwen35>();
@@ -1476,9 +1491,13 @@ void Engine::plan_ahead(Layer& L, int il) {
     L.ahead.clear();
     for (int e = 0; e < n_expert_; ++e)
         if (!L.slot[(size_t) e]) L.ahead.push_back(e);
-    if (!prior_.empty()) {
+    if (!prior_.empty() || !heat_.empty()) {
+        // the profile's counts and this read's own (moe_rows counts heat_ as the read routes): the buffer holds
+        // what this prompt reads most, not only what the model read most on average
         const int64_t* used = prior_.data() + (size_t) il * n_expert_;
-        std::stable_sort(L.ahead.begin(), L.ahead.end(), [used](int32_t a, int32_t b) { return used[a] > used[b]; });
+        const int64_t* hot = heat_.data() + (size_t) il * n_expert_;
+        std::stable_sort(L.ahead.begin(), L.ahead.end(),
+                         [&](int32_t a, int32_t b) { return used[a] + hot[a] > used[b] + hot[b]; });
     }
     L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (2 * L.gu_bytes + L.d_bytes)));
 }
@@ -1499,9 +1518,26 @@ void Engine::follow_loop() {
         lk.unlock();
         const Layer& L = layers_[(size_t) s->il];
         const size_t e = (size_t) s->e, gu = L.gu_bytes;
-        std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
-        std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
-        std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+        // Out of the file by position where that is asked, in place of a copy through the mapping: a page the
+        // cache lacks then arrives as one read of the expert's whole row, not a fault every few pages.  The
+        // reads are positioned, so the follower reads beside the stagers and the workers in the one file.  A
+        // read that fails ends the follower as an upload that fails does: the error goes to the engine's thread
+        // in swap_error_, which follow() throws.
+        try {
+            if (opt_.file_reads) {
+                L.gu_file->read(L.gu_at + e * L.gu_stride, s->pinned, gu);
+                L.up_file->read(L.up_at + e * L.gu_stride, s->pinned + gu, gu);
+                L.d_file->read(L.d_at + e * L.d_bytes, s->pinned + 2 * gu, L.d_bytes);
+            } else {
+                std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
+                std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
+                std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+            }
+        } catch (const std::runtime_error& err) {
+            lk.lock();
+            swap_error_ = err.what();
+            return;
+        }
         cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, cs(swap_st_));
         if (err == cudaSuccess) err = cudaEventRecord(s->done, cs(swap_st_));
         lk.lock();
@@ -1959,7 +1995,7 @@ void Engine::alloc() {
         ids_.resize(rr);
         first_.resize((size_t) n_expert_);
 
-        for (void** e : {&ev_in_[0], &ev_in_[1], &ev_out_[0], &ev_out_[1]}) {   // read()
+        for (void** e : {&ev_in_[0], &ev_in_[1], &ev_out_[0], &ev_out_[1], &ev_tail_}) {   // read()
             cudaEvent_t ev = nullptr;
             ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
             *e = ev;
@@ -1969,6 +2005,7 @@ void Engine::alloc() {
         rs_ = rs;
     }
     use_.assign(layers_.size() * n_expert_, 0);
+    heat_.assign(layers_.size() * n_expert_, 0);
 }
 
 void Engine::save_profile() const {
@@ -2359,13 +2396,19 @@ bool Engine::moe_card(Layer& L, int il, int n) {
     return true;
 }
 
-// m experts from the mapped file into the staging buffer: gate and up of each back to back from the start, the
-// downs after them.  The two pinned buffers take turns, so the workers fill one while the other uploads.  `alone`:
-// stagers_ fill them, while the workers compute experts.
+// m experts into the staging buffer: gate and up of each back to back from the start, the downs after them.
+// They come out of the file by position (a read of each whole region) where that is asked, and through the
+// mapped file besides.  The two pinned buffers take turns, so the workers fill one while the other uploads.
+// `alone`: stagers_ fill them, while the workers compute experts.
 void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone) {
     staged_il_ = -1;   // whatever the buffer held
     const size_t gu2 = 2 * L.gu_bytes, down_at = pad((size_t) m * gu2);
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
+    const bool by_file = opt_.file_reads;
+    // A task of the pool must not throw - a worker takes no exception out of it - so the first read that fails
+    // is kept and thrown on the engine's thread, where the batch's caller sees it, once every task is done.
+    std::exception_ptr read_err = nullptr;
+    std::atomic<bool> err_taken{false};
     for (int j0 = 0; j0 < m; j0 += per) {
         const size_t c = (size_t) std::min(per, m - j0);
         stage_turn_ ^= 1;
@@ -2374,11 +2417,23 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         ck(cudaEventSynchronize(left), "expert staging");
         const auto copy = [&](int i) {
             const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
-            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
-            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
-            else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+            try {
+                if (i % 3 == 0) {
+                    if (by_file) L.gu_file->read(L.gu_at + e * L.gu_stride, h + j * gu2, L.gu_bytes);
+                    else std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                } else if (i % 3 == 1) {
+                    if (by_file) L.up_file->read(L.up_at + e * L.gu_stride, h + j * gu2 + L.gu_bytes, L.gu_bytes);
+                    else std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+                } else {
+                    if (by_file) L.d_file->read(L.d_at + e * L.d_bytes, h + c * gu2 + j * L.d_bytes, L.d_bytes);
+                    else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+                }
+            } catch (...) {
+                if (!err_taken.exchange(true)) read_err = std::current_exception();
+            }
         };
         (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
+        if (read_err) std::rethrow_exception(read_err);
         ck(cudaMemcpyAsync(stage_ + (size_t) j0 * gu2, h, c * gu2, cudaMemcpyHostToDevice, cs(stream)),
            "expert staging");
         ck(cudaMemcpyAsync(stage_ + down_at + (size_t) j0 * L.d_bytes, h + c * gu2, c * L.d_bytes,
@@ -2484,6 +2539,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     for (int i = 0; i < rr; ++i) {
         ++count_[(size_t) ids_[(size_t) i]];
         ++use_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
+        // a read's routing also counts as heat (no decay: a prompt is finite), for the staging's order while it
+        // runs (plan_ahead) and for the cache at its end (Engine::read folds it into recent_)
+        if (in_read_ && opt_.read_heat != 0 && !heat_.empty())
+            ++heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
     }
     // The CPU computes some of the routed experts outside VRAM while the others are copied: the ones the fewest
     // tokens chose, whose copy costs as much as any other's and which cost the CPU about as much as their tokens.
@@ -3191,6 +3250,8 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         k += ends;
     }
     const int n_calls = (int) calls_.size();
+    in_read_ = true;   // the batches below count their routing into heat_ (moe_rows), for the read's staging
+                       // and for the cache at the read's end
     OnCard here(device_, split_);
     cover(pos_ + n);
     // On several cards, each reads through its own layers and hands the rows on, and `turn` hears of a card's
@@ -3236,7 +3297,20 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
 
-    ck(cudaStreamSynchronize(cs(st_)), "read");
+    // A long prompt is read a chunk at a time, and the chunk before may still be running its last layers.  The
+    // card's own work needs no wait - it is ordered on st_ - and only this read's copies into r_ (rs_) must stay
+    // behind that tail: the event it left says so without the host waiting for it, and the chunk's embeddings and
+    // uploads overlap the tail instead of following it.  No event (the first read, or one that failed) or an
+    // expert swap in flight (the cache cannot change under what still reads it) drains the stream as this always
+    // did.
+    bool tail = false;
+    if (ev_tail_ && opt_.read_overlap > 0) {
+        const cudaError_t asked = cudaEventQuery((cudaEvent_t) ev_tail_);
+        if (asked != cudaSuccess && asked != cudaErrorNotReady) ck(asked, "read");
+        tail = asked == cudaErrorNotReady;
+        if (tail) ck(cudaStreamWaitEvent(cs(rs_), (cudaEvent_t) ev_tail_, 0), "read");
+    }
+    if (!tail || n_swap_ > 0) ck(cudaStreamSynchronize(cs(st_)), "read");
     if (n_swap_ > 0) follow(0);
     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row, r_bytes = r_row * sizeof(float);
     const size_t part = (size_t) std::max(streams(), draft_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
@@ -3292,6 +3366,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             if (turn && k > 0 && !(*turn)(k, turns)) {
                 if (host) ck(cudaStreamSynchronize(cs(rs_)), "read");
                 ck(cudaStreamSynchronize(cs(st_)), "read");
+                if (ev_tail_) ck(cudaEventRecord((cudaEvent_t) ev_tail_, cs(st_)), "read");
                 shared_ahead_ = false;
                 r_ = r0;
                 pos_ = pos0;
@@ -3342,14 +3417,31 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                    "the next card");
             ck(cudaStreamSynchronize(cs(st_)), "the next card");
         }
+        // What the read leaves running on st_ is its tail: the event tells the next read's copies where to stop,
+        // and is fresh even when nothing at all is behind it.
+        if (ev_tail_) ck(cudaEventRecord((cudaEvent_t) ev_tail_, cs(st_)), "read");
     } catch (...) {
         if (host) cudaStreamSynchronize(cs(rs_));
+        cudaStreamSynchronize(cs(st_));
+        if (ev_tail_) ck(cudaEventRecord((cudaEvent_t) ev_tail_, cs(st_)), "read");
         shared_ahead_ = false;
+        in_read_ = false;   // what the read counted stays counted: a read that comes again counts it anew
         r_ = r0;
         pos_ = pos0;
         throw;
     }
     shared_ahead_ = false;
+    in_read_ = false;
+    // What the read routed to warms the cache between requests - nothing moved while the prompt was read, the
+    // measurement that kept reads from counting stands: the counts fold into recent_, and follow() brings the
+    // prompt's busiest experts in over cached ones the answer uses less, at its own pace (its uploads, its
+    // stream, its gain rule).  use_ counted the routing all along; the profile the run writes knows the prompt's
+    // experts too.  --read-heat 0 leaves the counts out.
+    if (opt_.read_heat != 0 && !heat_.empty() && !recent_.empty())
+        for (size_t i = 0; i < heat_.size(); ++i) {
+            if (heat_[i] > 0) recent_[i] += (float) std::min<int64_t>(heat_[i], kSwapHeat);
+            heat_[i] = 0;
+        }
     r_ = r0;
     pos_ = pos0;
     if (next_) {

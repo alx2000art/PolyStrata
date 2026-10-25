@@ -184,6 +184,8 @@ class Config(unittest.TestCase):
             self.assertEqual(setup.poly_saved_conv([None, p]), 0)
             p.write_text(json.dumps({"args": ["--conversation-cache-mib", "4096", "--model", "m.gguf"]}))
             self.assertEqual(setup.poly_saved_conv([p]), 4096)
+            p.write_text(json.dumps({"args": ["--conversation-cache-mib", "auto", "--model", "m.gguf"]}))
+            self.assertEqual(setup.poly_saved_conv([p]), "auto")
 
 
 class Main(unittest.TestCase):
@@ -289,7 +291,7 @@ class Main(unittest.TestCase):
         self.assertEqual(args[args.index("--max-context") + 1], "32768")
         self.assertEqual(Path(args[args.index("--expert-profile") + 1]), pack / "expert-profile.txt")
         self.assertEqual(Path(args[args.index("--draft-model") + 1]), block)
-        self.assertEqual(args[args.index("--conversation-cache-mib") + 1], "8192")
+        self.assertEqual(args[args.index("--conversation-cache-mib") + 1], "auto")
         for flag in ("--pack", "--native", "--mtp", "--kv", "--vision", "--pool-workers", "--prefill"):
             self.assertNotIn(flag, args)
         self.assertEqual(cfg["model_name"], "glm-5.3-flash-3.0bit")

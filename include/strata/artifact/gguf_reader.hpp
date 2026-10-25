@@ -44,6 +44,7 @@
 #endif
 #include <windows.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -390,6 +391,35 @@ public:
         return it == meta_.end() ? nullptr : &it->second;
     }
     const uint8_t* tensor_data(const TensorInfo& t) const { return base_ + data_start_ + t.offset; }
+    /// Where the same bytes start in the file itself, for a positional read (read()).
+    uint64_t tensor_at(const TensorInfo& t) const { return data_start_ + t.offset; }
+    /// n bytes at `at` into `buf`, read by position: the file's own place is not moved (pread, or ReadFile with
+    /// an offset of its own), so any number of threads may read beside each other in the one open file.  A short
+    /// read goes round: the bytes arrive, or the file ends inside them.
+    void read(uint64_t at, void* buf, size_t n) const {
+        if (at > size_ || n > size_ - at) throw std::runtime_error(path_ + ": a read past its end");
+        uint8_t* p = (uint8_t*) buf;
+        while (n > 0) {
+            size_t got = 0;
+#ifdef _WIN32
+            OVERLAPPED ov{};
+            ov.Offset = (DWORD) (at & 0xffffffffull);
+            ov.OffsetHigh = (DWORD) (at >> 32);
+            DWORD n_read = 0;
+            if (!ReadFile((HANDLE) file_, p, (DWORD) n, &n_read, &ov) && GetLastError() != ERROR_HANDLE_EOF)
+                throw std::runtime_error("cannot read " + path_);
+            got = n_read;
+#else
+            const ssize_t r = ::pread(fd_, p, n, (off_t) at);
+            if (r < 0) throw std::runtime_error("cannot read " + path_ + ": " + std::strerror(errno));
+            got = (size_t) r;
+#endif
+            if (got == 0) throw std::runtime_error(path_ + " ends inside a read");
+            p += got;
+            at += (uint64_t) got;
+            n -= got;
+        }
+    }
 
 private:
     void open() {

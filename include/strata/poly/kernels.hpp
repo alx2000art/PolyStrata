@@ -289,10 +289,11 @@ void dsv4_squeeze(const float* ring_kv, const float* ring_score, int ring, int d
 /// the compressed rows b < (pos + t + 1) / ratio.  q: n_head * dim a token; w: n_head; keys: fp16, dim a row.  A
 /// token's scores start score_stride apart.  dim must be 128.  Throws std::invalid_argument, and
 /// std::runtime_error when the card's shared memory has no room for a token's queries.
-/// With `at`, the launch is sized for the tokens of positions below `room`.
+/// With `at`, the launch is sized for the tokens of positions below `room`.  With `mma` (the default) the scores
+/// go through the tensor cores where the card has them; 0 keeps the scalar kernel.
 void dsv4_idx_score(const float* q, const float* w, const uint16_t* keys, float* score, int score_stride, int dim,
                     int n_head, int ratio, int64_t pos, int rows, float scale, void* stream,
-                    const long long* at = nullptr, int room = 0);
+                    const long long* at = nullptr, int room = 0, int mma = 1);
 /// For each token from position pos, its compressed rows to attend, in their order: the n_top with the highest
 /// scores, the lower row first among equals, or all of them when it sees n_top or fewer.  sel_stride apart.
 void dsv4_select(const float* score, int score_stride, int32_t* sel, int sel_stride, int n_top, int ratio,
@@ -303,9 +304,18 @@ void dsv4_select(const float* score, int score_stride, int32_t* sel, int sel_str
 /// keys are fp16, dim values a row, and each key is its value too.  q: n_head * dim a token; sinks: a logit a
 /// head that takes part in the softmax with no value.  out: n_head * dim a token.  Throws std::runtime_error when
 /// a token's keys do not fit the card's shared memory.  With `at`, the launch is sized for positions below `room`.
+/// With `kq8` (codes not null) the raw cache is read as Q8_0 rather than fp16: its codes/scale pointers follow the
+/// same row index the fp16 cache would, and a block of 32 values dequantizes as
+/// `(float)codes[..] * __half2float(scales[..])`.  The fp16 path is unchanged where they are left null.
+/// The four switches behind the kernels, their defaults: `batch` takes two tokens a block, their raw windows'
+/// union staged once (0: a token a block); `group_heads` the heads attend_rows_kernel's block takes (8 as it
+/// first was, 16 the default; a pair of tokens is always 16); `q8_fast` the packed dequant of a staged q8_0 key
+/// row (0: a value at a time); `chunks` launches a batch above 65535 rows in chunks (0: the one launch of
+/// before, which that many rows fail).
 void dsv4_attend(const float* q, const uint16_t* raw, int ring, int window, const uint16_t* comp, int ratio,
                  const int32_t* sel, int sel_stride, int top, const float* sinks, float* out, int dim, int n_head,
-                 float scale, int64_t pos, int rows, void* stream, const long long* at = nullptr, int room = 0);
+                 float scale, int64_t pos, int rows, void* stream, const long long* at = nullptr, int room = 0,
+                 Kvq8 kq8 = {}, int batch = 1, int group_heads = 16, int q8_fast = 1, int chunks = 1);
 /// y[g][t] = x[t][g] for `rows` tokens of `groups` groups of n values; with back, y[t][g] = x[g][t].
 void permute_groups(const float* x, float* y, int n, int groups, int rows, bool back, void* stream);
 

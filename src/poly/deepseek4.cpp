@@ -219,7 +219,14 @@ void DeepSeek4::alloc_caches() {
     for (int il = 0; il < (int) blocks_.size(); ++il) {
         Block& B = blocks_[(size_t) il];
         if (!runs(il)) continue;
-        B.raw = (uint16_t*) seq_alloc((size_t) raw_ring_ * head_dim_ * sizeof(uint16_t), "the attention cache");
+        if (opt_.kv_format == KvFmt::kQ8_0) {
+            const size_t codes_row = (size_t) head_dim_;                            // int8
+            const size_t scales_row = (size_t) (head_dim_ / 32) * sizeof(uint16_t);  // fp16
+            B.k_codes = (int8_t*) seq_alloc((size_t) raw_ring_ * codes_row, "the attention cache");
+            B.k_scales = (uint16_t*) seq_alloc((size_t) raw_ring_ * scales_row, "the attention cache");
+        } else {
+            B.raw = (uint16_t*) seq_alloc((size_t) raw_ring_ * head_dim_ * sizeof(uint16_t), "the attention cache");
+        }
         if (!B.ratio) continue;
         // a call's rows and the ones before it that its first block reads: the block's own, and with the overlap
         // the block before
@@ -336,7 +343,12 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
         for (int i = 0; i < n; ++i) {
             const int s = rows[i].seq;
             Block one = B;
-            one.raw = (uint16_t*) seq_buf(s, B.raw);
+            if (opt_.kv_format == KvFmt::kQ8_0) {
+                one.k_codes = (int8_t*) seq_buf(s, B.k_codes);
+                one.k_scales = (uint16_t*) seq_buf(s, B.k_scales);
+            } else {
+                one.raw = (uint16_t*) seq_buf(s, B.raw);
+            }
             if (B.rows) one.rows = (uint16_t*) seq_buf(s, B.rows);
             if (B.keys) one.keys = (uint16_t*) seq_buf(s, B.keys);
             for (Squeeze* S : {&one.comp, &one.idx})
@@ -370,11 +382,21 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
     rms_norm(kv_, fp(B.kv_norm), kv_, dim, n, rms_eps_, st_);
     dsv4_rope(kv_, kv_, dim, 1, off, n_rot_, B.rope, pos, 1, n, false, 0.f, false, st_, at);
     if (at) {
-        store_f16_at(kv_, B.raw, dim, at, n, raw_ring_, st_);
+        if (opt_.kv_format == KvFmt::kQ8_0) {
+            store_q8_at(kv_, B.k_codes, B.k_scales, dim, at, n, raw_ring_, st_);
+        } else {
+            store_f16_at(kv_, B.raw, dim, at, n, raw_ring_, st_);
+        }
     } else {
-        const int row = (int) (pos % raw_ring_), head = std::min(n, raw_ring_ - row);
-        store_f16(kv_, B.raw, dim, row, head, st_);
-        if (head < n) store_f16(kv_ + (size_t) head * dim, B.raw, dim, 0, n - head, st_);
+        if (opt_.kv_format == KvFmt::kQ8_0) {
+            const int row = (int) (pos % raw_ring_), head = std::min(n, raw_ring_ - row);
+            store_q8(kv_, B.k_codes, B.k_scales, dim, row, head, st_);
+            if (head < n) store_q8(kv_ + (size_t) head * dim, B.k_codes, B.k_scales, dim, 0, n - head, st_);
+        } else {
+            const int row = (int) (pos % raw_ring_), head = std::min(n, raw_ring_ - row);
+            store_f16(kv_, B.raw, dim, row, head, st_);
+            if (head < n) store_f16(kv_ + (size_t) head * dim, B.raw, dim, 0, n - head, st_);
+        }
     }
 
     // The compressed rows the tokens finish are there before they attend: a token reads its own block's.
@@ -394,15 +416,20 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
             const long long* at_t = at ? at + 2 * t : nullptr;
             if (at || (pos + t + c) / 4 > idx_top_k_)
                 dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys, score_,
-                               score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, st_, at_t, sized);
+                               score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, st_, at_t, sized,
+                               opt_.idx_mma);
             dsv4_select(score_, score_stride_, sel_ + (size_t) t * idx_top_k_, idx_top_k_, idx_top_k_, 4, pos + t, c,
                         st_, at_t);
         }
         dsv4_attend(q_, B.raw, raw_ring_, window_, B.rows, 4, sel_, idx_top_k_, idx_top_k_, fp(B.sinks), att_, dim,
-                    n_head_, scale, pos, n, st_, at, sized);
+                    n_head_, scale, pos, n, st_, at, sized,
+                    opt_.kv_format == KvFmt::kQ8_0 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
+                    opt_.attend_batch, opt_.group_heads, opt_.q8_dequant, opt_.attend_chunks);
     } else {
         dsv4_attend(q_, B.raw, raw_ring_, window_, B.ratio ? B.rows : nullptr, std::max(B.ratio, 1), nullptr, 0, 0,
-                    fp(B.sinks), att_, dim, n_head_, scale, pos, n, st_, at, sized);
+                    fp(B.sinks), att_, dim, n_head_, scale, pos, n, st_, at, sized,
+                    opt_.kv_format == KvFmt::kQ8_0 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
+                    opt_.attend_batch, opt_.group_heads, opt_.q8_dequant, opt_.attend_chunks);
     }
     dsv4_rope(att_, att_, dim, n_head_, off, n_rot_, B.rope, pos, 1, n, false, 0.f, true, st_, at);
     out_proj(B, n);
@@ -484,8 +511,10 @@ int DeepSeek4::keep_rows(const Block& B) const { return B.ratio == 4 ? 2 * B.rat
 
 // A layer's part of a state: the window's rows, and its compressors' rows of the blocks not done yet.
 size_t DeepSeek4::layer_extra(const Block& B) const {
-    if (!B.raw) return 0;   // another card's layer
-    size_t b = (size_t) window_ * head_dim_ * sizeof(uint16_t);
+    if (!B.raw && !B.k_codes) return 0;   // another card's layer
+    size_t b = (opt_.kv_format == KvFmt::kQ8_0)
+                   ? (size_t) window_ * ((size_t) head_dim_ + (size_t) (head_dim_ / 32) * sizeof(uint16_t))
+                   : (size_t) window_ * head_dim_ * sizeof(uint16_t);
     for (const Squeeze* S : {&B.comp, &B.idx})
         if (S->dim) b += (size_t) keep_rows(B) * S->width * 2 * sizeof(float);
     return b;
@@ -503,15 +532,32 @@ void DeepSeek4::save_layer(int il, int64_t pos, uint8_t* dst) {
     dst += state_n_ * sizeof(float);
     for (int j = 0; j < il; ++j) dst += layer_extra(blocks_[(size_t) j]);
     const Block& B = blocks_[(size_t) il];
-    if (!B.raw) return;
-    const size_t raw_row = (size_t) head_dim_ * sizeof(uint16_t);
+    if (!B.raw && !B.k_codes) return;
     std::memset(dst, 0, layer_extra(B));
-    ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
-        ck(cudaMemcpy(dst + slot * raw_row, (const uint8_t*) B.raw + at * raw_row, m * raw_row,
-                      cudaMemcpyDeviceToHost),
-           "save state");
-    });
-    dst += (size_t) window_ * raw_row;
+    if (opt_.kv_format == KvFmt::kQ8_0) {
+        const size_t crow = (size_t) head_dim_;
+        const size_t srow = (size_t) (head_dim_ / 32) * sizeof(uint16_t);
+        ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
+            ck(cudaMemcpy(dst + slot * crow, (const uint8_t*) B.k_codes + at * crow, m * crow,
+                          cudaMemcpyDeviceToHost),
+               "save state");
+        });
+        dst += (size_t) window_ * crow;
+        ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
+            ck(cudaMemcpy(dst + slot * srow, (const uint8_t*) B.k_scales + at * srow, m * srow,
+                          cudaMemcpyDeviceToHost),
+               "save state");
+        });
+        dst += (size_t) window_ * srow;
+    } else {
+        const size_t raw_row = (size_t) head_dim_ * sizeof(uint16_t);
+        ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
+            ck(cudaMemcpy(dst + slot * raw_row, (const uint8_t*) B.raw + at * raw_row, m * raw_row,
+                          cudaMemcpyDeviceToHost),
+               "save state");
+        });
+        dst += (size_t) window_ * raw_row;
+    }
     for (const Squeeze* S : {&B.comp, &B.idx}) {
         if (!S->dim) continue;
         const size_t row = (size_t) S->width * sizeof(float);
@@ -526,14 +572,29 @@ void DeepSeek4::save_layer(int il, int64_t pos, uint8_t* dst) {
 }
 
 void DeepSeek4::load_extra(const uint8_t* src, int64_t pos) {
-    const size_t raw_row = (size_t) head_dim_ * sizeof(uint16_t);
     for (const Block& B : blocks_) {
-        if (!B.raw) continue;
-        ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
-            ck(cudaMemcpy((uint8_t*) B.raw + at * raw_row, src + slot * raw_row, m * raw_row, cudaMemcpyHostToDevice),
-               "load state");
-        });
-        src += (size_t) window_ * raw_row;
+        if (!B.raw && !B.k_codes) continue;
+        if (opt_.kv_format == KvFmt::kQ8_0) {
+            const size_t crow = (size_t) head_dim_;
+            const size_t srow = (size_t) (head_dim_ / 32) * sizeof(uint16_t);
+            ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
+                ck(cudaMemcpy((uint8_t*) B.k_codes + at * crow, src + slot * crow, m * crow, cudaMemcpyHostToDevice),
+                   "load state");
+            });
+            src += (size_t) window_ * crow;
+            ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
+                ck(cudaMemcpy((uint8_t*) B.k_scales + at * srow, src + slot * srow, m * srow, cudaMemcpyHostToDevice),
+                   "load state");
+            });
+            src += (size_t) window_ * srow;
+        } else {
+            const size_t raw_row = (size_t) head_dim_ * sizeof(uint16_t);
+            ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
+                ck(cudaMemcpy((uint8_t*) B.raw + at * raw_row, src + slot * raw_row, m * raw_row, cudaMemcpyHostToDevice),
+                   "load state");
+            });
+            src += (size_t) window_ * raw_row;
+        }
         for (const Squeeze* S : {&B.comp, &B.idx}) {
             if (!S->dim) continue;
             const size_t row = (size_t) S->width * sizeof(float);
@@ -553,7 +614,8 @@ void DeepSeek4::load_extra(const uint8_t* src, int64_t pos) {
 size_t DeepSeek4::card_row_bytes() const {
     size_t b = 0;
     for (const Block& B : blocks_) {
-        if (!B.raw || !B.ratio) continue;
+        if (!B.raw && !B.k_codes) continue;   // another card's layer
+        if (!B.ratio) continue;
         b += (size_t) head_dim_ * sizeof(uint16_t);
         if (B.ratio == 4) b += (size_t) idx_dim_ * sizeof(uint16_t);
     }
@@ -565,7 +627,7 @@ void DeepSeek4::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
         throw std::logic_error("save_rows: the rows are outside the context");
     ck(cudaStreamSynchronize(cs(st_)), "save rows");
     for (const Block& B : blocks_) {
-        if (!B.raw || !B.ratio || n == 0) continue;
+        if ((!B.raw && !B.k_codes) || !B.ratio || n == 0) continue;
         const int64_t r = B.ratio, b0 = (first + r) / r - 1, b1 = (first + n) / r;   // the blocks these rows end
         for (const auto& [cache, width] :
              {std::pair{(const uint16_t*) B.rows, head_dim_}, std::pair{(const uint16_t*) B.keys, idx_dim_}}) {
@@ -588,7 +650,7 @@ void DeepSeek4::load_card_rows(const uint8_t* src, int64_t from, int64_t count, 
     cover(first + n);
     ck(cudaStreamSynchronize(cs(st_)), "load rows");
     for (const Block& B : blocks_) {
-        if (!B.raw || !B.ratio) continue;
+        if ((!B.raw && !B.k_codes) || !B.ratio) continue;
         const int64_t r = B.ratio, b0 = (first + r) / r - 1, b1 = (first + n) / r;
         for (const auto& [cache, width] : {std::pair{B.rows, head_dim_}, std::pair{B.keys, idx_dim_}}) {
             if (!cache) continue;

@@ -29,6 +29,7 @@
 namespace strata {
 struct TensorInfo;
 struct MetaValue;
+class GgufFile;
 }
 
 namespace strata::poly {
@@ -62,6 +63,27 @@ struct Options {
                                   ///< read of several calls and this many tokens every call does; 0: never.  Under
                                   ///< it a call copies only the experts it routes to, which with 8 GB of VRAM was
                                   ///< the faster of the two up to about 1,000 tokens
+    int read_overlap = 1;         ///< a prompt read in several Engine::read() chunks: the next chunk's host work
+                                  ///< and uploads overlap the chunk before's last layers by an event, instead of
+                                  ///< the card draining between chunks (--read-overlap); 0: drain as before
+    bool file_reads = true;       ///< routed experts come out of their file by position (pread, ReadFile) into
+                                  ///< the pinned buffers, and not through the mapped file, where a page the cache
+                                  ///< lacks arrives a fault at a time; map_pages() keeps warming what RAM holds
+                                  ///< beside it (--file-reads 0: copies through the mapping, as before)
+    int read_heat = 1;            ///< a read's routing counts while it runs and warms the cache at its end:
+                                  ///< the staging buffer holds what this prompt reads most (plan_ahead), and
+                                  ///< follow() brings its busiest experts in over cached ones the answer uses
+                                  ///< less (--read-heat 0: the counts leave the cache alone, as before)
+    int attend_batch = 1;         ///< DeepSeek V4's attention takes two tokens a block, the two raw windows' union
+                                  ///< staged once (--attend-batch); 0: a token a block
+    int group_heads = 16;         ///< the heads attend_rows_kernel's block takes: 16, or 8 as the kernel first
+                                  ///< was (--group-heads; a pair of tokens is always 16)
+    int q8_dequant = 1;           ///< with --kv q8_0: the packed half2 dequant of a staged key row; 0: a value
+                                  ///< at a time, the row's scale fetched for each
+    int attend_chunks = 1;        ///< a batch above 65535 rows is attended in launches of that many; 0: one
+                                  ///< launch, as before, which that many rows fail
+    int idx_mma = 1;              ///< the indexer's scores on the tensor cores where the card has them; 0: the
+                                  ///< scalar kernel
     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
                                   ///< computes while the others are copied: the ones the fewest tokens chose;
                                   ///< below 0: as the two took the time between them; 0: none
@@ -121,6 +143,13 @@ struct Layer {
     size_t gu_bytes = 0, d_bytes = 0;  ///< one expert's gate (or up), and its down
     size_t gu_stride = 0;              ///< from an expert's gate to the next one's: twice gu_bytes in a file that
                                        ///< keeps an expert's gate and up in one tensor
+    // The same three tensors by position in their shard files, for reading an expert out of its file
+    // (GgufFile::read) in place of a copy through the mapping: which file each is in, and where it starts.  Gate
+    // and up of one tensor share a file, up at gu_at + gu_bytes.
+    const GgufFile* gu_file = nullptr;
+    const GgufFile* up_file = nullptr;
+    const GgufFile* d_file = nullptr;
+    uint64_t gu_at = 0, up_at = 0, d_at = 0;
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
     size_t slot_bytes = 0;             ///< from a slot of the layer to the one behind it: whole blocks of both types
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
@@ -577,6 +606,9 @@ protected:
     void* rs_ = nullptr;      ///< the stream of those copies
     void* ev_in_[2] = {};     ///< marks a call's rows in each half of r_
     void* ev_out_[2] = {};    ///< marks the card done with a call in each half
+    void* ev_tail_ = nullptr; ///< read(): marks the end of a read's work on st_.  The next read's copies (rs_) wait
+                              ///< for it instead of the stream draining, so a long prompt's chunks overlap: the
+                              ///< host work and uploads of one run beside the last layers of the chunk before
     float rms_eps_ = 0;
     bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
@@ -749,6 +781,10 @@ protected:
     std::vector<Image> images_;          ///< the sequence's pictures, by row
     uint64_t images_set_ = 0;            ///< counts images(): what was derived from an earlier list is stale
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
+    std::vector<int64_t> heat_;          ///< what the read under way has routed to, a count each (moe_rows);
+                                         ///< folded into recent_ and cleared at the read's end (Engine::read)
+    bool in_read_ = false;               ///< a read() is running: its prompt batches count their routing into
+                                         ///< heat_ (nothing else counts there; use_ counts every path)
     Stats stats_;
 };
 

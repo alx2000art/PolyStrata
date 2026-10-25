@@ -281,6 +281,8 @@ int main() {
     bad += test_attend(false, 128, 40, 12, 40);
     bad += test_attend(true, 4, 40, 12, 40);
     bad += test_attend(false, 4, 40, 12, 40);
+    bad += test_attend(true, 4, 41, 12, 40);   // an odd batch: its last block attends one token, its pair's second
+                                               // past the batch's end
     bad += test_index();
     if (cudaGetLastError() != cudaSuccess) {
         std::printf("CUDA error\n");
