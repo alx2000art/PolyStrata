@@ -164,8 +164,9 @@ int test_squeeze(bool overlap, int ratio, int dim) {
     return bad;
 }
 
-// rows from GROUP_ROWS (32) take the batch kernel; 12 heads leave its second group of 8 short
-int test_attend(bool with_sel, int ratio, int rows, int heads, int window) {
+// rows from GROUP_ROWS (32) take the batch kernel; 12 heads leave its second group of 8 short.  batch 0 (with
+// heads a multiple of GROUP_HEADS) takes the tensor-core rows kernel
+int test_attend(bool with_sel, int ratio, int rows, int heads, int window, int batch = 1) {
     const int dim = 512, top = 6;
     const int64_t pos = 60;
     const int ring = window + rows, n_comp = (int) ((pos + rows) / ratio);
@@ -181,8 +182,18 @@ int test_attend(bool with_sel, int ratio, int rows, int heads, int window) {
     std::vector<float> zo((size_t) rows * heads * dim);
     float* d_out = dev(zo);
     dsv4_attend(d_q, d_raw, ring, window, d_comp, ratio, with_sel ? d_sel : nullptr, top, top, d_s, d_out, dim, heads,
-                0.04f, pos, rows, nullptr);
+                0.04f, pos, rows, nullptr, nullptr, 0, Kvq8{}, batch, 16, 1, 1);
     auto got = host(d_out, zo.size());
+    // the same input once through the classic token-a-block kernel, where batch 0 lands on it: a head count that
+    // is not a multiple of GROUP_HEADS (16) takes the fallback, so only those cases get the second run
+    const bool classic = heads % 16 != 0;
+    std::vector<float> got_rows;
+    if (classic) {
+        cudaMemset(d_out, 0, zo.size() * sizeof(float));
+        dsv4_attend(d_q, d_raw, ring, window, d_comp, ratio, with_sel ? d_sel : nullptr, top, top, d_s, d_out, dim,
+                    heads, 0.04f, pos, rows, nullptr, nullptr, 0, Kvq8{}, 0, 16, 1, 1);
+        got_rows = host(d_out, zo.size());
+    }
     std::vector<float> want(zo.size());
     for (int t = 0; t < rows; ++t) {
         const int64_t p = pos + t;
@@ -212,9 +223,57 @@ int test_attend(bool with_sel, int ratio, int rows, int heads, int window) {
             }
         }
     }
+    // the first places the engine and the reference differ, for a kernel being chased: t's parity tells the
+    // pair's half, h a head band, i a value band
+    const auto first_diffs = [&](const char* tag, const std::vector<float>& g) {
+        int shown = 0;
+        for (int t = 0; t < rows && shown < 6; ++t)
+            for (int h = 0; h < heads && shown < 6; ++h)
+                for (int i = 0; i < dim && shown < 6; ++i) {
+                    const size_t k = ((size_t) t * heads + h) * dim + (size_t) i;
+                    if (std::abs((double) g[k] - want[k]) > 2e-3 * (1.0 + std::abs((double) want[k]))) {
+                        std::printf("  %s diff: t=%d h=%d i=%d got=%+.4f want=%+.4f\n", tag, t, h, i, g[k], want[k]);
+                        ++shown;
+                    }
+                }
+    };
+    first_diffs(batch ? "pair" : "mma", got);
+    if (classic) first_diffs("rows", got_rows);
+    {   // the worst place, for a kernel being chased: its t/h/i says the error's geometry
+        int wt = 0, wh = 0, wi = 0;
+        double worst = 0;
+        for (int t = 0; t < rows; ++t)
+            for (int h = 0; h < heads; ++h)
+                for (int i = 0; i < dim; ++i) {
+                    const size_t k = ((size_t) t * heads + h) * dim + (size_t) i;
+                    const double e = std::abs((double) got[k] - want[k]);
+                    if (e > worst) { worst = e; wt = t; wh = h; wi = i; }
+                }
+        if (worst > 2e-3)
+            std::printf("  %s worst: t=%d h=%d i=%d got=%+.4f want=%+.4f\n", batch ? "pair" : "mma",
+                        wt, wh, wi, got[((size_t) wt * heads + wh) * dim + (size_t) wi],
+                        want[((size_t) wt * heads + wh) * dim + (size_t) wi]);
+    }
     char what[64];
-    std::snprintf(what, sizeof what, "attend ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
-    const int bad = report(what, got, want, 1e-3);
+    int bad;
+    if (batch) {
+        std::snprintf(what, sizeof what, "attend ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
+        bad = report(what, got, want, 1e-3);
+    } else {
+        // the mma path keeps the probabilities and the queries as halves (fdec's class): outputs that cancel to
+        // near zero carry an absolute error of up to ~1e-3 no per-value relative bound can hold, so it is judged
+        // by the absolute error alone
+        std::snprintf(what, sizeof what, "attend mma ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
+        double worst_abs = 0;
+        for (size_t k = 0; k < zo.size(); ++k) worst_abs = std::max(worst_abs, std::abs((double) got[k] - want[k]));
+        std::printf("%-34s %d values, worst abs %.2g: %s\n", what, (int) zo.size(), worst_abs,
+                    worst_abs <= 3e-3 ? "ok" : "FAIL");
+        bad = worst_abs <= 3e-3 ? 0 : 1;
+    }
+    if (classic) {
+        std::snprintf(what, sizeof what, "attend rows ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
+        bad += report(what, got_rows, want, 1e-3);
+    }
     for (void* p : {(void*) d_q, (void*) d_s, (void*) d_raw, (void*) d_comp, (void*) d_sel, (void*) d_out}) cudaFree(p);
     return bad;
 }
@@ -232,10 +291,14 @@ int test_index() {
     float* d_s = dev(zs);
     std::vector<int32_t> zsel((size_t) rows * top);
     int32_t* d_sel = dev(zsel);
-    dsv4_idx_score(d_q, d_w, d_k, d_s, stride, dim, heads, ratio, pos, rows, 0.01f, nullptr);
+    dsv4_idx_score(d_q, d_w, d_k, d_s, stride, dim, heads, ratio, pos, rows, 0.01f, nullptr, 0, 0);
     dsv4_select(d_s, stride, d_sel, top, top, ratio, pos, rows, nullptr);
     auto got = host(d_s, zs.size());
     auto sel = host(d_sel, zsel.size());
+    // the same scores once through the tensor-core kernel: its queries are halves (fdec's class), so its sums
+    // carry a relative error of up to ~1e-2 where the float reference cancels, and it is judged at 2e-2
+    dsv4_idx_score(d_q, d_w, d_k, d_s, stride, dim, heads, ratio, pos, rows, 0.01f, nullptr, 0, 1);
+    auto got_mma = host(d_s, zs.size());
     std::vector<float> g, want;
     int bad = 0;
     for (int t = 0; t < rows; ++t) {
@@ -264,6 +327,12 @@ int test_index() {
     bad = bad ? 1 : 0;
     std::printf("%-34s %d tokens: %s\n", "indexer pick", rows, bad ? "FAIL" : "ok");
     bad += report("indexer scores", g, want, 1e-3);
+    std::vector<float> gm;
+    for (int t = 0; t < rows; ++t)
+        for (int b = 0; b < (int) ((pos + t + 1) / ratio); ++b)
+            gm.push_back(got_mma[(size_t) t * stride + b]);
+    // its queries are halves (fdec's class): ~1e-2 where the float reference cancels, judged at 2e-2
+    bad += report("indexer scores mma", gm, want, 2e-2);
     for (void* p : {(void*) d_q, (void*) d_w, (void*) d_k, (void*) d_s, (void*) d_sel}) cudaFree(p);
     return bad;
 }
@@ -283,6 +352,8 @@ int main() {
     bad += test_attend(false, 4, 40, 12, 40);
     bad += test_attend(true, 4, 41, 12, 40);   // an odd batch: its last block attends one token, its pair's second
                                                // past the batch's end
+    bad += test_attend(true, 4, 40, 16, 40, 0);    // the tensor-core rows kernel: the heads on the mma's M tile
+    bad += test_attend(false, 128, 40, 32, 40, 0);
     bad += test_index();
     if (cudaGetLastError() != cudaSuccess) {
         std::printf("CUDA error\n");

@@ -31,7 +31,10 @@ constexpr int GROUP_DIM = 512;      // the longest head it takes
 constexpr int ATTEND_BATCH = 2;     // attend_batch_kernel: the tokens a block attends together, a warp keeping a
                                     // head of each; one staged key row serves both tokens before it is dropped
 constexpr int BATCH_KEYS = GROUP_KEYS + ATTEND_BATCH - 1;   // a round of staging: the union of their raw windows,
-                                                             // one key longer than a window when both are full
+                                                            // one key longer than a window when both are full
+constexpr int PAIR_PROBS = 2 * WARP;   // a pair warp's probability slot: two keys a lane scores, its e[0] at
+                                       // [lane] and e[1] at [WARP + lane] - 64 floats, not BATCH_KEYS, or the
+                                       // lanes' second keys spill into the warp behind
 
 cudaStream_t cs(void* s) { return (cudaStream_t) s; }
 int grid(int n, int b) { return (n + b - 1) / b; }
@@ -655,6 +658,239 @@ __global__ void attend_rows_kernel(const float* __restrict__ q, const uint16_t* 
         }
 }
 
+#if !defined(GGML_USE_HIP)
+
+// Two helpers of fdec_kernel (fattn.cu): a q8_0 code pair as exact halves, and a half2 scaled in place.
+__device__ __forceinline__ uint32_t i8pair(uint32_t w, uint32_t sel) {
+    uint32_t x = __byte_perm(w, 0x64646464u, sel);
+    half2 h = __hsub2(*reinterpret_cast<half2*>(&x), __float2half2_rn(1152.0f));
+    return *reinterpret_cast<uint32_t*>(&h);
+}
+
+__device__ __forceinline__ uint32_t mul2(uint32_t x, half2 s) {
+    half2 h = __hmul2(*reinterpret_cast<half2*>(&x), s);
+    return *reinterpret_cast<uint32_t*>(&h);
+}
+
+__device__ __forceinline__ uint32_t word_of(const uint4& v, int i) {
+    return i < 2 ? (i == 0 ? v.x : v.y) : (i == 2 ? v.z : v.w);
+}
+
+__device__ __forceinline__ uint4 widen2(uint2 v) { return make_uint4(v.x, v.y, 0u, 0u); }
+
+// attend_rows_kernel on the tensor cores, fdec_kernel's mechanics over a prompt batch (fattn.cu): a block keeps
+// GROUP_HEADS heads of one token - the mma's M tile, the heads share the keys, this attention is MQA - and a warp
+// scores 8 of the 64 keys a phase takes: S = Q K^T, mma m16n8k16, the q8 codes exact as halves with each
+// 32-value block's scale applied to its sum in floats, the fp16 rows as they lie.  The softmax goes per head
+// through red[] across the warps, and O += P V with P as halves of the shared memory and V of the warp's own
+// dimensions read straight from the caches, a raw q8 key's values unpacking by i8pair with the block's scale as
+// mul2 on the way.  A key is read once a block, so the keys are not staged at all: the shared memory holds the
+// queries (halves), the probabilities and the reductions, about 20 KiB against attend_rows_kernel's 67.
+template <int DIM>
+__global__ void __launch_bounds__(8 * WARP)
+attend_rows_mma_kernel(const float* __restrict__ q, const uint16_t* __restrict__ raw, int ring, int window,
+                       const uint16_t* __restrict__ comp, int ratio, const int32_t* __restrict__ sel,
+                       int sel_stride, int top, const float* __restrict__ sinks, float* __restrict__ out,
+                       int n_head, float scale, long long pos, const long long* at,
+                       const int8_t* k_codes, const uint16_t* k_scales) {
+    constexpr int QS = GROUP_DIM + 8, PS = 64 + 8, NW = 8, DW = DIM / NW;
+    extern __shared__ float smem[];
+    half* sq = reinterpret_cast<half*>(smem);                  // GROUP_HEADS * QS queries, halves
+    half* sp = reinterpret_cast<half*>(sq + GROUP_HEADS * QS); // GROUP_HEADS * PS probabilities
+    float* red = reinterpret_cast<float*>(sp + GROUP_HEADS * PS);   // 2 * NW * GROUP_HEADS: max, sum a phase
+    const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP, g8 = lane / 4, t4 = lane % 4;
+    const int h0 = blockIdx.x * GROUP_HEADS, t = blockIdx.y;
+    const long long p = position(at, pos, 1, t);
+    const int n_raw = (int) min((long long) window, p + 1);
+    const long long first_raw = p + 1 - n_raw;
+    int n_comp = 0;
+    if (comp) {
+        const long long visible = (p + 1) / ratio;
+        n_comp = sel ? (int) min(visible, (long long) top) : (int) visible;
+    }
+    const int n_key = n_raw + n_comp;
+    const bool q8 = k_codes != nullptr;
+    for (int i = threadIdx.x; i < GROUP_HEADS * DIM; i += blockDim.x) {
+        const int hh = i / DIM, d = i % DIM, h = h0 + hh;
+        sq[hh * QS + d] = __float2half(h < n_head ? q[(size_t(t) * n_head + h) * DIM + d] : 0.f);
+    }
+    float o[NW][4] = {};                     // this warp's DW values; o[j][2r + c] is row g8 + 8r, c-th of the tile
+    float m[2], l[2] = {1.f, 1.f};           // the two rows (heads) this lane keeps
+    #pragma unroll
+    for (int r = 0; r < 2; ++r) m[r] = h0 + g8 + 8 * r < n_head ? sinks[h0 + g8 + 8 * r] : 0.f;
+    __syncthreads();
+    for (int k0 = 0; k0 < n_key; k0 += 64) {
+        const int nk = min(64, n_key - k0);
+        float s[4] = {0.f, 0.f, 0.f, 0.f};
+        for (int b = 0; b < DIM / 32; ++b) {
+            float c[2][4] = {};
+            const int key = k0 + 8 * w + g8;   // this lane's key
+            #pragma unroll
+            for (int hh = 0; hh < 2; ++hh) {
+                const int d = 32 * b + 8 * t4 + 4 * hh;
+                const uint2 lo = *reinterpret_cast<const uint2*>(&sq[g8 * QS + d]);
+                const uint2 hi = *reinterpret_cast<const uint2*>(&sq[(g8 + 8) * QS + d]);
+                const uint32_t a[4] = {lo.x, hi.x, lo.y, hi.y};
+                uint32_t b0 = 0, b1 = 0;
+                if (key < nk) {
+                    if (key < n_raw && q8) {
+                        const uint2 w8 = *reinterpret_cast<const uint2*>(k_codes + (size_t) ((first_raw + key) % ring) * DIM + 32 * b + 8 * t4);
+                        const uint32_t word = (hh ? w8.y : w8.x) ^ 0x80808080u;
+                        b0 = i8pair(word, 0x4140); b1 = i8pair(word, 0x4342);
+                    } else if (key < n_raw) {
+                        const uint4 v = *reinterpret_cast<const uint4*>(raw + (size_t) ((first_raw + key) % ring) * DIM + 32 * b + 8 * t4);
+                        b0 = hh ? v.z : v.x; b1 = hh ? v.w : v.y;
+                    } else {
+                        const int r = sel ? sel[size_t(t) * sel_stride + key - n_raw] : key - n_raw;
+                        const uint4 v = *reinterpret_cast<const uint4*>(comp + (size_t) r * DIM + 32 * b + 8 * t4);
+                        b0 = hh ? v.z : v.x; b1 = hh ? v.w : v.y;
+                    }
+                }
+                mma16816(c[hh], a, b0, b1);
+            }
+            float sc[2] = {1.f, 1.f};   // the two columns' keys' scales of this 32-value block
+            if (q8) {
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    const int key = k0 + 8 * w + 2 * t4 + j;
+                    if (key < n_raw) sc[j] = __half2float(__ushort_as_half(k_scales[(size_t) ((first_raw + key) % ring) * (DIM / 32) + b]));
+                }
+            }
+            // the C fragment is c[hh][0] = row g8, col 2t4; c[hh][1] = row g8, col 2t4+1; c[hh][2] = row g8+8,
+            // col 2t4; c[hh][3] = row g8+8, col 2t4+1 - the row lives in the second index's high bit, hh is the
+            // dimension half, so a head's score adds the two halves of the SAME (row, column)
+            s[0] += (c[0][0] + c[1][0]) * sc[0];   // head g8,   key 2t4
+            s[1] += (c[0][1] + c[1][1]) * sc[1];   // head g8,   key 2t4+1
+            s[2] += (c[0][2] + c[1][2]) * sc[0];   // head g8+8, key 2t4
+            s[3] += (c[0][3] + c[1][3]) * sc[1];   // head g8+8, key 2t4+1
+        }
+        // the phase's max per head over the eight warps, the probabilities, the rescale.  The masks are the lane's
+        // two keys in the whole phase (8w + 2t4, +1), not the tile's column: a warp past nk scores no keys, and a
+        // column-only mask would let exp(0 - top) of its zero scores into the sum
+        const int kc = 8 * w + 2 * t4;
+        float mx[2];
+        #pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            float x = fmaxf(kc < nk ? s[2 * r] * scale : -INFINITY,
+                            kc + 1 < nk ? s[2 * r + 1] * scale : -INFINITY);
+            x = fmaxf(x, __shfl_xor_sync(0xffffffffu, x, 1));
+            mx[r] = fmaxf(x, __shfl_xor_sync(0xffffffffu, x, 2));
+        }
+        if (t4 == 0) {
+            red[w * GROUP_HEADS + g8] = mx[0];
+            red[w * GROUP_HEADS + g8 + 8] = mx[1];
+        }
+        __syncthreads();
+        float alpha[2], top[2];
+        #pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const int row = g8 + 8 * r;
+            float tp = m[r];
+            for (int k = 0; k < NW; ++k) tp = fmaxf(tp, red[k * GROUP_HEADS + row]);
+            top[r] = tp;
+            alpha[r] = tp == -INFINITY ? 1.f : expf(m[r] - tp);
+            m[r] = tp;
+        }
+        float sum[2] = {0.f, 0.f};
+        #pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const int row = g8 + 8 * r;
+            const float x0 = kc < nk ? expf(s[2 * r] * scale - top[r]) : 0.f;
+            const float x1 = kc + 1 < nk ? expf(s[2 * r + 1] * scale - top[r]) : 0.f;
+            *reinterpret_cast<half2*>(&sp[row * PS + 8 * w + 2 * t4]) = __floats2half2_rn(x0, x1);
+            sum[r] = x0 + x1;
+            #pragma unroll
+            for (int j = 0; j < NW; ++j) { o[j][2 * r] *= alpha[r]; o[j][2 * r + 1] *= alpha[r]; }
+        }
+        sum[0] += __shfl_xor_sync(0xffffffffu, sum[0], 1);
+        sum[0] += __shfl_xor_sync(0xffffffffu, sum[0], 2);
+        sum[1] += __shfl_xor_sync(0xffffffffu, sum[1], 1);
+        sum[1] += __shfl_xor_sync(0xffffffffu, sum[1], 2);
+        if (t4 == 0) {
+            red[NW * GROUP_HEADS + w * GROUP_HEADS + g8] = sum[0];
+            red[NW * GROUP_HEADS + w * GROUP_HEADS + g8 + 8] = sum[1];
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const int row = g8 + 8 * r;
+            float sum = 0.f;
+            for (int k = 0; k < NW; ++k) sum += red[NW * GROUP_HEADS + k * GROUP_HEADS + row];
+            l[r] = l[r] * alpha[r] + sum;
+        }
+        // O += P V: k-step kk is phase keys 16 kk.., n-tile j is dimension DW * w + 8 * g8 + j; the raw q8 keys'
+        // values unpack by i8pair with their block's scale as mul2, the fp16 rows as they lie
+        #pragma unroll
+        for (int kk = 0; kk < 4; ++kk) {
+            const half* pp = &sp[g8 * PS + 16 * kk + 2 * t4];
+            const uint32_t a[4] = {*reinterpret_cast<const uint32_t*>(pp),
+                                   *reinterpret_cast<const uint32_t*>(pp + 8 * PS),
+                                   *reinterpret_cast<const uint32_t*>(pp + 8),
+                                   *reinterpret_cast<const uint32_t*>(pp + 8 * PS + 8)};
+            uint4 vx[4];
+            uint16_t vsc[4];
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int key = k0 + 16 * kk + 2 * t4 + (i & 1) + 8 * (i >> 1);
+                vx[i] = make_uint4(0u, 0u, 0u, 0u); vsc[i] = 0x3c00;   // half 1
+                if (key < nk) {
+                    if (key < n_raw && q8) {
+                        vx[i] = widen2(*reinterpret_cast<const uint2*>(k_codes + (size_t) ((first_raw + key) % ring) * DIM + DW * w + 8 * g8));
+                        vsc[i] = k_scales[(size_t) ((first_raw + key) % ring) * (DIM / 32) + (DW * w + 8 * g8) / 32];
+                    } else if (key < n_raw) {
+                        vx[i] = *reinterpret_cast<const uint4*>(raw + (size_t) ((first_raw + key) % ring) * DIM + DW * w + 8 * g8);
+                    } else {
+                        const int r = sel ? sel[size_t(t) * sel_stride + key - n_raw] : key - n_raw;
+                        vx[i] = *reinterpret_cast<const uint4*>(comp + (size_t) r * DIM + DW * w + 8 * g8);
+                    }
+                }
+            }
+            if (q8) {
+                const half2 s01 = __halves2half2(__ushort_as_half(vsc[0]), __ushort_as_half(vsc[1]));
+                const half2 s89 = __halves2half2(__ushort_as_half(vsc[2]), __ushort_as_half(vsc[3]));
+                #pragma unroll
+                for (int wd = 0; wd < 2; ++wd) {
+                    const uint32_t x0 = (wd ? vx[0].y : vx[0].x) ^ 0x80808080u;
+                    const uint32_t x1 = (wd ? vx[1].y : vx[1].x) ^ 0x80808080u;
+                    const uint32_t x2 = (wd ? vx[2].y : vx[2].x) ^ 0x80808080u;
+                    const uint32_t x3 = (wd ? vx[3].y : vx[3].x) ^ 0x80808080u;
+                    const uint32_t lo01 = __byte_perm(x0, x1, 0x5140), hi01 = __byte_perm(x0, x1, 0x7362);
+                    const uint32_t lo89 = __byte_perm(x2, x3, 0x5140), hi89 = __byte_perm(x2, x3, 0x7362);
+                    #pragma unroll
+                    for (int jj = 0; jj < 4; ++jj) {
+                        const uint32_t selb = jj & 1 ? 0x4342 : 0x4140;
+                        const uint32_t b0 = mul2(i8pair(jj < 2 ? lo01 : hi01, selb), s01);
+                        const uint32_t b1 = mul2(i8pair(jj < 2 ? lo89 : hi89, selb), s89);
+                        #pragma unroll
+                        for (int j = 0; j < NW; ++j) mma16816(o[4 * wd + jj], a, b0, b1);
+                    }
+                }
+                continue;
+            }
+            #pragma unroll
+            for (int j = 0; j < NW; ++j) {
+                const uint32_t selb = j & 1 ? 0x7632 : 0x5410;
+                const uint32_t b0 = __byte_perm(word_of(vx[0], j / 2), word_of(vx[1], j / 2), selb);
+                const uint32_t b1 = __byte_perm(word_of(vx[2], j / 2), word_of(vx[3], j / 2), selb);
+                mma16816(o[j], a, b0, b1);
+            }
+        }
+        __syncthreads();   // sp and red are the next phase's
+    }
+    if (h0 + g8 >= n_head) return;
+    const float inv[2] = {1.f / l[0], 1.f / l[1]};
+    #pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        float4* dst = reinterpret_cast<float4*>(out + ((size_t) t * n_head + h0 + g8 + 8 * r) * DIM + DW * w + 16 * t4);
+        dst[0] = make_float4(o[0][2 * r] * inv[r], o[1][2 * r] * inv[r], o[2][2 * r] * inv[r], o[3][2 * r] * inv[r]);
+        dst[1] = make_float4(o[4][2 * r] * inv[r], o[5][2 * r] * inv[r], o[6][2 * r] * inv[r], o[7][2 * r] * inv[r]);
+        dst[2] = make_float4(o[0][2 * r + 1] * inv[r], o[1][2 * r + 1] * inv[r], o[2][2 * r + 1] * inv[r], o[3][2 * r + 1] * inv[r]);
+        dst[3] = make_float4(o[4][2 * r + 1] * inv[r], o[5][2 * r + 1] * inv[r], o[6][2 * r + 1] * inv[r], o[7][2 * r + 1] * inv[r]);
+    }
+}
+
+#endif   // !GGML_USE_HIP
+
 // attend_rows_kernel for pairs of tokens: a warp keeps a head of both, and the raw keys a block stages are the two
 // windows' union - the second token's window is the first's moved one key on - so a prompt batch reads the keys about
 // half as often, the very traffic its attention time is.  The queries the warps read straight from q, a warp one row,
@@ -670,7 +906,7 @@ __global__ void attend_batch_kernel(const float* __restrict__ q, const uint16_t*
                                     float scale, long long pos, int rows, const long long* at,
                                     const int8_t* k_codes, const uint16_t* k_scales, int q8_fast) {
     // BATCH_KEYS staged key rows, a word a pair of halves and four words more a row (attend_rows_kernel's layout);
-    // a probability a head and staged key, of a token
+    // a probability a warp's scored key, PAIR_PROBS a warp (two keys a lane), of a token
     extern __shared__ float smem[];
     __shared__ int row[BATCH_KEYS];
     const int pitch = dim / 2 + 4;
@@ -760,8 +996,9 @@ __global__ void attend_batch_kernel(const float* __restrict__ q, const uint16_t*
             if (n_raw[t] > 0) {
                 const float* qh = q + (size_t(t0 + t) * n_head + h) * dim;
                 for (int u = 0; u < 2; ++u) {
-                    const int j = lane + u * WARP;
-                    if (j < nk && j >= from[t] && j < from[t] + n_raw[t]) {
+                    const int j = lane + u * WARP;      // this round's slot in the staging...
+                    const int g = j0 + j;               // ...and the union key it holds
+                    if (j < nk && g >= from[t] && g < from[t] + n_raw[t]) {
                         const uint4* kr = (const uint4*) (sk + j * pitch);
                         const float4* q4 = (const float4*) qh;
                         float d0 = 0.0f, d1 = 0.0f;
@@ -785,13 +1022,15 @@ __global__ void attend_batch_kernel(const float* __restrict__ q, const uint16_t*
                                 s[1] == -INFINITY ? 0.0f : expf(s[1] - mn)};
             l[t] = l[t] * alpha + warp_sum(e[0] + e[1]);
             m[t] = mn;
-            float* sb = sp + (size_t(t) * GROUP_HEADS + w) * BATCH_KEYS;
+            float* sb = sp + (size_t(t) * GROUP_HEADS + w) * PAIR_PROBS;
             sb[lane] = e[0];
             sb[WARP + lane] = e[1];
             __syncwarp();
 #pragma unroll
             for (int j = 0; j < GROUP_DIM / WARP; ++j) o[t][j] *= alpha;
-            for (int j = from[t]; j < nk && j < from[t] + n_raw[t]; ++j) {
+            const int first_g = from[t] > j0 ? from[t] : j0;
+            for (int g = first_g; g < j0 + nk && g < from[t] + n_raw[t]; ++g) {
+                const int j = g - j0;                  // the key's slot in this round's staging
                 const float pk = sb[j];
                 const uint4* kr = (const uint4*) (sk + j * pitch) + lane;
 #pragma unroll
@@ -855,7 +1094,7 @@ __global__ void attend_batch_kernel(const float* __restrict__ q, const uint16_t*
             const float alpha = expf(m[t] - mn), e = lane < nk ? expf(s - mn) : 0.0f;
             l[t] = l[t] * alpha + warp_sum(e);
             m[t] = mn;
-            float* sb = sp + (size_t(t) * GROUP_HEADS + w) * BATCH_KEYS;
+            float* sb = sp + (size_t(t) * GROUP_HEADS + w) * PAIR_PROBS;
             sb[lane] = e;
             __syncwarp();
 #pragma unroll
@@ -990,7 +1229,7 @@ void dsv4_attend(const float* q, const uint16_t* raw, int ring, int window, cons
     // token a block.  --attend-batch 0 takes a token a block.
     if (batch != 0 && rows >= GROUP_ROWS && dim % (8 * WARP) == 0 && dim <= GROUP_DIM) {
         const size_t smem = size_t(BATCH_KEYS) * (dim / 2 + 4) * sizeof(uint32_t) +
-                            size_t(ATTEND_BATCH) * GROUP_HEADS * BATCH_KEYS * sizeof(float);
+                            size_t(ATTEND_BATCH) * GROUP_HEADS * PAIR_PROBS * sizeof(float);
         static unsigned done = 0;
         if (smem <= allow_smem(attend_batch_kernel, done)) {
             // The whole batch, a block a pair of tokens on the grid's second axis, in launches of at most 65535
@@ -1012,6 +1251,34 @@ void dsv4_attend(const float* q, const uint16_t* raw, int ring, int window, cons
             return;
         }
     }
+    // the tensor cores: a block of GROUP_HEADS heads on the mma's M tile (this attention is MQA, the heads share
+    // the keys), fdec_kernel's mechanics.  The kernels below stay for other head counts, dimensions and cards.
+    if (rows >= GROUP_ROWS && dim == GROUP_DIM && n_head % GROUP_HEADS == 0) {
+#if !defined(GGML_USE_HIP)
+        static unsigned done = 0;
+        int dev = 0, major = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess || major < 8)
+            goto scalar;   // before the tensor cores: the kernel below stays
+        {
+        const size_t smem = (size_t(GROUP_HEADS) * (GROUP_DIM + 8) + GROUP_HEADS * (64 + 8)) * sizeof(half) +
+                            2 * 8 * GROUP_HEADS * sizeof(float);
+        if (smem <= allow_smem(attend_rows_mma_kernel<GROUP_DIM>, done)) {
+            for (int first = 0; first < rows; first += 65535) {
+                const int m = std::min(65535, rows - first);
+                attend_rows_mma_kernel<GROUP_DIM><<<dim3(n_head / GROUP_HEADS, m), 8 * WARP, smem, cs(stream)>>>(
+                    q + (size_t) first * n_head * dim, raw, ring, window, comp, ratio,
+                    sel ? sel + (size_t) first * sel_stride : nullptr, sel_stride, top, sinks,
+                    out + (size_t) first * n_head * dim, n_head, scale, (long long) (pos + first),
+                    at ? at + 2 * (size_t) first : nullptr, q8 ? kq8.codes : nullptr, q8 ? kq8.scales : nullptr);
+                ck("dsv4_attend");
+            }
+            return;
+        }
+        }
+#endif
+    }
+scalar:
     // a batch: its shared memory does not grow with the keys.  A few tokens keep a block a head, which spreads a
     // token over more of the card.
     if (rows >= GROUP_ROWS && dim % (8 * WARP) == 0 && dim <= GROUP_DIM) {
