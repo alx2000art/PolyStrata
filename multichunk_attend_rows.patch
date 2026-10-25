@@ -1,0 +1,45 @@
+# multichunk attend rows, for --kv q8_0 and fp16 alike.  Applies on top of deepseek4_q8_0_kv_cache.patch
+# (and after prefill_q8_fast_dequant.patch; the hunks do not meet, either order works).
+#
+# This replaces the broken first version, which looped over chunks inside the kernel and
+# offset the ring caches by the chunk's tokens - a ring cache is indexed by a position's
+# place mod ring, not by the batch's tokens, and sinks are one a head, not one a token;
+# with grid.y = rows every token already had its block, so the loop only duplicated the
+# work through wrong pointers, and the launch no longer matched the kernel's arguments.
+#
+# What was true in it stays: the batch's tokens all go in launches of their own, a block a
+# token.  What this adds is the real limit such a launch has: no grid axis takes more than
+# 65535 blocks, so a batch above that (--prompt-batch past 65535) is launched in row chunks
+# on the host, where a token's rows of q, sel, out and at sit behind the chunk before.  The
+# q8_0 codes and scales pass to every chunk as they are: a token reads its keys where its
+# own position says, not where the chunk does.
+
+diff --git a/src/poly/kernels_dsv4.cu b/src/poly/kernels_dsv4.cu
+index 5428054..f9bbfe3 100644
+--- a/src/poly/kernels_dsv4.cu
++++ b/src/poly/kernels_dsv4.cu
+@@ -605,10 +605,20 @@ void dsv4_attend(const float* q, const uint16_t* raw, int ring, int window, cons
+                             size_t(GROUP_KEYS) * (dim / 2 + 4) * sizeof(uint32_t);
+         static unsigned done = 0;
+         if (smem <= allow_smem(attend_rows_kernel, done)) {
+-            attend_rows_kernel<<<dim3(grid(n_head, GROUP_HEADS), rows), GROUP_HEADS * WARP, smem, cs(stream)>>>(
+-                q, raw, ring, window, comp, ratio, sel, sel_stride, top, sinks, out, dim, n_head, scale,
+-                (long long) pos, at, q8 ? kq8.codes : nullptr, q8 ? kq8.scales : nullptr);
+-            ck("dsv4_attend");
++            // The whole batch, a block a token on the grid's second axis, in launches of at most 65535 rows:
++            // no grid axis takes more blocks than that, so a --prompt-batch above it goes on in the next launch,
++            // its tokens' rows of q, sel, out and at behind the chunk before.  The caches (raw, comp, the q8_0
++            // codes and scales) every token reads as its own position says: one set serves all the chunks.
++            constexpr int kGridRows = 65535;   // CUDA's grid.y limit
++            for (int first = 0; first < rows; first += kGridRows) {
++                const int m = std::min(kGridRows, rows - first);
++                attend_rows_kernel<<<dim3(grid(n_head, GROUP_HEADS), m), GROUP_HEADS * WARP, smem, cs(stream)>>>(
++                    q + (size_t) first * n_head * dim, raw, ring, window, comp, ratio,
++                    sel ? sel + (size_t) first * sel_stride : nullptr, sel_stride, top, sinks,
++                    out + (size_t) first * n_head * dim, dim, n_head, scale, (long long) (pos + first),
++                    at ? at + 2 * (size_t) first : nullptr, q8 ? kq8.codes : nullptr, q8 ? kq8.scales : nullptr);
++                ck("dsv4_attend");
++            }
+             return;
+         }
+     }

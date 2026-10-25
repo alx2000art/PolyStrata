@@ -1,0 +1,41 @@
+# Prefill with --kv q8_0: the fast q8_0 dequantization in attend_rows_kernel, the kernel a
+# prompt batch's tokens all go through (deepseek4).  Applies on top of deepseek4_q8_0_kv_cache.patch.
+#
+# The old loop fetched the row's scale from VRAM once per value (8 times for the same
+# scale: the 8 values of a 16-byte word never leave their one block of 32) and converted
+# a value at a time.  One scale fetch a word and half2 packing cut the instructions of
+# the key-staging loop about in half; reading the window's keys is what a prompt's
+# attention time is, a key row re-staged for every token that sees it.
+
+diff --git a/src/poly/kernels_dsv4.cu b/src/poly/kernels_dsv4.cu
+index 6e607e9..5428054 100644
+--- a/src/poly/kernels_dsv4.cu
++++ b/src/poly/kernels_dsv4.cu
+@@ -455,16 +455,17 @@ __global__ void attend_rows_kernel(const float* __restrict__ q, const uint16_t*
+             if (kk < nk) {
+                 const int r = row[kk];
+                 if (k0 + kk < n_raw && q8) {
+-                    // q8_0: dequantize on the fly into shared memory
+-                    const int8_t* codes = k_codes + (size_t) r * dim;
+-                    const uint16_t* scales = k_scales + (size_t) r * (dim / 32);
+-                    half* dst = (half*) &v;
+-                    for (int j = 0; j < 8; ++j) {
+-                        int idx = c * 8 + j;
+-                        if (idx < dim) {
+-                            dst[j] = __float2half(float(codes[idx]) * __half2float(__ushort_as_half(scales[idx / 32])));
+-                        }
+-                    }
++                    // q8_0, dequantized into the shared row: the 8 values of a 16-byte word start at a multiple
++                    // of 8 and never leave their one block of 32, so one scale serves them all; a half2 is packed
++                    // a pair, and the 8 codes behind them are the L1's consecutive bytes
++                    const float s = __half2float(
++                        __ushort_as_half(k_scales[(size_t) r * (dim / 32) + (c >> 2)]));
++                    const int8_t* cd = k_codes + (size_t) r * dim + c * 8;
++                    half2* dst = (half2*) &v;
++                    dst[0] = __floats2half2_rn(float(cd[0]) * s, float(cd[1]) * s);
++                    dst[1] = __floats2half2_rn(float(cd[2]) * s, float(cd[3]) * s);
++                    dst[2] = __floats2half2_rn(float(cd[4]) * s, float(cd[5]) * s);
++                    dst[3] = __floats2half2_rn(float(cd[6]) * s, float(cd[7]) * s);
+                 } else if (k0 + kk < n_raw) {
+                     v = ((const uint4*) (raw + (size_t) r * dim))[c];
+                 } else {

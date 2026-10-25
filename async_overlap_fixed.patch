@@ -1,0 +1,133 @@
+# Async overlap for the prefill of a long prompt, with the switch for it: the chunks of Engine::read()
+# overlap instead of the card draining between them.  Applies on top of deepseek4_q8_0_kv_cache.patch
+# (any kv format: this is the read path, below the cache).
+#
+# --read-overlap 1 (the default) turns it on, --read-overlap 0 gives the old behaviour back.  A read
+# leaves an event on st_ at its end; the next read makes only its copy stream (rs_, which refills r_)
+# wait for that event, so its embeddings and uploads run beside the tail of the chunk before.  With an
+# expert swap in flight, or no event yet (the first read, or after one that failed), the stream drains
+# as always - the cache cannot change under kernels that still read it.
+#
+# This replaces the broken first version, which gave the Python server a submit_prompt_chunk() to call
+# on the engine - but the engine is a process of its own (src/poly/main.cpp) that the server talks to over
+# pipes, not an object in it, and its Engine::read takes int32_t tokens with marks, not the signature the
+# patch called; the Python half could never run, and the C++ half did not compile.  Where the overlap
+# really is, is between the engine's own read() chunks.
+#
+# For an even prefill the bigger lever is the engine's own --stage-read-mib N: a layer's experts that
+# are not in the cache are copied into VRAM once for the whole read (ahead of the routing, on a stream of
+# its own), and not once every batch.  0, the default, never does that.
+
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index b0e90d6..ce906ef 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -383,7 +383,8 @@ Engine::~Engine() {
+     vmm_free(arena_);
+     vmm_free(stage_map_);
+     for (void* p : host_allocs_) cudaFreeHost(p);
+-    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1], ev_hr_})
++    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1],
++                    ev_tail_, ev_hr_})
+         if (e) cudaEventDestroy((cudaEvent_t) e);
+     for (void* e : ev_row_)
+         if (e) cudaEventDestroy((cudaEvent_t) e);
+@@ -1959,7 +1960,7 @@ void Engine::alloc() {
+         ids_.resize(rr);
+         first_.resize((size_t) n_expert_);
+ 
+-        for (void** e : {&ev_in_[0], &ev_in_[1], &ev_out_[0], &ev_out_[1]}) {   // read()
++        for (void** e : {&ev_in_[0], &ev_in_[1], &ev_out_[0], &ev_out_[1], &ev_tail_}) {   // read()
+             cudaEvent_t ev = nullptr;
+             ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+             *e = ev;
+@@ -3236,7 +3237,20 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
+     if (pos_ + n > opt_.max_context)
+         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
+ 
+-    ck(cudaStreamSynchronize(cs(st_)), "read");
++    // A long prompt is read a chunk at a time, and the chunk before may still be running its last layers.  The
++    // card's own work needs no wait - it is ordered on st_ - and only this read's copies into r_ (rs_) must stay
++    // behind that tail: the event it left says so without the host waiting for it, and the chunk's embeddings and
++    // uploads overlap the tail instead of following it.  No event (the first read, or one that failed) or an
++    // expert swap in flight (the cache cannot change under what still reads it) drains the stream as this always
++    // did.
++    bool tail = false;
++    if (ev_tail_ && opt_.read_overlap > 0) {
++        const cudaError_t asked = cudaEventQuery((cudaEvent_t) ev_tail_);
++        if (asked != cudaSuccess && asked != cudaErrorNotReady) ck(asked, "read");
++        tail = asked == cudaErrorNotReady;
++        if (tail) ck(cudaStreamWaitEvent(cs(rs_), (cudaEvent_t) ev_tail_, 0), "read");
++    }
++    if (!tail || n_swap_ > 0) ck(cudaStreamSynchronize(cs(st_)), "read");
+     if (n_swap_ > 0) follow(0);
+     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row, r_bytes = r_row * sizeof(float);
+     const size_t part = (size_t) std::max(streams(), draft_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
+@@ -3292,6 +3306,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
+             if (turn && k > 0 && !(*turn)(k, turns)) {
+                 if (host) ck(cudaStreamSynchronize(cs(rs_)), "read");
+                 ck(cudaStreamSynchronize(cs(st_)), "read");
++                if (ev_tail_) ck(cudaEventRecord((cudaEvent_t) ev_tail_, cs(st_)), "read");
+                 shared_ahead_ = false;
+                 r_ = r0;
+                 pos_ = pos0;
+@@ -3342,8 +3357,13 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
+                    "the next card");
+             ck(cudaStreamSynchronize(cs(st_)), "the next card");
+         }
++        // What the read leaves running on st_ is its tail: the event tells the next read's copies where to stop,
++        // and is fresh even when nothing at all is behind it.
++        if (ev_tail_) ck(cudaEventRecord((cudaEvent_t) ev_tail_, cs(st_)), "read");
+     } catch (...) {
+         if (host) cudaStreamSynchronize(cs(rs_));
++        cudaStreamSynchronize(cs(st_));
++        if (ev_tail_) cudaEventRecord((cudaEvent_t) ev_tail_, cs(st_));
+         shared_ahead_ = false;
+         r_ = r0;
+         pos_ = pos0;
+diff --git a/src/poly/engine.hpp b/src/poly/engine.hpp
+index 98c7de7..941b3a0 100644
+--- a/src/poly/engine.hpp
++++ b/src/poly/engine.hpp
+@@ -62,6 +62,9 @@ struct Options {
+                                   ///< read of several calls and this many tokens every call does; 0: never.  Under
+                                   ///< it a call copies only the experts it routes to, which with 8 GB of VRAM was
+                                   ///< the faster of the two up to about 1,000 tokens
++    int read_overlap = 1;         ///< a prompt read in several Engine::read() chunks: the next chunk's host work
++                                  ///< and uploads overlap the chunk before's last layers by an event, instead of
++                                  ///< the card draining between chunks (--read-overlap); 0: drain as before
+     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
+                                   ///< computes while the others are copied: the ones the fewest tokens chose;
+                                   ///< below 0: as the two took the time between them; 0: none
+@@ -577,6 +580,9 @@ protected:
+     void* rs_ = nullptr;      ///< the stream of those copies
+     void* ev_in_[2] = {};     ///< marks a call's rows in each half of r_
+     void* ev_out_[2] = {};    ///< marks the card done with a call in each half
++    void* ev_tail_ = nullptr; ///< read(): marks the end of a read's work on st_.  The next read's copies (rs_) wait
++                              ///< for it instead of the stream draining, so a long prompt's chunks overlap: the
++                              ///< host work and uploads of one run beside the last layers of the chunk before
+     float rms_eps_ = 0;
+     bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
+     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 7842b88..6766fbb 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -1067,6 +1067,9 @@ void usage() {
+                  "  --stage-read-mib N     a prompt read of several batches grows the staging buffer to N MiB (at\n"
+                  "                         most a layer's experts) with VRAM the expert cache lends it until the\n"
+                  "                         answer starts (default 0 = never)\n"
++                 "  --read-overlap N       1: the next chunk of a long prompt's read overlaps the last layers of the\n"
++                 "                         chunk before, its uploads waiting by an event and not the card draining\n"
++                 "                         (default 1; 0 = the card drains between the chunks)\n"
+                  "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
+                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
+                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
+@@ -1171,6 +1174,7 @@ int main(int argc, char** argv) {
+         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
+         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
+         else if (a == "--stage-read-mib") o.stage_read_mib = std::atoi(val());
++        else if (a == "--read-overlap") o.read_overlap = std::atoi(val());
+         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
+         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
+         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());

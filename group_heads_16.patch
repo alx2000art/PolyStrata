@@ -1,0 +1,26 @@
+# attend_rows_kernel takes GROUP_HEADS heads of a token a block (a warp each): 16 now, twice the 8 it
+# was.  One staged key row in shared memory serves twice the heads before it is dropped, which halves the
+# key traffic of a prompt batch's attention; the rest of the kernel - the smem layout, the launch's grid,
+# the softmax tiles - already follows the constant.  A block's shared memory grows from 50 to 66 KiB at
+# dim 512, still inside what a card lends a block on request (allow_smem), and a card that cannot falls
+# back to attend_kernel as before.  For DeepSeek V4 (64 heads, one key row a position) a token takes 4
+# blocks instead of 8.  Applies after deepseek4_q8_0_kv_cache.patch; the order against the other kernels
+# patches does not matter.  No setting turns it on: it is a compile-time constant, so the engine has to
+# be built again, and A/B is git apply -R of this file.
+
+diff --git a/src/poly/kernels_dsv4.cu b/src/poly/kernels_dsv4.cu
+index f9bbfe3..4beb00a 100644
+--- a/src/poly/kernels_dsv4.cu
++++ b/src/poly/kernels_dsv4.cu
+@@ -19,7 +19,10 @@ constexpr int SELECT_THREADS = 1024;
+ constexpr int ATTEND_THREADS = 256;
+ constexpr int SCORE_KEYS = 32;      // dsv4_idx_score: the keys a block takes
+ constexpr int IDX_DIM = 128;        // an indexer key's values
+-constexpr int GROUP_HEADS = 8;      // attend_rows_kernel: the heads of a token a block takes, a warp each
++constexpr int GROUP_HEADS = 16;     // attend_rows_kernel: the heads of a token a block takes, a warp each.  16,
++                                    // twice the first 8: a staged key row serves twice the heads before it is
++                                    // dropped, and the 66 KiB of shared memory a block takes at dim 512 still
++                                    // fits what the card lends a block (a 48 KiB card takes the fallback kernel)
+ constexpr int GROUP_KEYS = WARP;    // the keys it holds in shared memory at a time, a lane each
+ constexpr int GROUP_ROWS = 32;      // dsv4_attend takes attend_rows_kernel from this many tokens a call
+ constexpr int GROUP_DIM = 512;      // the longest head it takes

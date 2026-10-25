@@ -1,0 +1,146 @@
+--- a/src/poly/kernels_dsv4.cu	2026-10-25 02:11:07.198483300 +0300
++++ b/src/poly/kernels_dsv4.cu	2026-10-25 02:12:37.181573900 +0300
+@@ -19,6 +19,8 @@
+ constexpr int ATTEND_THREADS = 256;
+ constexpr int SCORE_KEYS = 32;      // dsv4_idx_score: the keys a block takes
+ constexpr int IDX_DIM = 128;        // an indexer key's values
++constexpr int IDX_TOKENS = 16;      // idx_score_mma: the tokens a block scores, one mma tile
++constexpr int IDX_KEYS = 128;       // idx_score_mma: the compressed rows a block takes, 2 tiles of 8 a warp
+ constexpr int GROUP_HEADS = 16;     // attend_rows_kernel: the heads of a token a block takes, a warp each.  16,
+                                     // twice the first 8: a staged key row serves twice the heads before it is
+                                     // dropped, and the 66 KiB of shared memory a block takes at dim 512 still
+@@ -251,6 +253,109 @@
+     }
+ }
+ 
++#if !defined(GGML_USE_HIP)
++
++// mma.sync of fattn.cu: 16 rows by 8 columns of the two 8-half fragments, the sums in floats.
++__device__ __forceinline__ void mma16816(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
++                 "{%0,%1,%2,%3};"
++                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
++                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++#else
++    __trap();
++#endif
++}
++
++// The indexer's scores on the tensor cores: a block scores IDX_TOKENS tokens against IDX_KEYS compressed rows, a
++// warp 2 tiles of 8 rows, a lane one key of a tile.  The keys are read once a block and kept in the registers; per
++// head the block stages the head's 16 rows of queries as halves in shared memory and runs each 128-value dot as 8
++// mma steps, then folds the head's relu and weight into the running sums.  A row's arithmetic never depends on the
++// other rows, and rows past a token's visible count are computed but never written, so a token's scores come out
++// the same whatever tokens the launch has beside it.  The fragments are numbered as fdec_kernel's (fattn.cu): the
++// queries a lane's 2 rows of 4 halves a step, the keys a lane's 8 halves a 32-value block, c[2 * r + j] the row
++// g8 + 8r and column 2t + j.
++__global__ void idx_score_mma_kernel(const float* __restrict__ q, const float* __restrict__ w,
++                                     const uint16_t* __restrict__ keys, float* __restrict__ score,
++                                     int score_stride, int rows, int n_head, int ratio, long long pos, float scale,
++                                     const long long* __restrict__ at) {
++    constexpr int QS = IDX_DIM + 8;    // a row one value longer, so the lanes' rows land in different banks
++    extern __shared__ __align__(16) char sm[];
++    half* sq = reinterpret_cast<half*>(sm);   // 16 * QS queries, a head at a time
++    float* sw = reinterpret_cast<float*>(sm + IDX_TOKENS * QS * sizeof(half));   // 16 * n_head weights
++    const int wid = threadIdx.x / WARP, lane = threadIdx.x % WARP, g8 = lane / 4, t4 = lane % 4;
++    const int t0 = IDX_TOKENS * blockIdx.y;
++    const long long kb = (long long) blockIdx.x * IDX_KEYS;
++    const int in_tile = rows - t0 < IDX_TOKENS ? rows - t0 : IDX_TOKENS;
++    const long long visible = (position(at, pos, 1, t0 + in_tile - 1) + 1) / ratio;
++    if (kb >= visible) return;
++    // the warp's 16 keys: 2 tiles of 8, a lane its key's 8 values of each 32-value block, the 4 blocks at once
++    uint4 kx[2][4];
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) {
++        const long long key = kb + 16 * wid + 8 * nt + g8;
++#pragma unroll
++        for (int b = 0; b < 4; ++b)
++            kx[nt][b] = key >= visible ? make_uint4(0u, 0u, 0u, 0u)
++                      : *reinterpret_cast<const uint4*>(keys + (size_t) key * IDX_DIM + 32 * b + 8 * t4);
++    }
++    for (int i = threadIdx.x; i < IDX_TOKENS * n_head; i += blockDim.x) {
++        const int row = i / n_head, h = i % n_head, tok = t0 + row;
++        sw[i] = tok < rows ? w[(size_t) tok * n_head + h] : 0.f;
++    }
++    const int tok[2] = {t0 + g8, t0 + g8 + 8};   // the two rows this lane folds and writes
++    const long long vis[2] = {tok[0] < rows ? (position(at, pos, 1, tok[0]) + 1) / ratio : 0,
++                              tok[1] < rows ? (position(at, pos, 1, tok[1]) + 1) / ratio : 0};
++    __syncthreads();
++    float s[2][4];   // the relu'd, weighted dots summed over the heads
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
++    for (int h = 0; h < n_head; ++h) {
++        for (int i = threadIdx.x; i < IDX_TOKENS * IDX_DIM; i += blockDim.x) {
++            const int row = i / IDX_DIM, d = i % IDX_DIM, tk = t0 + row;
++            sq[row * QS + d] = tk < rows ? __float2half(q[((size_t) tk * n_head + h) * IDX_DIM + d])
++                                         : __float2half(0.f);
++        }
++        __syncthreads();
++        float c[2][4];
++#pragma unroll
++        for (int nt = 0; nt < 2; ++nt) c[nt][0] = c[nt][1] = c[nt][2] = c[nt][3] = 0.f;
++#pragma unroll
++        for (int b = 0; b < 4; ++b)
++#pragma unroll
++            for (int hh = 0; hh < 2; ++hh) {
++                const int d = 32 * b + 8 * t4 + 4 * hh;   // the thread's 4 dimensions of the step
++                const uint2 lo = *reinterpret_cast<const uint2*>(&sq[g8 * QS + d]);
++                const uint2 hi = *reinterpret_cast<const uint2*>(&sq[(g8 + 8) * QS + d]);
++                const uint32_t a[4] = {lo.x, hi.x, lo.y, hi.y};
++#pragma unroll
++                for (int nt = 0; nt < 2; ++nt) {
++                    const uint32_t bk0 = hh ? kx[nt][b].z : kx[nt][b].x, bk1 = hh ? kx[nt][b].w : kx[nt][b].y;
++                    mma16816(c[nt], a, bk0, bk1);
++                }
++            }
++        const float wr0 = sw[g8 * n_head + h], wr1 = sw[(g8 + 8) * n_head + h];
++#pragma unroll
++        for (int nt = 0; nt < 2; ++nt) {
++            s[nt][0] += fmaxf(c[nt][0], 0.f) * wr0;
++            s[nt][1] += fmaxf(c[nt][1], 0.f) * wr0;
++            s[nt][2] += fmaxf(c[nt][2], 0.f) * wr1;
++            s[nt][3] += fmaxf(c[nt][3], 0.f) * wr1;
++        }
++        __syncthreads();   // sq is the next head's
++    }
++#pragma unroll
++    for (int nt = 0; nt < 2; ++nt)
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++            const int r = j >> 1;
++            const long long key = kb + 16 * wid + 8 * nt + 2 * t4 + (j & 1);
++            if (key < vis[r]) score[(size_t) tok[r] * score_stride + key] = s[nt][j] * scale;
++        }
++}
++
++#endif   // !GGML_USE_HIP
++
+ __device__ __forceinline__ uint32_t order_key(float s) {
+     const uint32_t b = __float_as_uint(s + 0.0f);
+     return b & 0x80000000u ? ~b : b | 0x80000000u;
+@@ -578,6 +683,24 @@
+         throw std::invalid_argument("dsv4_idx_score: the indexer's keys are not 128 values");
+     const long long visible = (at ? room : pos + rows) / ratio;   // the last token sees the most
+     if (rows <= 0 || visible == 0) return;
++#if !defined(GGML_USE_HIP)
++    {   // the tensor cores, when the card has them: a block of 16 tokens against 128 compressed rows
++        static unsigned done_mma = 0;
++        int dev = 0, major = 0;
++        if (cudaGetDevice(&dev) == cudaSuccess &&
++            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major >= 8) {
++            const size_t smem_mma =
++                IDX_TOKENS * (IDX_DIM + 8) * sizeof(half) + IDX_TOKENS * n_head * sizeof(float);
++            if (smem_mma <= allow_smem(idx_score_mma_kernel, done_mma)) {
++                idx_score_mma_kernel<<<dim3(grid((int) visible, IDX_KEYS), grid(rows, IDX_TOKENS)), 256, smem_mma,
++                                       cs(stream)>>>(q, w, keys, score, score_stride, rows, n_head, ratio,
++                                                     (long long) pos, scale, at);
++                ck("dsv4_idx_score");
++                return;
++            }
++        }
++    }
++#endif
+     const size_t smem = (size_t(n_head) * (IDX_DIM + 1) + n_head + SCORE_KEYS * IDX_DIM) * sizeof(float);
+     static unsigned done = 0;
+     if (smem > allow_smem(idx_score_kernel, done))

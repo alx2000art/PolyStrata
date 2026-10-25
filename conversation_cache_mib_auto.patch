@@ -1,0 +1,214 @@
+From b3f34db6d7f9697b5e3b8f19ef80a6b15b3e7c8f Mon Sep 17 00:00:00 2001
+From: VecSzn <82099364+VecSzn@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 11:28:29 -0700
+Subject: [PATCH] poly: --conversation-cache-mib auto, sized from the free RAM
+
+setup turned the conversation cache on at a fixed 8192 MiB, whatever
+RAM the PC had left beside the model.  Strata's engine sizes it from
+the RAM free once the model is loaded, in commit f0010a607f32 ("serve:
+the conversation cache is sized from the free RAM when
+--conversation-cache-mib is not given (#3493): ..."): 40% of what is
+left above the parking floor, at most 8192 MiB, in steps of 256, and
+off when that is under 1024.
+
+Take its auto_conversation_cache_mib() and its tests as they are, and
+let strata-poly use it for --conversation-cache-mib auto in --serve,
+with one log line.  setup writes auto where it wrote 8192 and reads it
+back from a saved config.  A number, 0 or no flag mean what they meant
+before, so a config setup wrote earlier keeps its 8192.  admit() still
+keeps --conversation-cache-min-free-mib free at every park.
+
+On the RTX 4070 laptop (32 GB, Qwen3.6 UD-Q3_K_M), auto gave 2304 to
+3072 MiB with 8.6 to 10.5 GB free at start.  With the default 2560 MiB
+floor neither auto nor 4096 parks a 2,400-token conversation there:
+530 MiB are free once the experts are mapped.  With the floor at 512,
+auto (4352 MiB) parked it and brought it back, 2,399 of 2,430 prompt
+tokens reused, in 45 ms.  The setup suites pass (694 tests).
+---
+ include/strata/core/conversation_memory.hpp | 13 ++++++++++++
+ setup.py                                    | 22 ++++++++++++--------
+ src/core/conversation_memory_test.cpp       | 10 +++++++++
+ src/poly/main.cpp                           | 23 +++++++++++++++++++--
+ tools/test_setup_glm.py                     |  4 +++-
+ 5 files changed, 60 insertions(+), 12 deletions(-)
+
+diff --git a/include/strata/core/conversation_memory.hpp b/include/strata/core/conversation_memory.hpp
+index 81ea0b07..97fc1bef 100644
+--- a/include/strata/core/conversation_memory.hpp
++++ b/include/strata/core/conversation_memory.hpp
+@@ -64,6 +64,19 @@ std::optional<HostMemoryReading> sample_host_memory();
+ 
+ std::optional<uint64_t> available_host_bytes();
+ 
++/// #3493: the conversation cache budget (MiB) --serve uses when --conversation-cache-mib was not given, from the RAM that is available
++/// once the model is loaded: 40% of what is left above the parking floor, at most 8192 (four 100K-token agent conversations were
++/// parked in 8 GiB in the report), in steps of 256, and 0 (off) when less than 1024 would be left to give.  Unknown telemetry: 0.
++inline int64_t auto_conversation_cache_mib(std::optional<uint64_t> available, int64_t min_free_mib) {
++    if (!available) return 0;
++    const int64_t usable = (int64_t) (*available >> 20) - min_free_mib;
++    if (usable <= 0) return 0;
++    int64_t mib = usable * 2 / 5;
++    if (mib > 8192) mib = 8192;
++    mib -= mib % 256;
++    return mib >= 1024 ? mib : 0;
++}
++
+ std::optional<uint64_t> conversation_mem_available(std::istream& meminfo);
+ 
+ inline bool conversation_memory_admit(std::optional<uint64_t> available,
+diff --git a/setup.py b/setup.py
+index db05c6b3..57282e51 100644
+--- a/setup.py
++++ b/setup.py
+@@ -795,7 +795,7 @@ GLM_ROW_BYTES = 28160           # VRAM per context token: a row in each of the 1
+ GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve):
+                                 # the 3.0BIT file's; a size with other dense weights has its own "vram_beside_gb"
+ POLY_RAM_BESIDE_GB = 10          # RAM beside the experts in the file cache: the OS, the server, the engine's buffers
+-POLY_CONV_CACHE_MIB = 8192       # --conversation-cache-mib when setup turns it on
++POLY_CONV_CACHE_MIB = 8192       # the most the engine's "auto" conversation cache takes (engine: auto_conversation_cache_mib)
+ # MODEL-UPDATE Phase 1: the K-quant prompt kernels (Unsloth's UD-Q4/Q5/Q6_K_XL experts) are a library next to the CUDA
+ # engine, opened only for those models; an engine without it runs them on the FP16 prompt path
+ KQ_LIB = "strata_kq.dll" if WIN else "libstrata_kq.so"
+@@ -6213,9 +6213,9 @@ def poly_verdict(d, ram, vram_gb, hip, windows=False) -> str:
+         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
+ 
+ 
+-def poly_saved_conv(paths) -> int | None:
+-    """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is), 0 when that
+-    config has none; None without an earlier config: setup then asks."""
++def poly_saved_conv(paths) -> int | str | None:
++    """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is): MiB, or "auto";
++    0 when that config has none; None without an earlier config: setup then asks."""
+     for p in paths:
+         if p is None or not p.is_file():
+             continue
+@@ -6225,7 +6225,7 @@ def poly_saved_conv(paths) -> int | None:
+             continue
+         if isinstance(args, list):
+             v = str(args[args.index("--conversation-cache-mib") + 1]) if "--conversation-cache-mib" in args[:-1] else ""
+-            return int(v) if v.isdigit() else 0
++            return int(v) if v.isdigit() else "auto" if v == "auto" else 0
+     return None
+ 
+ 
+@@ -6679,11 +6679,15 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port,
+         say()
+         say("  Conversation cache: a coding agent sends several conversations in turn (the main one, its subagents,")
+         say("  short side requests). With the cache, one that makes room for another is kept in RAM and comes back")
+-        say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM.")
++        say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM, and")
++        say("  less when little RAM is left free once the model is loaded.")
+         room = ram >= need_ram + POLY_CONV_CACHE_MIB / 1024
+-        conv = POLY_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
+-                                         a.yes) == "y" else 0
+-    ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
++        conv = "auto" if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
++                             a.yes) == "y" else 0
++    if conv == "auto":
++        ok(f"conversation cache: 40% of the RAM free once the model is loaded, up to {POLY_CONV_CACHE_MIB} MiB")
++    else:
++        ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
+ 
+     # one file, or the numbered files of a split GGUF: the engine is given the first and finds the others by name
+     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
+diff --git a/src/core/conversation_memory_test.cpp b/src/core/conversation_memory_test.cpp
+index c95e70bf..35d18df1 100644
+--- a/src/core/conversation_memory_test.cpp
++++ b/src/core/conversation_memory_test.cpp
+@@ -49,6 +49,16 @@ int main() {
+                                    std::numeric_limits<uint64_t>::max(), 0), "maximal exact bound");
+     check(!conversation_memory_admit(std::numeric_limits<uint64_t>::max(),
+                                     std::numeric_limits<uint64_t>::max(), 1), "maximal sum overflow rejected");
++    // #3493: the budget used when --conversation-cache-mib is not given
++    const auto GiB = [](uint64_t n) { return n << 30; };
++    check(auto_conversation_cache_mib({}, 2560) == 0, "unknown telemetry: no cache");
++    check(auto_conversation_cache_mib(GiB(2), 2560) == 0, "below the parking floor: off");
++    check(auto_conversation_cache_mib(GiB(4), 2560) == 0, "4 GiB free: 40% of 1.5 GiB is under 1 GiB: off");
++    check(auto_conversation_cache_mib(GiB(8), 2560) == 2048, "8 GiB free: 40% of 5.5 GiB, in steps of 256");
++    check(auto_conversation_cache_mib(GiB(20), 2560) == 7168, "20 GiB free: 40% of 17.5 GiB");
++    check(auto_conversation_cache_mib(GiB(40), 2560) == 8192, "capped at 8 GiB");
++    check(auto_conversation_cache_mib(GiB(1000), 0) == 8192, "a big server: still the cap");
++    check(auto_conversation_cache_mib(GiB(40), 1000000) == 0, "a floor above the RAM: off, no underflow");
+     // Test the real provider without assuming any particular amount of free RAM.
+     const auto available = available_host_bytes();
+     check(!available || conversation_memory_admit(available, 0, 0), "provider returns bytes or unknown");
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 81f7ae04..fb1c8bb2 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -322,6 +322,7 @@ private:
+ struct CacheFlags {
+     CacheOptions o;
+     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
++    bool park_auto = false;          // --conversation-cache-mib auto: park_mib from the RAM free once loaded
+ };
+ 
+ struct Session {
+@@ -1078,7 +1079,8 @@ void usage() {
+                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
+                  "                         (default 2048, 0 = none)\n"
+                  "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
+-                 "                         without being read again (default 0 = off)\n"
++                 "                         without being read again (default 0 = off; auto: 40%% of the RAM free\n"
++                 "                         once loaded, above the floor below, at most 8192)\n"
+                  "  --conversation-cache-slots N        parked conversations at most (default 4)\n"
+                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
+                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
+@@ -1181,7 +1183,11 @@ int main(int argc, char** argv) {
+         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
+         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
+         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
+-        else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());
++        else if (a == "--conversation-cache-mib") {
++            const std::string v = val();
++            cache.park_auto = v == "auto";
++            cache.o.park_mib = cache.park_auto ? 0 : std::atoll(v.c_str());
++        }
+         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
+         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
+         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
+@@ -1261,6 +1267,19 @@ int main(int argc, char** argv) {
+                 const int64_t id = engine.meta_u(key, -1);
+                 if (id >= 0 && std::find(eos.begin(), eos.end(), (int32_t) id) == eos.end()) eos.push_back((int32_t) id);
+             }
++        // A fixed 8 GiB on a PC whose RAM the model's file already fills pushed that file out of the file cache.
++        // Sized as Strata's engine sizes it (#3493); admit() still keeps min_free_mib free at every park.
++        if (cache.park_auto && want_serve && cache.o.checkpoints > 0 && cache.o.park_slots > 0) {
++            cache.o.park_mib = strata::core::auto_conversation_cache_mib(strata::core::available_host_bytes(),
++                                                                        cache.min_free_mib);
++            if (cache.o.park_mib > 0)
++                std::fprintf(stderr, "strata-poly: conversation cache sized from the free RAM: %lld MiB for up to %d "
++                                     "parked conversations (--conversation-cache-mib N sets it, 0 turns it off)\n",
++                             (long long) cache.o.park_mib, cache.o.park_slots);
++            else
++                std::fprintf(stderr, "strata-poly: conversation cache off: not enough free RAM to park conversations "
++                                     "(--conversation-cache-mib N asks for one anyway)\n");
++        }
+         Session ss(engine, eos, cache, lookup);
+         int rc = 0;
+         if (want_serve) {
+diff --git a/tools/test_setup_glm.py b/tools/test_setup_glm.py
+index 66d6f575..d25917eb 100644
+--- a/tools/test_setup_glm.py
++++ b/tools/test_setup_glm.py
+@@ -218,6 +218,8 @@ class Config(unittest.TestCase):
+             self.assertEqual(setup.poly_saved_conv([None, p]), 0)
+             p.write_text(json.dumps({"args": ["--conversation-cache-mib", "4096", "--model", "m.gguf"]}))
+             self.assertEqual(setup.poly_saved_conv([p]), 4096)
++            p.write_text(json.dumps({"args": ["--conversation-cache-mib", "auto", "--model", "m.gguf"]}))
++            self.assertEqual(setup.poly_saved_conv([p]), "auto")
+ 
+ 
+ class Main(unittest.TestCase):
+@@ -323,7 +325,7 @@ class Main(unittest.TestCase):
+         self.assertEqual(args[args.index("--max-context") + 1], "32768")
+         self.assertEqual(Path(args[args.index("--expert-profile") + 1]), pack / "expert-profile.txt")
+         self.assertEqual(Path(args[args.index("--draft-model") + 1]), block)
+-        self.assertEqual(args[args.index("--conversation-cache-mib") + 1], "8192")
++        self.assertEqual(args[args.index("--conversation-cache-mib") + 1], "auto")
+         for flag in ("--pack", "--native", "--mtp", "--kv", "--vision", "--pool-workers", "--prefill"):
+             self.assertNotIn(flag, args)
+         self.assertEqual(cfg["model_name"], "glm-5.3-flash-3.0bit")
+-- 
+2.56.0.windows.2
+

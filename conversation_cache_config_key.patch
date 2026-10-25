@@ -1,0 +1,23 @@
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -2711,6 +2711,20 @@
+         seg = cfg.get("vram_segment_mib")
+         if isinstance(seg, int) and not isinstance(seg, bool) and seg > 0 and "--vram-segment-mib" not in args:
+             args += ["--vram-segment-mib", str(seg)]
++    # #3493 (opt-in): "conversation_cache" in the config - park whole conversations in RAM, so several (the main
++    # one, its subagents, short side requests) can take turns without being read again.  "auto" or true: the engine
++    # sizes it from the RAM free once the model is loaded (40% of what is left above the parking floor, at most
++    # 8192 MiB); a number: that many MiB.  Absent, false or 0: off, as before.  --conversation-cache-mib in the
++    # args itself wins over the key.
++    if "--conversation-cache-mib" not in args:
++        cc = cfg.get("conversation_cache")
++        if cc is True or cc == "auto":
++            args += ["--conversation-cache-mib", "auto"]
++        elif isinstance(cc, int) and not isinstance(cc, bool) and cc > 0:
++            args += ["--conversation-cache-mib", str(cc)]
++        elif cc not in (None, False, 0):
++            print(f'[strata] "conversation_cache" is {cc!r}: "auto", true or a number of MiB is what it takes: '
++                  "ignored", flush=True)
+     args += parallel_args(cfg, args)
+     return learned_profile_args(cfg, args)
+ 
