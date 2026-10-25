@@ -786,6 +786,7 @@ protected:
     bool in_read_ = false;               ///< a read() is running: its prompt batches count their routing into
                                          ///< heat_ (nothing else counts there; use_ counts every path)
     Stats stats_;
+    bool stream_stage_ = false;         ///< opt-in streaming CPU stores into the existing expert upload buffers
 };
 
 }  // namespace strata::poly

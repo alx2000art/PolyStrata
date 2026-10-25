@@ -1,6 +1,7 @@
 // src/poly/engine.cpp - see the header.  What every architecture shares: the files, the weights' way to VRAM, the
 // routed experts (the cache, the CPU, a prompt batch), the sequence's state, and the calls that feed tokens.
 #include "engine.hpp"
+#include "stage_copy.hpp"
 
 #include "deepseek4.hpp"
 #include "gemma4.hpp"
@@ -1677,6 +1678,12 @@ void Engine::load(const Options& o) {
     if (!(opt_.skip_weight >= 0.f && opt_.skip_weight < 1.f))
         throw std::runtime_error("--skip-weight is a share of a token's experts' weight: 0 (off) up to below 1");
     if (opt_.dump || std::min(opt_.prompt_batch, opt_.max_context) == 1) opt_.window = 1;
+    const char* stream_stage = std::getenv("STRATA_POLY_STREAM_STAGE");
+    const bool requested_stream_stage = stream_stage && std::atoi(stream_stage) == 1;
+    stream_stage_ = requested_stream_stage && stage_copy_streaming_available();
+    if (requested_stream_stage)
+        std::fprintf(stderr, "strata-poly: STRATA_POLY_STREAM_STAGE: %s\n",
+                     stream_stage_ ? "streaming CPU stores for expert staging" : "unsupported CPU build; stock copies");
     gg_ = std::make_unique<Shards>(opt_.model);
     if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
     load_geometry();
@@ -2415,8 +2422,13 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         uint8_t* h = h_stage_[stage_turn_];
         const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
         ck(cudaEventSynchronize(left), "expert staging");
+        const auto put = [&](void* dst, const void* src, size_t bytes) {
+            if (stream_stage_) stage_copy_streaming(dst, src, bytes);
+            else std::memcpy(dst, src, bytes);
+        };
         const auto copy = [&](int i) {
             const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
+<<<<<<< HEAD
             try {
                 if (i % 3 == 0) {
                     if (by_file) L.gu_file->read(L.gu_at + e * L.gu_stride, h + j * gu2, L.gu_bytes);
@@ -2431,6 +2443,11 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
             } catch (...) {
                 if (!err_taken.exchange(true)) read_err = std::current_exception();
             }
+=======
+            if (i % 3 == 0) put(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+            else if (i % 3 == 1) put(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+            else put(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+>>>>>>> 967664cd (poly: add opt-in streaming CPU stores for expert staging)
         };
         (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
         if (read_err) std::rethrow_exception(read_err);
