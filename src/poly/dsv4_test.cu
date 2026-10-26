@@ -291,7 +291,7 @@ int test_index() {
     float* d_s = dev(zs);
     std::vector<int32_t> zsel((size_t) rows * top);
     int32_t* d_sel = dev(zsel);
-    dsv4_idx_score(d_q, d_w, d_k, d_s, stride, dim, heads, ratio, pos, rows, 0.01f, nullptr, 0, 0);
+    dsv4_idx_score(d_q, d_w, d_k, d_s, stride, dim, heads, ratio, pos, rows, 0.01f, nullptr, 0, 0, 0);
     dsv4_select(d_s, stride, d_sel, top, top, ratio, pos, rows, nullptr);
     auto got = host(d_s, zs.size());
     auto sel = host(d_sel, zsel.size());
