@@ -2354,30 +2354,6 @@ CUDA card, where it measured +1..3 % prompt speed on a Tesla P100 at 30-60K toke
 Options that change answers (other summation order) are separate and explicit: `STRATA_SELECT_SIMT=1|2` (FP32 tiled block scorer,
 KL 0.01 against the warp scorer per #2071), `STRATA_PA_V2T=1` (v2 prompt attention, #2092/#2146), `STRATA_PF_FUSED=1
 STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts for the Q2_0 pack, #2145; only on a 7.5 card, sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).
-<<<<<<< HEAD
-=======
-
-## strata-poly: chunked GDN prefill
-
-`STRATA_GDN_MMA=1` requests the shared CUDA tensor-core GDN kernel for eligible reads in the Qwen35 backend.
-Unset or `0` keeps the stock recurrence. The request is captured at engine initialization; restart to change
-it. The server's existing model `env` map accepts the same setting, and an explicit `"0"` overrides an
-inherited `1`. There is no new API parameter or installer default.
-
-The capability decision is logged once per engine, including fallback on unsupported shapes, devices or
-backends. Eligible calls have 128 values per head, 16 key heads, 16/32/48/64 value heads and at least 64
-contiguous rows from one sequence. Decode, short reads, separate sequence rows, recorded launches and MTP
-intermediate snapshots keep the stock path. No extra persistent GPU buffer is added.
-
-The shared `strata_gdn_mma` library exposes prepared inputs through `include/strata/kernels/gdn_mma.hpp`
-in `strata::kernels`. Qwen35 (`qwen35moe`) is currently the only integrated caller; other compatible models
-can add thin adapters using the same kernel and capability checks. The original `strata` engine is unchanged.
-
-Supported CUDA targets are SM 86/89/120/121, subject to sufficient shared memory; SM100 is not enabled.
-Runtime measurements used SM89. CUDA 13.3 compilation was checked for the SM120/121 kernel and SM120
-adapter, but Blackwell runtime testing is still needed. HIP and SYCL were not built here; the CUDA library
-is excluded on those backends. This experimental opt-in changes floating-point accumulation and can change
-outputs. Prefill gains do not guarantee faster generation; some measured long-response TG runs regressed.
 
 ## strata-poly: streaming CPU copies for expert staging
 
@@ -2386,4 +2362,3 @@ buffers during prefill. Unset or `0` keeps the stock copies. The setting is capt
 restart to change it. It can also be set in the server model's `env` map. Builds without SSE2 keep stock copies.
 This applies to the shared strata-poly staging path; the original strata engine and background expert swaps
 are unchanged. No extra host or GPU buffer is allocated, and the model file mapping is unchanged.
->>>>>>> 967664cd (poly: add opt-in streaming CPU stores for expert staging)

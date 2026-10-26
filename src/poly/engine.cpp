@@ -2428,26 +2428,20 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         };
         const auto copy = [&](int i) {
             const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
-<<<<<<< HEAD
             try {
                 if (i % 3 == 0) {
                     if (by_file) L.gu_file->read(L.gu_at + e * L.gu_stride, h + j * gu2, L.gu_bytes);
-                    else std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                    else put(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
                 } else if (i % 3 == 1) {
                     if (by_file) L.up_file->read(L.up_at + e * L.gu_stride, h + j * gu2 + L.gu_bytes, L.gu_bytes);
-                    else std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+                    else put(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
                 } else {
                     if (by_file) L.d_file->read(L.d_at + e * L.d_bytes, h + c * gu2 + j * L.d_bytes, L.d_bytes);
-                    else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+                    else put(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
                 }
             } catch (...) {
                 if (!err_taken.exchange(true)) read_err = std::current_exception();
             }
-=======
-            if (i % 3 == 0) put(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
-            else if (i % 3 == 1) put(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
-            else put(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
->>>>>>> 967664cd (poly: add opt-in streaming CPU stores for expert staging)
         };
         (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
         if (read_err) std::rethrow_exception(read_err);
