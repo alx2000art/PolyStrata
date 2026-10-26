@@ -2113,10 +2113,10 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                                         ${_strata_gpu_include_directories})
   target_link_libraries(poly_shortconv_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
   # DeepSeek V4's kernels against the same arithmetic on the host; needs a card, so it is run by hand
-  add_executable(poly_dsv4_test src/poly/dsv4_test.cu src/poly/kernels_dsv4.cu)
+  add_executable(poly_dsv4_test src/poly/dsv4_test.cu src/poly/kernels_dsv4.cu src/poly/kernels.cu)
   target_include_directories(poly_dsv4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                    ${_strata_gpu_include_directories})
-  target_link_libraries(poly_dsv4_test PRIVATE ${_strata_gpu_runtime_target})
+  target_link_libraries(poly_dsv4_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
   # the pool of the CPU experts, without a model
   add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp)
   target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include)

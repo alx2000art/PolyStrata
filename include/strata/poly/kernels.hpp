@@ -39,6 +39,9 @@ void layer_norm(const float* x, const float* w, const float* b, float* y, int n,
 /// then comb[hc * hc] (comb[dst + hc * src]), which hc_post reads.  `mix` is hc*(2+hc)+1 floats of scratch a token.
 void hc_pre(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* hcw,
             float* cur, int n_embd, int rows, float norm_eps, float hc_eps, int sinkhorn_iters, void* stream);
+/// hc_pre's and hc_head's mix alone, as a small GEMM: mix[row * (n_mix + 1) + o] = fn row o . r row for o < n_mix,
+/// mix[row * (n_mix + 1) + n_mix] = sum of r row's squares.  r: hc * n_embd a row, fn: n_mix rows of hc * n_embd.
+void hc_mix(const float* r, const float* fn, float* mix, int n_embd, int rows, int n_mix, void* stream);
 /// The hyper-connection write, in place on r: r[dst] = x * post[dst] + sum_src r[src] * comb[dst, src].
 void hc_post(const float* x, const float* hcw, float* r, int n_embd, int rows, void* stream);
 /// y = mean over the hc streams, token by token.

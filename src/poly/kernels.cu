@@ -185,7 +185,8 @@ __global__ void layer_norm_kernel(const float* __restrict__ x, const float* __re
     for (int i = threadIdx.x; i < n; i += blockDim.x) yr[i] = (xr[i] - mean) * scale * w[i] + b[i];
 }
 
-// mix[o] = fn row o . r for o < n_mix; mix[n_mix] = sum of r^2 (the flat RMS norm's input)
+// mix[o] = fn row o . r for o < n_mix; mix[n_mix] = sum of r^2 (the flat RMS norm's input).  The decode's shape:
+// a row or two, the twenty-five blocks spread the dots over the card.
 __global__ void hc_mix_kernel(const float* __restrict__ r, const float* __restrict__ fn, float* __restrict__ mix,
                               int n, int n_mix) {
     __shared__ float part[32];
@@ -201,6 +202,39 @@ __global__ void hc_mix_kernel(const float* __restrict__ r, const float* __restri
     }
     acc = block_sum(acc, part);
     if (threadIdx.x == 0) mix[o] = acc;
+}
+
+// hc_mix as a small GEMM: a block of four rows computes all n_mix + 1 outputs for its rows - the rows' n values
+// are read once and kept in registers through the outputs' sweeps, fn streams coalesced from L2 - against
+// hc_mix_kernel's old twenty-five blocks a row, each pulling the row from L2 again.  A warp takes the outputs
+// o = w, w + 8, w + 16, w + 24; output n_mix is the flat RMS's sum of squares, the rest dot fn's rows with r.
+__global__ void hc_mix_gemm_kernel(const float* __restrict__ r, const float* __restrict__ fn,
+                                   float* __restrict__ mix, int n, int n_mix, int rows) {
+    constexpr int ROWS = 4;
+    const int rb = blockIdx.y * ROWS;
+    const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP;
+    float acc[ROWS][4] = {};
+    int outs[4], no = 0;
+    for (int o = w; o <= n_mix; o += 8) outs[no++] = o;
+    for (int i = lane; i < n; i += WARP) {
+        float rv[ROWS];
+        #pragma unroll
+        for (int t = 0; t < ROWS; ++t) rv[t] = rb + t < rows ? r[size_t(rb + t) * n + i] : 0.f;
+        #pragma unroll
+        for (int k = 0; k < no; ++k) {
+            const float f = outs[k] < n_mix ? fn[size_t(outs[k]) * n + i] : 0.f;
+            #pragma unroll
+            for (int t = 0; t < ROWS; ++t)
+                acc[t][k] += outs[k] < n_mix ? f * rv[t] : rv[t] * rv[t];
+        }
+    }
+    #pragma unroll
+    for (int k = 0; k < no; ++k)
+        #pragma unroll
+        for (int t = 0; t < ROWS; ++t) {
+            acc[t][k] = warp_sum(acc[t][k]);
+            if (lane == 0 && rb + t < rows) mix[size_t(rb + t) * (n_mix + 1) + outs[k]] = acc[t][k];
+        }
 }
 
 __device__ void comb_norm_cols(float* comb, float eps) {
@@ -2223,10 +2257,24 @@ void layer_norm(const float* x, const float* w, const float* b, float* y, int n,
     layer_norm_kernel<<<rows, 128, 0, cs(stream)>>>(x, w, b, y, n, eps);
 }
 
+void hc_mix(const float* r, const float* fn, float* mix, int n_embd, int rows, int n_mix, void* stream) {
+    if (rows <= 0) return;
+    // the GEMM wins from rows >= 8 on (a block of four rows, all outputs); at a row or two - decode - the old
+    // kernel's twenty-five blocks spread the dots over the card, one block of the GEMM would sit on one SM
+    if (rows >= 8) {
+        hc_mix_gemm_kernel<<<dim3(1, grid(rows, 4)), 8 * WARP, 0, cs(stream)>>>(r, fn, mix, HC * n_embd, n_mix, rows);
+    } else {
+        hc_mix_kernel<<<dim3(n_mix + 1, rows), sum_threads(HC * n_embd), 0, cs(stream)>>>(r, fn, mix, HC * n_embd,
+                                                                                          n_mix);
+    }
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("hc_mix: ") + cudaGetErrorString(e));
+}
+
 void hc_pre(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* hcw,
             float* cur, int n_embd, int rows, float norm_eps, float hc_eps, int sinkhorn_iters, void* stream) {
     const int n_mix = HC * (2 + HC);
-    hc_mix_kernel<<<dim3(n_mix + 1, rows), sum_threads(HC * n_embd), 0, cs(stream)>>>(r, fn, mix, HC * n_embd, n_mix);
+    hc_mix(r, fn, mix, n_embd, rows, n_mix, stream);
     hc_read_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, mix, scale, base, hcw, cur, n_embd,
                                                                          norm_eps, hc_eps, sinkhorn_iters);
 }
@@ -2241,7 +2289,7 @@ void hc_mean(const float* r, float* y, int n_embd, int rows, void* stream) {
 
 void hc_head(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* y,
              int n_embd, int rows, float norm_eps, float hc_eps, void* stream) {
-    hc_mix_kernel<<<dim3(HC + 1, rows), sum_threads(HC * n_embd), 0, cs(stream)>>>(r, fn, mix, HC * n_embd, HC);
+    hc_mix(r, fn, mix, n_embd, rows, HC, stream);
     hc_head_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, mix, scale, base, y, n_embd, norm_eps,
                                                                          hc_eps);
 }

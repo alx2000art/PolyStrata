@@ -337,6 +337,37 @@ int test_index() {
     return bad;
 }
 
+// hc_pre's and hc_head's mix, both shapes, against the host's dots
+int test_hc() {
+    const int hc = 4, n_embd = 512, rows = 40;
+    auto r = random((size_t) rows * hc * n_embd, 0.1f);
+    int bad = 0;
+    for (int n_mix : {hc * (2 + hc), hc}) {
+        auto fn = random((size_t) n_mix * hc * n_embd, 0.1f);
+        std::vector<float> mix((size_t) rows * (n_mix + 1), -1.f);
+        float *d_r = dev(r), *d_fn = dev(fn), *d_m = dev(mix);
+        hc_mix(d_r, d_fn, d_m, n_embd, rows, n_mix, nullptr);
+        auto got = host(d_m, mix.size());
+        std::vector<float> want(mix.size());
+        for (int t = 0; t < rows; ++t) {
+            const float* rt = r.data() + (size_t) t * hc * n_embd;
+            for (int o = 0; o <= n_mix; ++o) {
+                float acc = 0;
+                if (o < n_mix)
+                    for (int i = 0; i < hc * n_embd; ++i) acc += fn[(size_t) o * hc * n_embd + i] * rt[i];
+                else
+                    for (int i = 0; i < hc * n_embd; ++i) acc += rt[i] * rt[i];
+                want[(size_t) t * (n_mix + 1) + o] = acc;
+            }
+        }
+        char what[64];
+        std::snprintf(what, sizeof what, "hc mix n_mix %d", n_mix);
+        bad += report(what, got, want, 1e-3);
+        for (void* p : {(void*) d_r, (void*) d_fn, (void*) d_m}) cudaFree(p);
+    }
+    return bad;
+}
+
 }  // namespace
 
 int main() {
