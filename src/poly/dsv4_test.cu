@@ -386,6 +386,7 @@ int main() {
     bad += test_attend(true, 4, 40, 16, 40, 0);    // the tensor-core rows kernel: the heads on the mma's M tile
     bad += test_attend(false, 128, 40, 32, 40, 0);
     bad += test_index();
+    bad += test_hc();
     if (cudaGetLastError() != cudaSuccess) {
         std::printf("CUDA error\n");
         return 2;
