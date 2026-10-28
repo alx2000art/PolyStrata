@@ -732,7 +732,7 @@ attend_rows_mma_kernel(const float* __restrict__ q, const uint16_t* __restrict__
                 const uint2 hi = *reinterpret_cast<const uint2*>(&sq[(g8 + 8) * QS + d]);
                 const uint32_t a[4] = {lo.x, hi.x, lo.y, hi.y};
                 uint32_t b0 = 0, b1 = 0;
-                if (key < nk) {
+                if (key < k0 + nk) {
                     if (key < n_raw && q8) {
                         const uint2 w8 = *reinterpret_cast<const uint2*>(k_codes + (size_t) ((first_raw + key) % ring) * DIM + 32 * b + 8 * t4);
                         const uint32_t word = (hh ? w8.y : w8.x) ^ 0x80808080u;
@@ -833,7 +833,7 @@ attend_rows_mma_kernel(const float* __restrict__ q, const uint16_t* __restrict__
             for (int i = 0; i < 4; ++i) {
                 const int key = k0 + 16 * kk + 2 * t4 + (i & 1) + 8 * (i >> 1);
                 vx[i] = make_uint4(0u, 0u, 0u, 0u); vsc[i] = 0x3c00;   // half 1
-                if (key < nk) {
+                if (key < k0 + nk) {
                     if (key < n_raw && q8) {
                         vx[i] = widen2(*reinterpret_cast<const uint2*>(k_codes + (size_t) ((first_raw + key) % ring) * DIM + DW * w + 8 * g8));
                         vsc[i] = k_scales[(size_t) ((first_raw + key) % ring) * (DIM / 32) + (DW * w + 8 * g8) / 32];
@@ -845,7 +845,31 @@ attend_rows_mma_kernel(const float* __restrict__ q, const uint16_t* __restrict__
                     }
                 }
             }
-            if (q8) {
+            const int base_key = k0 + 16 * kk;
+            // A step that straddles the raw window mixes q8 codes and fp16 compressed rows: the fast unpack
+            // below reads every value as a code, so such a step takes its keys apart one at a time.  A step
+            // wholly past the raw window is all fp16 and takes the path after this one.
+            if (q8 && base_key < n_raw && base_key + 15 >= n_raw) {
+                int key[4];
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) key[i] = base_key + 2 * t4 + (i & 1) + 8 * (i >> 1);
+                #pragma unroll
+                for (int dd = 0; dd < 8; ++dd) {
+                    half hv[4];
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i)
+                        hv[i] = key[i] >= k0 + nk ? __float2half(0.f)
+                              : key[i] < n_raw
+                                  ? __hmul(__float2half_rn(float(((const int8_t*) &vx[i])[dd])), __ushort_as_half(vsc[i]))
+                                  : ((const half*) &vx[i])[dd];
+                    const half2 b0 = __halves2half2(hv[0], hv[1]);
+                    const half2 b1 = __halves2half2(hv[2], hv[3]);
+                    mma16816(o[dd], a, *reinterpret_cast<const uint32_t*>(&b0),
+                             *reinterpret_cast<const uint32_t*>(&b1));
+                }
+                continue;
+            }
+            if (q8 && base_key + 15 < n_raw) {
                 const half2 s01 = __halves2half2(__ushort_as_half(vsc[0]), __ushort_as_half(vsc[1]));
                 const half2 s89 = __halves2half2(__ushort_as_half(vsc[2]), __ushort_as_half(vsc[3]));
                 #pragma unroll
@@ -861,8 +885,7 @@ attend_rows_mma_kernel(const float* __restrict__ q, const uint16_t* __restrict__
                         const uint32_t selb = jj & 1 ? 0x4342 : 0x4140;
                         const uint32_t b0 = mul2(i8pair(jj < 2 ? lo01 : hi01, selb), s01);
                         const uint32_t b1 = mul2(i8pair(jj < 2 ? lo89 : hi89, selb), s89);
-                        #pragma unroll
-                        for (int j = 0; j < NW; ++j) mma16816(o[4 * wd + jj], a, b0, b1);
+                        mma16816(o[4 * wd + jj], a, b0, b1);
                     }
                 }
                 continue;
