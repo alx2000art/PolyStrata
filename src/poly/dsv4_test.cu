@@ -165,24 +165,51 @@ int test_squeeze(bool overlap, int ratio, int dim) {
 }
 
 // rows from GROUP_ROWS (32) take the batch kernel; 12 heads leave its second group of 8 short.  batch 0 (with
-// heads a multiple of GROUP_HEADS) takes the tensor-core rows kernel
-int test_attend(bool with_sel, int ratio, int rows, int heads, int window, int batch = 1) {
+// heads a multiple of GROUP_HEADS) takes the tensor-core rows kernel.  q8 quantizes the raw rows as store_q8
+// does and gives the reference the dequantized values, so the kernel's unpacking is what the comparison is about
+int test_attend(bool with_sel, int ratio, int rows, int heads, int window, int batch = 1, bool q8 = false) {
     const int dim = 512, top = 6;
     const int64_t pos = 60;
     const int ring = window + rows, n_comp = (int) ((pos + rows) / ratio);
     auto q = random((size_t) rows * heads * dim, 0.05f);
     auto rawf = random((size_t) ring * dim), compf = random((size_t) n_comp * dim), sinks = random(heads);
     auto raw = to_f16(rawf), comp = to_f16(compf);
+    // q8_0 as store_q8 writes it (kernels.cu): d = amax/127 a 32-value block, codes = rint(x/d) clamped to 127;
+    // the reference reads what the cache holds, code * half(d), which is the kernel's mul2 exactly
+    std::vector<int8_t> codes;
+    std::vector<uint16_t> scales;
+    if (q8) {
+        codes.assign((size_t) ring * dim, 0);
+        scales.assign((size_t) ring * (dim / 32), 0);
+        for (int r = 0; r < ring; ++r)
+            for (int b = 0; b < dim / 32; ++b) {
+                float amax = 0.f;
+                for (int j = 0; j < 32; ++j) amax = std::max(amax, std::fabs(rawf[(size_t) r * dim + b * 32 + j]));
+                const float d = amax / 127.f, id = d > 0.f ? 1.f / d : 0.f;
+                const uint16_t dh = __half_as_ushort(__float2half(d));
+                scales[(size_t) r * (dim / 32) + b] = dh;
+                for (int j = 0; j < 32; ++j) {
+                    const size_t i = (size_t) r * dim + b * 32 + j;
+                    const float c = std::min(std::max(std::rint(rawf[i] * id), -127.f), 127.f);
+                    codes[i] = (int8_t) c;
+                    rawf[i] = c * f16(dh);
+                }
+            }
+        raw = to_f16(rawf);
+    }
     std::vector<int32_t> sel((size_t) rows * top);
     for (int t = 0; t < rows; ++t)
         for (int j = 0; j < top; ++j) sel[(size_t) t * top + j] = (j * 3 + t) % std::max(1, (int) ((pos + t + 1) / ratio));
     float *d_q = dev(q), *d_s = dev(sinks);
     uint16_t *d_raw = dev(raw), *d_comp = dev(comp);
     int32_t* d_sel = dev(sel);
+    int8_t* d_codes = q8 ? dev(codes) : nullptr;
+    uint16_t* d_scales = q8 ? dev(scales) : nullptr;
+    const Kvq8 kq{d_codes, d_scales};
     std::vector<float> zo((size_t) rows * heads * dim);
     float* d_out = dev(zo);
     dsv4_attend(d_q, d_raw, ring, window, d_comp, ratio, with_sel ? d_sel : nullptr, top, top, d_s, d_out, dim, heads,
-                0.04f, pos, rows, nullptr, nullptr, 0, Kvq8{}, batch, 16, 1, 1);
+                0.04f, pos, rows, nullptr, nullptr, 0, kq, batch, 16, 1, 1);
     auto got = host(d_out, zo.size());
     // the same input once through the classic token-a-block kernel, where batch 0 lands on it: a head count that
     // is not a multiple of GROUP_HEADS (16) takes the fallback, so only those cases get the second run
@@ -191,7 +218,7 @@ int test_attend(bool with_sel, int ratio, int rows, int heads, int window, int b
     if (classic) {
         cudaMemset(d_out, 0, zo.size() * sizeof(float));
         dsv4_attend(d_q, d_raw, ring, window, d_comp, ratio, with_sel ? d_sel : nullptr, top, top, d_s, d_out, dim,
-                    heads, 0.04f, pos, rows, nullptr, nullptr, 0, Kvq8{}, 0, 16, 1, 1);
+                    heads, 0.04f, pos, rows, nullptr, nullptr, 0, kq, 0, 16, 1, 1);
         got_rows = host(d_out, zo.size());
     }
     std::vector<float> want(zo.size());
@@ -257,13 +284,15 @@ int test_attend(bool with_sel, int ratio, int rows, int heads, int window, int b
     char what[64];
     int bad;
     if (batch) {
-        std::snprintf(what, sizeof what, "attend ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
+        std::snprintf(what, sizeof what, "attend ratio %d%s, %d tokens%s", ratio, with_sel ? ", picked" : "", rows,
+                      q8 ? ", q8" : "");
         bad = report(what, got, want, 1e-3);
     } else {
         // the mma path keeps the probabilities and the queries as halves (fdec's class): outputs that cancel to
         // near zero carry an absolute error of up to ~1e-3 no per-value relative bound can hold, so it is judged
         // by the absolute error alone
-        std::snprintf(what, sizeof what, "attend mma ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
+        std::snprintf(what, sizeof what, "attend mma ratio %d%s, %d tokens%s", ratio, with_sel ? ", picked" : "", rows,
+                      q8 ? ", q8" : "");
         double worst_abs = 0;
         for (size_t k = 0; k < zo.size(); ++k) worst_abs = std::max(worst_abs, std::abs((double) got[k] - want[k]));
         std::printf("%-34s %d values, worst abs %.2g: %s\n", what, (int) zo.size(), worst_abs,
@@ -271,10 +300,12 @@ int test_attend(bool with_sel, int ratio, int rows, int heads, int window, int b
         bad = worst_abs <= 3e-3 ? 0 : 1;
     }
     if (classic) {
-        std::snprintf(what, sizeof what, "attend rows ratio %d%s, %d tokens", ratio, with_sel ? ", picked" : "", rows);
+        std::snprintf(what, sizeof what, "attend rows ratio %d%s, %d tokens%s", ratio, with_sel ? ", picked" : "", rows,
+                      q8 ? ", q8" : "");
         bad += report(what, got_rows, want, 1e-3);
     }
-    for (void* p : {(void*) d_q, (void*) d_s, (void*) d_raw, (void*) d_comp, (void*) d_sel, (void*) d_out}) cudaFree(p);
+    for (void* p : {(void*) d_q, (void*) d_s, (void*) d_raw, (void*) d_comp, (void*) d_sel, (void*) d_out,
+                    (void*) d_codes, (void*) d_scales}) cudaFree(p);
     return bad;
 }
 
@@ -385,6 +416,12 @@ int main() {
                                                // past the batch's end
     bad += test_attend(true, 4, 40, 16, 40, 0);    // the tensor-core rows kernel: the heads on the mma's M tile
     bad += test_attend(false, 128, 40, 32, 40, 0);
+    // q8_0 with a window past 64 keys: a second phase, and a P V step that straddles the raw window.  The three
+    // bugs of commit 91bd723 (the straddling step's unpacking, the phase's key mask, the 8x mma of the q8 fast
+    // path) each showed here and nowhere in the runs above
+    bad += test_attend(true, 4, 40, 16, 70, 0, true);
+    bad += test_attend(false, 4, 40, 16, 70, 0, true);
+    bad += test_attend(true, 128, 40, 16, 70, 0, true);   // ratio 128: the window is the token's whole key list
     bad += test_index();
     bad += test_hc();
     if (cudaGetLastError() != cudaSuccess) {
