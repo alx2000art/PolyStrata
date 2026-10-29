@@ -1169,9 +1169,12 @@ struct tensor_shell {
 };
 }  // namespace
 
-// Q2_K and Q3_K: the UD pack's expert quants.  Everything else keeps vec_dot.
+// Q2_K only for now: the Q3_K tiled kernel (SUBBLK=16, BIAS=4, ACTBIAS=true) segfaults
+// at the small batches this engine routes to the CPU (runs of 8-30 rows; upstream exercises
+// it at ~64), under gdb frame #0 in one_expert<block_q3_K, ...>.  Q3_K keeps the vec_dot
+// path until the kernel is pinned down against upstream.
 bool cpu_tiled_supported(int w_type) {
-    return w_type == GGML_TYPE_Q2_K || w_type == GGML_TYPE_Q3_K;
+    return w_type == GGML_TYPE_Q2_K;
 }
 
 size_t cpu_tiled_scratch_bytes(int n_threads) {
