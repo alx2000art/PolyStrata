@@ -1198,7 +1198,7 @@ void cpu_tiled_row_range(int n_out, int ith, int nth, int* lo, int* hi) {
 bool cpu_tiled_mmul_one(const void* w, int64_t w_row_bytes, int w_type, int n_out, int n_in,
                         const void* act, int64_t act_row_bytes, int rows_total,
                         const int32_t* rows, int n_tok,
-                        float* out, int out_stride, int slice_rows, int row_lo,
+                        float* out, int out_stride, int row_lo,
                         int ith, int nth, char* scratch_base) {
     if (!cpu_tiled_supported(w_type) || n_tok < 8 || (n_in % 256) != 0) return false;
 

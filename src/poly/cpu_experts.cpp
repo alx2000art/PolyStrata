@@ -211,7 +211,6 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             if (runp[u + 1] - runp[u] >= 8)
                 for (int ith = 0; ith < nth; ++ith) tasks.push_back({u, 0, 0, ith, true});
     }
-    const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
     for (int u = 0; u < n_run; ++u) {
         if (n_tiled && runp[u + 1] - runp[u] >= 8) continue;
         for (int r0 = 0; r0 < n_ff; r0 += kRowsPerTask)
@@ -228,7 +227,6 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             const int ith = tk.ith;
             int lo = 0, hi = 0;
             cpu_tiled_row_range(n_ff, ith, nth, &lo, &hi);
-            const int sr = hi - lo;
             float* g = gt.data() + (size_t) ith * max_cnt * sr_max;
             float* u = ut.data() + (size_t) ith * max_cnt * sr_max;
             trows.resize((size_t) (i1 - i0) * 2);
@@ -237,9 +235,9 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 trows[2 * (size_t) (i - i0) + 1] = 0;
             }
             if (!cpu_tiled_mmul_one(e.gate, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
-                                    trows.data(), i1 - i0, g, sr_max, sr, lo, ith, nth, tscratch.data())
+                                    trows.data(), i1 - i0, g, sr_max, lo, ith, nth, tscratch.data())
                 || !cpu_tiled_mmul_one(e.up, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
-                                       trows.data(), i1 - i0, u, sr_max, sr, lo, ith, nth, tscratch.data())) {
+                                       trows.data(), i1 - i0, u, sr_max, lo, ith, nth, tscratch.data())) {
                 return;   // not eligible after all: silu below would see stale g/u
             }
             for (int i = i0; i < i1; ++i) {

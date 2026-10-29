@@ -20,7 +20,7 @@ void cpu_tiled_row_range(int n_out, int ith, int nth, int* lo, int* hi);
 bool cpu_tiled_mmul_one(const void* w, std::ptrdiff_t w_row_bytes, int w_type, int n_out, int n_in,
                         const void* act, std::ptrdiff_t act_row_bytes, int rows_total,
                         const int32_t* rows, int n_tok,
-                        float* out, int out_stride, int slice_rows, int row_lo,
+                        float* out, int out_stride, int row_lo,
                         int ith, int nth, char* scratch_base);
 
 }  // namespace strata::poly
