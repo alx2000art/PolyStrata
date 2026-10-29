@@ -216,7 +216,26 @@ __global__ void hc_mix_gemm_kernel(const float* __restrict__ r, const float* __r
     float acc[ROWS][4] = {};
     int outs[4], no = 0;
     for (int o = w; o <= n_mix; o += 8) outs[no++] = o;
-    for (int i = lane; i < n; i += WARP) {
+    // float4: four floats a lane a step, a quarter of the load instructions of the scalar walk
+    const int n4 = n / 4;
+    const float4* r4 = reinterpret_cast<const float4*>(r) + size_t(rb) * (n / 4);
+    for (int i4 = lane; i4 < n4; i4 += WARP) {
+        float4 rv[ROWS];
+        #pragma unroll
+        for (int t = 0; t < ROWS; ++t)
+            rv[t] = rb + t < rows ? r4[size_t(t) * (n / 4) + i4] : make_float4(0.f, 0.f, 0.f, 0.f);
+        #pragma unroll
+        for (int k = 0; k < no; ++k) {
+            const float4 f = outs[k] < n_mix ? reinterpret_cast<const float4*>(fn + size_t(outs[k]) * n)[i4]
+                                             : make_float4(0.f, 0.f, 0.f, 0.f);
+            #pragma unroll
+            for (int t = 0; t < ROWS; ++t)
+                acc[t][k] += outs[k] < n_mix ? f.x * rv[t].x + f.y * rv[t].y + f.z * rv[t].z + f.w * rv[t].w
+                                             : rv[t].x * rv[t].x + rv[t].y * rv[t].y
+                                             + rv[t].z * rv[t].z + rv[t].w * rv[t].w;
+        }
+    }
+    for (int i = n4 * 4 + lane; i < n; i += WARP) {   // the tail when n is not a multiple of four
         float rv[ROWS];
         #pragma unroll
         for (int t = 0; t < ROWS; ++t) rv[t] = rb + t < rows ? r[size_t(rb + t) * n + i] : 0.f;
