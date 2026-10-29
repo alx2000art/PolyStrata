@@ -1146,11 +1146,13 @@ bool ggml_compute_forward_mul_mat_id_tiled(
 }
 
 // ===================== strata::poly glue =====================
-// One weight panel (ggml Q2_K/Q3_K rows) against Q8_K-quantized activations,
-// through the vendored tiled kernels.  out is written row-major
-// (out_row_bytes per row), so callers set out_row_bytes to reach any
-// token-major or panel-major layout they keep.
+// One weight panel (ggml Q2_K/Q3_K expert rows) against Q8_K-quantized
+// activations, through the vendored tiled kernels.  The caller splits the
+// panel's output rows between its threads with the SAME group partition the
+// tiled driver uses (cpu_tiled_row_lo), and each thread's slice lands in its
+// own scratch buffer, so concurrent calls with distinct ith never share memory.
 
+#include <cstring>
 #include <vector>
 
 namespace strata::poly {
@@ -1176,35 +1178,44 @@ size_t cpu_tiled_scratch_bytes(int n_threads) {
     return (size_t) n_threads * ggml_tiled_ws_size();
 }
 
+int cpu_tiled_group() {
+    return TILED_MMID_GROUP;
+}
+
+// the driver's weight-row partition for (ith, nth): rows [lo, hi) of n_out
+void cpu_tiled_row_range(int n_out, int ith, int nth, int* lo, int* hi) {
+    const int ngroups = (n_out + TILED_MMID_GROUP - 1) / TILED_MMID_GROUP;
+    *lo = (ngroups * ith) / nth * TILED_MMID_GROUP;
+    const int g1 = (ngroups * (ith + 1)) / nth;
+    *hi = std::min(n_out, g1 * TILED_MMID_GROUP);
+}
+
 // w: [n_out rows x n_in] of w_type, w_row_bytes per row (ggml block layout).
-// act: [n_tok rows x n_in] of Q8_K (the weight type's vec_dot_type), act_row_bytes per row.
-// out: [n_out x n_tok] floats, out_row_bytes per row.  Returns false when the
-// tiled path is not eligible (falls back to vec_dot); scratch is
-// cpu_tiled_scratch_bytes(nth) of zeroable memory shared by concurrent calls
-// that use distinct ith in [0, nth).
+// rows: n_tok (src1 row, batch 0) pairs into the full activation buffer.
+// out: the caller's slice [slice_rows x n_tok] floats, row-major; the kernel's
+// absolute rows r land at (r - row_lo) * n_tok + j.  Returns false when the
+// tiled path is not eligible — the caller falls back to vec_dot.
 bool cpu_tiled_mmul_one(const void* w, int64_t w_row_bytes, int w_type, int n_out, int n_in,
-                        const void* act, int64_t act_row_bytes, int n_tok,
-                        float* out, int64_t out_row_bytes,
-                        int ith, int nth, char* scratch) {
+                        const void* act, int64_t act_row_bytes, int rows_total,
+                        const int32_t* rows, int n_tok,
+                        float* out, int out_stride, int slice_rows, int row_lo,
+                        int ith, int nth, char* scratch_base) {
     if (!cpu_tiled_supported(w_type) || n_tok < 8 || (n_in % 256) != 0) return false;
 
     tensor_shell wt(w_type, const_cast<void*>(w), n_in, n_out,
                     ggml_type_size((enum ggml_type) w_type), w_row_bytes);
-    tensor_shell at(GGML_TYPE_Q8_K, const_cast<void*>(act), n_in, n_tok, 1, act_row_bytes);
-    tensor_shell dt(GGML_TYPE_F32, out, n_out, n_tok, 4, out_row_bytes);
+    tensor_shell at(GGML_TYPE_Q8_K, const_cast<void*>(act), n_in, rows_total, 1, act_row_bytes);
+    tensor_shell dt(GGML_TYPE_F32, out - (size_t) row_lo, n_out, n_tok, 4, (int64_t) out_stride * 4);
     dt.t.src[0] = &wt.t;
     dt.t.src[1] = &at.t;
-
-    std::vector<int32_t> rows((size_t) n_tok * 2);
-    for (int i = 0; i < n_tok; ++i) { rows[2 * (size_t) i] = i; rows[2 * (size_t) i + 1] = 0; }
 
     ggml_compute_params p = {};
     p.ith = ith; p.nth = nth;
     p.wsize = ggml_tiled_ws_size();
-    p.wthread = scratch;
-    p.wdata = scratch;
+    p.wthread = scratch_base + (size_t) ith * ggml_tiled_ws_size();
+    p.wdata = p.wthread;
 
-    return ggml_compute_forward_mul_mat_id_tiled(&p, &dt.t, 0, n_tok, rows.data(), scratch);
+    return ggml_compute_forward_mul_mat_id_tiled(&p, &dt.t, 0, n_tok, rows, scratch_base);
 }
 
 }  // namespace strata::poly

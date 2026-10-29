@@ -1,6 +1,8 @@
 // src/poly/cpu_experts.cpp - see the header.
 #include "cpu_experts.hpp"
 
+#include "cpu_tiled.h"
+
 #include "ggml.h"
 #include "ggml-cpu.h"
 
@@ -140,7 +142,7 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
-                 int n_ff, const float* x, float limit, bool gelu, float* out,
+                 int n_ff, const float* x, float limit, bool gelu, float* out, bool tiled,
                  const std::function<void()>* meanwhile) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
@@ -176,14 +178,89 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     float* hp = h.data();
     const int* byp = by.data();
     const int* runp = run.data();
+
+    // The tiled runs (--cpu-tiled): a run of 8+ tokens on Q2_K/Q3_K weights goes through the vendored
+    // llama.cpp tiled kernels - a per-expert GEMM with register tiling, ~1.5-2x the per-row vec_dot on
+    // AVX512VNNI.  Each task takes one (run, ith): its weight-row slice's gate and up products land in
+    // the thread's scratch, and the same task applies silu/gelu and scatters them into hp, so no extra
+    // barrier is needed.  Runs under 8 tokens and the other types keep the vec_dot path below.
+    const int nth = workers.threads();
+    const bool tiled_ok = tiled && cpu_tiled_supported(gu_type) && (n_embd % 256) == 0;
+    int max_cnt = 0, n_tiled = 0;
+    if (tiled_ok) {
+        for (int u = 0; u < n_run; ++u) {
+            const int cnt = runp[u + 1] - runp[u];
+            if (cnt >= 8) { ++n_tiled; max_cnt = std::max(max_cnt, cnt); }
+        }
+    }
+    struct GuTask { int run; int r0; int r1; int ith; bool tiled; };
+    std::vector<GuTask> tasks;
+    std::vector<char> tscratch;
+    std::vector<float> gt, ut;
+    int sr_max = 0;
+    if (n_tiled) {
+        tscratch.resize(cpu_tiled_scratch_bytes(nth));
+        int sr_lo = 0, sr_hi = 0;
+        for (int ith = 0; ith < nth; ++ith) {
+            cpu_tiled_row_range(n_ff, ith, nth, &sr_lo, &sr_hi);
+            sr_max = std::max(sr_max, sr_hi - sr_lo);
+        }
+        gt.resize((size_t) nth * max_cnt * sr_max);
+        ut.resize((size_t) nth * max_cnt * sr_max);
+        for (int u = 0; u < n_run; ++u)
+            if (runp[u + 1] - runp[u] >= 8)
+                for (int ith = 0; ith < nth; ++ith) tasks.push_back({u, 0, 0, ith, true});
+    }
     const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
+    for (int u = 0; u < n_run; ++u) {
+        if (n_tiled && runp[u + 1] - runp[u] >= 8) continue;
+        for (int r0 = 0; r0 < n_ff; r0 += kRowsPerTask)
+            tasks.push_back({u, r0, std::min(n_ff, r0 + kRowsPerTask), -1, false});
+    }
+    static thread_local std::vector<int32_t> trows;
     const int first = meanwhile ? 1 : 0;   // task 0, so it is taken at once
-    workers.run(first + n_run * gu_tasks, [&](int t) {
+    workers.run(first + (int) tasks.size(), [&](int t) {
         if (t < first) return (*meanwhile)();
-        t -= first;
-        const int i0 = runp[t / gu_tasks], i1 = runp[t / gu_tasks + 1];
+        const GuTask& tk = tasks[(size_t) t - first];
+        const int i0 = runp[tk.run], i1 = runp[tk.run + 1];
         const CpuExpert& e = experts[byp[i0]];
-        const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);
+        if (tk.tiled) {
+            const int ith = tk.ith;
+            int lo = 0, hi = 0;
+            cpu_tiled_row_range(n_ff, ith, nth, &lo, &hi);
+            const int sr = hi - lo;
+            float* g = gt.data() + (size_t) ith * max_cnt * sr_max;
+            float* u = ut.data() + (size_t) ith * max_cnt * sr_max;
+            trows.resize((size_t) (i1 - i0) * 2);
+            for (int i = i0; i < i1; ++i) {
+                trows[2 * (size_t) (i - i0)] = experts[byp[i]].row;
+                trows[2 * (size_t) (i - i0) + 1] = 0;
+            }
+            if (!cpu_tiled_mmul_one(e.gate, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
+                                    trows.data(), i1 - i0, g, sr_max, sr, lo, ith, nth, tscratch.data())
+                || !cpu_tiled_mmul_one(e.up, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
+                                       trows.data(), i1 - i0, u, sr_max, sr, lo, ith, nth, tscratch.data())) {
+                return;   // not eligible after all: silu below would see stale g/u
+            }
+            for (int i = i0; i < i1; ++i) {
+                const int tok = experts[byp[i]].row;
+                const float* gj = g + (size_t) (i - i0) * sr_max;
+                const float* uj = u + (size_t) (i - i0) * sr_max;
+                for (int r = lo; r < hi; ++r) {
+                    const float pv = gj[r - lo], uv = uj[r - lo];
+                    if (gelu) {
+                        hp[(size_t) tok * n_ff + r] =
+                            0.5f * pv * (1.f + std::tanh(0.7978845608f * pv * (1.f + 0.044715f * pv * pv))) * uv;
+                        continue;
+                    }
+                    const float gc = std::min(pv, limit);
+                    hp[(size_t) tok * n_ff + r] =
+                        gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
+                }
+            }
+            return;
+        }
+        const int r0 = tk.r0, r1 = tk.r1;
         for (int r = r0; r < r1; ++r) {
             const uint8_t* gate = e.gate + (size_t) r * gu_row;
             const uint8_t* up = e.up + (size_t) r * gu_row;
