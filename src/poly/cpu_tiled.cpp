@@ -31,6 +31,13 @@ struct ggml_compute_params {
 
 #define UNUSED GGML_UNUSED
 
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
+
 // unpack routines for various quant types src0
 static void tiled_unpack_src0(const block_q4_K * rows, int64_t row_stride, int n_rows, tiled_tile_src0 * tile, int num_k) {
     GGML_ASSERT(n_rows <= TILED_TILE_ROWS);
@@ -1039,138 +1046,18 @@ static void ggml_compute_forward_mul_mat_tiled_one_chunk(
 }
 
 template <typename B, int SUBBLK, bool HAS_MIN, int BIAS, bool ACTBIAS>
-static void ggml_compute_forward_mul_mat_tiled_driver(
-        const struct ggml_compute_params * params,
-              struct ggml_tensor * dst) {
-
-    const struct ggml_tensor * src0 = dst->src[0];
-    const struct ggml_tensor * src1 = dst->src[1];
-
-    GGML_TENSOR_BINARY_OP_LOCALS
-
-    const int ith = params->ith;
-    const int nth = params->nth;
-
-    enum ggml_type      const vec_dot_type = ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
-    ggml_from_float_t   const from_float   = ggml_get_type_traits_cpu(vec_dot_type)->from_float;
-
-    GGML_ASSERT(ne0 == ne01);
-    GGML_ASSERT(ne1 == ne11);
-    GGML_ASSERT(ne2 == ne12);
-    GGML_ASSERT(ne3 == ne13);
-
-    // we don't support permuted src0 or src1
-    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
-
-    // dst cannot be transposed or permuted
-    GGML_ASSERT(nb0 == sizeof(float));
-    GGML_ASSERT(nb0 <= nb1);
-    GGML_ASSERT(nb1 <= nb2);
-    GGML_ASSERT(nb2 <= nb3);
-
-    if (src1->type != vec_dot_type) {
-        char * wdata = (char *) params->wdata;
-
-        const size_t nbw0 = ggml_type_size(vec_dot_type);
-        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
-        const size_t nbw2 = nbw1*ne11;
-        const size_t nbw3 = nbw2*ne12;
-
-        assert(params->wsize >= ne13*nbw3);
-        GGML_ASSERT(src1->type == GGML_TYPE_F32);
-
-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
-            for (int64_t i12 = 0; i12 < ne12; ++i12) {
-                for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    size_t bs = ggml_blck_size(vec_dot_type);
-                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
-                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    from_float((float *)((char *) src1->data + i13*src1->nb[3] + i12*src1->nb[2] + i11*src1->nb[1] + ne10_block_start*bs*src1->nb[0]),
-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
-                               (ne10_block_end - ne10_block_start) * bs);
-                }
-            }
-        }
-    }
-
-    if (ith == 0) {
-        // Every thread starts at ith, so the first unprocessed chunk is nth. This saves a bit of coordination right at the start.
-        ggml_threadpool_chunk_set(params->threadpool, nth);
-    }
-
-    ggml_barrier(params->threadpool);
-
-    // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these are the same numbers)
-    const int64_t nr0 = ne0;
-
-    // This is the size of the rest of the dimensions of the result
-    const int64_t nr1 = ne1 * ne2 * ne3;
-
-    // Now select a reasonable chunk size.
-    int chunk_size = 256; //TILED_TILE_ROWS;
-
-    // distribute the work across the inner or outer loop based on which one is larger
-    // The number of chunks in the 0/1 dim. CEIL(nr/chunk_size)
-    int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
-    int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
-
-    // Step down chunk size if too few chunks to saturate cores, minimum is microtile size
-    while (nchunk0 * nchunk1 < nth * 4 && chunk_size > 16) {
-        chunk_size = chunk_size / 2;
-        nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
-        nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
-    }
-
-    // The number of elements in each chunk
-    const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
-    const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
-
-    // The first chunk comes from our thread_id, the rest will get auto-assigned.
-    int current_chunk = ith;
-
-    // per-thread workspace: after any converted src1 data in wdata, aligned to 64
-    char * ws_base = (char *) params->wdata;
-    if (src1->type != vec_dot_type) {
-        ws_base += GGML_PAD(ggml_row_size(vec_dot_type, ggml_nelements(src1)), 64);
-    }
-    ws_base = (char *) (((uintptr_t) ws_base + 63) & ~(uintptr_t) 63);
-    tiled_ws * ws = (tiled_ws *) (ws_base + (size_t) ith * ggml_tiled_ws_size());
-
-    // TODO:  if we KNOW we're on a machine where all cores are equal, we could skip the coordination/work-stealing and just assign chunks deterministically
-    while (current_chunk < nchunk0 * nchunk1) {
-        const int64_t ith0 = current_chunk % nchunk0;
-        const int64_t ith1 = current_chunk / nchunk0;
-
-        const int64_t ir0_start = dr0 * ith0;
-        const int64_t ir0_end = MIN(ir0_start + dr0, nr0);
-
-        const int64_t ir1_start = dr1 * ith1;
-        const int64_t ir1_end = MIN(ir1_start + dr1, nr1);
-
-        ggml_compute_forward_mul_mat_tiled_one_chunk<B, SUBBLK, HAS_MIN, BIAS, ACTBIAS>(params, dst, ir0_start, ir0_end, ir1_start, ir1_end, ws);
-
-        if (nth >= nchunk0 * nchunk1) {
-            break;
-        }
-
-        current_chunk = ggml_threadpool_chunk_add(params->threadpool, 1);
-    }
-}
-
-// src0 type dispatch, shared by the MUL_MAT and MUL_MAT_ID entries: one expert for
-// MUL_MAT_ID (expert_rows != NULL), the full op for MUL_MAT
-template <typename B, int SUBBLK, bool HAS_MIN, int BIAS, bool ACTBIAS>
 static bool tiled_matmul_dispatch(const struct ggml_compute_params * params,
                                   struct ggml_tensor * dst,
                                   const int32_t * expert_rows,
                                   int64_t cur_a,
                                   int64_t cne1,
                                   char * scratch) {
+    // the plain MUL_MAT driver is cut (it needs ggml's thread-pool barriers);
+    // strata calls the MMID path per expert on its own pool
     if (expert_rows == NULL) {
-        ggml_compute_forward_mul_mat_tiled_driver<B, SUBBLK, HAS_MIN, BIAS, ACTBIAS>(params, dst);
-    } else {
-        ggml_compute_forward_mul_mat_id_tiled_one_expert<B, SUBBLK, HAS_MIN, BIAS, ACTBIAS>(params, dst, cur_a, cne1, expert_rows, scratch);
+        return false;
     }
+    ggml_compute_forward_mul_mat_id_tiled_one_expert<B, SUBBLK, HAS_MIN, BIAS, ACTBIAS>(params, dst, cur_a, cne1, expert_rows, scratch);
     return true;
 }
 
