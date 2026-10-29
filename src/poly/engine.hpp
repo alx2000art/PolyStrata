@@ -84,6 +84,8 @@ struct Options {
                                   ///< launch, as before, which that many rows fail
     int idx_mma = 1;              ///< the indexer's scores on the tensor cores where the card has them; 0: the
                                   ///< scalar kernel
+    int cpu_tiled = 1;            ///< the CPU experts' gate/up through the vendored llama.cpp tiled K-quant
+                                  ///< kernels (AVX512VNNI); 0: the per-row vec_dot path
     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
                                   ///< computes while the others are copied: the ones the fewest tokens chose;
                                   ///< below 0: as the two took the time between them; 0: none
