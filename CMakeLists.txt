@@ -2065,7 +2065,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   endif()
 
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
-                            src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp
+                            src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp
                             src/poly/kernels.cu src/poly/kernels_dsv4.cu src/core/conversation_memory.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories} ${_strata_tiled_ggml_src})
   # the driver's virtual memory calls: the attention caches grow with the conversation; on HIP they are HIP's
@@ -2080,7 +2080,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                            ${_strata_poly_driver}
                                            Threads::Threads)
   # needs the model file, so it is run by hand: poly_expert_parity MODEL.gguf
-  add_executable(poly_expert_parity src/poly/expert_parity.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/kernels.cu)
+  add_executable(poly_expert_parity src/poly/expert_parity.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp src/poly/kernels.cu)
   target_include_directories(poly_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                        ${_strata_gpu_include_directories} ${_strata_tiled_ggml_src})
   target_link_libraries(poly_expert_parity PRIVATE strata_poly_mmq strata_kernels ggml-cpu ggml-base
@@ -2090,7 +2090,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   # poly_draft_race_test MODEL.gguf [RUNS] [LAYER_SPLIT]
   add_executable(poly_draft_race_test src/poly/draft_race_test.cpp src/poly/engine.cpp src/poly/glm5next.cpp
                                       src/poly/qwen35.cpp src/poly/gemma4.cpp src/poly/deepseek4.cpp
-                                      src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
+                                      src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
                                       src/core/conversation_memory.cpp)
   target_include_directories(poly_draft_race_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                          ${_strata_gpu_include_directories} ${_strata_tiled_ggml_src})
