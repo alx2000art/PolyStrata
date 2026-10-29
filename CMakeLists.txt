@@ -2135,7 +2135,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                                    ${_strata_gpu_include_directories})
   target_link_libraries(poly_dsv4_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
   # the pool of the CPU experts, without a model
-  add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp)
+  add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp)
   target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include)
   target_link_libraries(poly_workers_test PRIVATE ggml-cpu ggml-base Threads::Threads)
   add_test(NAME poly_workers_test COMMAND poly_workers_test)
