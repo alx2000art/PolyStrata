@@ -1,0 +1,14 @@
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index 1275f16b..0787c79f 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -1490,6 +1490,9 @@ int Engine::grow_cache(size_t bytes) {
+ // first, as many as the buffer holds.  Worked out when the layer runs: the cache changes (follow()).
+ void Engine::plan_ahead(Layer& L, int il) {
+     L.ahead.clear();
++    // --cpu-share 1: the CPU computes every expert outside VRAM, so staging one ahead would copy its
++    // weights for the card to multiply into a zero weight (the whole gap to a stock CPU-expert prefill).
++    if (opt_.cpu_share >= 1.f) return;
+     for (int e = 0; e < n_expert_; ++e)
+         if (!L.slot[(size_t) e]) L.ahead.push_back(e);
+     if (!prior_.empty() || !heat_.empty()) {

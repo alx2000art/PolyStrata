@@ -1,0 +1,378 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5a08a3d5..a485b5bc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1985,6 +1985,11 @@ if(STRATA_BUILD_TESTS)
+   add_test(NAME aux_cpus_test COMMAND aux_cpus_test)
+ endif()
+ 
++# Poly opt-in controls and staging copies have host-only tests, including on non-CUDA builds.
++if(STRATA_BUILD_TESTS)
++  add_executable(poly_stream_stage_test src/poly/stage_copy_test.cpp)
++  add_test(NAME poly_stream_stage_test COMMAND poly_stream_stage_test)
++endif()
+ # ---- strata-poly: GLM 5.3 Flash (llama.cpp's glm5-next), read from its GGUF ----
+ #
+ # A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
+diff --git a/docs/DETAILS.md b/docs/DETAILS.md
+index 9bf20ddb..98a4b01e 100644
+--- a/docs/DETAILS.md
++++ b/docs/DETAILS.md
+@@ -2354,3 +2354,11 @@ CUDA card, where it measured +1..3 % prompt speed on a Tesla P100 at 30-60K toke
+ Options that change answers (other summation order) are separate and explicit: `STRATA_SELECT_SIMT=1|2` (FP32 tiled block scorer,
+ KL 0.01 against the warp scorer per #2071), `STRATA_PA_V2T=1` (v2 prompt attention, #2092/#2146), `STRATA_PF_FUSED=1
+ STRATA_PF_FUSED_SM75=1` (fused int8 prompt experts for the Q2_0 pack, #2145; only on a 7.5 card, sm_80+ is unchanged), `STRATA_BF16_TC=1` with `STRATA_XN_F16` (#2091).
++
++## strata-poly: streaming CPU copies for expert staging
++
++`STRATA_POLY_STREAM_STAGE=1` uses SSE2 streaming stores when packing experts into the existing host upload
++buffers during prefill. Unset or `0` keeps the stock copies. The setting is captured at engine initialization;
++restart to change it. It can also be set in the server model's `env` map. Builds without SSE2 keep stock copies.
++This applies to the shared strata-poly staging path; the original strata engine and background expert swaps
++are unchanged. No extra host or GPU buffer is allocated, and the model file mapping is unchanged.
+diff --git a/src/poly/cpu_experts.cpp b/src/poly/cpu_experts.cpp
+index 0c4dcb6c..e4cf7278 100644
+--- a/src/poly/cpu_experts.cpp
++++ b/src/poly/cpu_experts.cpp
+@@ -17,7 +17,13 @@ namespace {
+ // Rows of gate and up, and of down, a task.  With fewer tasks than several a thread, the last round left threads
+ // idle at the end of every layer: 64 rows gave Tiel's 512-row experts 8 tasks each, and its down products 32 tasks.
+ constexpr int kRowsPerTask = 32;
+-constexpr int kRowsPerDownTask = 16;
++// 32 and not 16: with 16 a task read 10 KB of each expert's down, too little for the hardware prefetcher to get
++// going (GLM 5.3 Flash Q2_K, 4 experts a call, i7-13700K, DDR5-4000: down 31.6 GB/s; with 32 and kPrefetchRows 2,
++// 45 GB/s)
++constexpr int kRowsPerDownTask = 32;
++// Each row's dot products first ask for the row this many rows on in the same task, which the hardware prefetcher
++// does not see coming across the rows of several experts
++constexpr int kPrefetchRows = 2;
+ constexpr int kSpinsBeforeSleep = 20000;   // about a millisecond of pause instructions
+ 
+ const ggml_type_traits_cpu* traits(int type) { return ggml_get_type_traits_cpu((ggml_type) type); }
+@@ -29,6 +35,10 @@ void init_once() {
+ 
+ thread_local bool in_task = false;   // this thread is running a task of a batch
+ 
++inline void prefetch_row(const uint8_t* p, size_t n) {
++    for (size_t i = 0; i < n; i += 64) _mm_prefetch((const char*) p + i, _MM_HINT_T0);
++}
++
+ }  // namespace
+ 
+ Workers::Workers(int threads) {
+@@ -187,6 +197,10 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
+         for (int r = r0; r < r1; ++r) {
+             const uint8_t* gate = e.gate + (size_t) r * gu_row;
+             const uint8_t* up = e.up + (size_t) r * gu_row;
++            if (r + kPrefetchRows < r1) {
++                prefetch_row(gate + (size_t) kPrefetchRows * gu_row, gu_row);
++                prefetch_row(up + (size_t) kPrefetchRows * gu_row, gu_row);
++            }
+             for (int i = i0; i < i1; ++i) {
+                 const int j = byp[i];
+                 const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
+@@ -217,6 +231,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
+         for (int r = r0; r < r1; ++r) {
+             for (int u = 0; u < n_run; ++u) {
+                 const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
++                if (r + kPrefetchRows < r1) prefetch_row(down + (size_t) kPrefetchRows * d_row, d_row);
+                 for (int i = runp[u]; i < runp[u + 1]; ++i)
+                     td->vec_dot(n_ff, s + byp[i], 0, down, 0, hqp + (size_t) byp[i] * h_bytes, 0, 1);
+             }
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index df321b37..1275f16b 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -1,6 +1,7 @@
+ // src/poly/engine.cpp - see the header.  What every architecture shares: the files, the weights' way to VRAM, the
+ // routed experts (the cache, the CPU, a prompt batch), the sequence's state, and the calls that feed tokens.
+ #include "engine.hpp"
++#include "stage_copy.hpp"
+ 
+ #include "deepseek4.hpp"
+ #include "gemma4.hpp"
+@@ -1677,6 +1678,12 @@ void Engine::load(const Options& o) {
+     if (!(opt_.skip_weight >= 0.f && opt_.skip_weight < 1.f))
+         throw std::runtime_error("--skip-weight is a share of a token's experts' weight: 0 (off) up to below 1");
+     if (opt_.dump || std::min(opt_.prompt_batch, opt_.max_context) == 1) opt_.window = 1;
++    const char* stream_stage = std::getenv("STRATA_POLY_STREAM_STAGE");
++    const bool requested_stream_stage = stream_stage && std::atoi(stream_stage) == 1;
++    stream_stage_ = requested_stream_stage && stage_copy_streaming_available();
++    if (requested_stream_stage)
++        std::fprintf(stderr, "strata-poly: STRATA_POLY_STREAM_STAGE: %s\n",
++                     stream_stage_ ? "streaming CPU stores for expert staging" : "unsupported CPU build; stock copies");
+     gg_ = std::make_unique<Shards>(opt_.model);
+     if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
+     load_geometry();
+@@ -2415,18 +2422,22 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream,
+         uint8_t* h = h_stage_[stage_turn_];
+         const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
+         ck(cudaEventSynchronize(left), "expert staging");
++        const auto put = [&](void* dst, const void* src, size_t bytes) {
++            if (stream_stage_) stage_copy_streaming(dst, src, bytes);
++            else std::memcpy(dst, src, bytes);
++        };
+         const auto copy = [&](int i) {
+             const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
+             try {
+                 if (i % 3 == 0) {
+                     if (by_file) L.gu_file->read(L.gu_at + e * L.gu_stride, h + j * gu2, L.gu_bytes);
+-                    else std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
++                    else put(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                 } else if (i % 3 == 1) {
+                     if (by_file) L.up_file->read(L.up_at + e * L.gu_stride, h + j * gu2 + L.gu_bytes, L.gu_bytes);
+-                    else std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
++                    else put(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+                 } else {
+                     if (by_file) L.d_file->read(L.d_at + e * L.d_bytes, h + c * gu2 + j * L.d_bytes, L.d_bytes);
+-                    else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
++                    else put(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+                 }
+             } catch (...) {
+                 if (!err_taken.exchange(true)) read_err = std::current_exception();
+diff --git a/src/poly/engine.hpp b/src/poly/engine.hpp
+index 529d587f..a4a56ebd 100644
+--- a/src/poly/engine.hpp
++++ b/src/poly/engine.hpp
+@@ -786,6 +786,7 @@ protected:
+     bool in_read_ = false;               ///< a read() is running: its prompt batches count their routing into
+                                          ///< heat_ (nothing else counts there; use_ counts every path)
+     Stats stats_;
++    bool stream_stage_ = false;         ///< opt-in streaming CPU stores into the existing expert upload buffers
+ };
+ 
+ }  // namespace strata::poly
+diff --git a/src/poly/stage_copy.hpp b/src/poly/stage_copy.hpp
+new file mode 100644
+index 00000000..d42b35d9
+--- /dev/null
++++ b/src/poly/stage_copy.hpp
+@@ -0,0 +1,83 @@
++// Non-overlapping CPU copies into upload-only buffers. The caller publishes task completion after this returns.
++// Keep this internal to expert staging: streaming stores help when the CPU will not read the destination next.
++#pragma once
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
++#include <emmintrin.h>
++#endif
++
++namespace strata::poly {
++inline constexpr bool stage_copy_streaming_available() {
++#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
++    return true;
++#else
++    return false;
++#endif
++}
++
++inline void stage_copy_streaming(void* destination, const void* source, size_t bytes) {
++#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
++    // Whole 64-byte lines avoid mixing ordinary and streaming stores within a
++    // cache line on the measured x86 hosts. The 4 KiB cutoff is a conservative
++    // small-copy fallback, not a CPU-specific crossover established by tuning.
++    // Two lines per iteration is only an unrolling choice; SSE2 stores need 16-byte alignment.
++    constexpr size_t kCacheLineBytes = 64;
++    constexpr size_t kStreamingMinBytes = 4096;
++    constexpr size_t kBlockBytes = 2 * kCacheLineBytes;
++    if (bytes < kStreamingMinBytes) {
++        std::memcpy(destination, source, bytes);
++        return;
++    }
++    auto* d = static_cast<unsigned char*>(destination);
++    auto* s = static_cast<const unsigned char*>(source);
++    // Leave partial cache lines to ordinary stores; do not mix them with streaming stores in the same line.
++    const size_t misalignment = reinterpret_cast<uintptr_t>(d) & (kCacheLineBytes - 1);
++    const size_t head = (std::min)(bytes, (kCacheLineBytes - misalignment) & (kCacheLineBytes - 1));
++    if (head) {
++        std::memcpy(d, s, head);
++        d += head;
++        s += head;
++        bytes -= head;
++    }
++    while (bytes >= kBlockBytes) {
++        const auto v0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
++        const auto v1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 16));
++        const auto v2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 32));
++        const auto v3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 48));
++        const auto v4 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 64));
++        const auto v5 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 80));
++        const auto v6 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 96));
++        const auto v7 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 112));
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d), v0);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 16), v1);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 32), v2);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 48), v3);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 64), v4);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 80), v5);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 96), v6);
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 112), v7);
++        d += kBlockBytes;
++        s += kBlockBytes;
++        bytes -= kBlockBytes;
++    }
++    if (bytes >= kCacheLineBytes) {
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d), _mm_loadu_si128(reinterpret_cast<const __m128i*>(s)));
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 16), _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 16)));
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 32), _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 32)));
++        _mm_stream_si128(reinterpret_cast<__m128i*>(d + 48), _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 48)));
++        d += kCacheLineBytes;
++        s += kCacheLineBytes;
++        bytes -= kCacheLineBytes;
++    }
++    if (bytes) std::memcpy(d, s, bytes);
++    // Drain this worker's streaming stores before it publishes task completion.
++    // A fence on the coordinator thread would not drain the other workers' stores.
++    _mm_sfence();
++#else
++    std::memcpy(destination, source, bytes);
++#endif
++}
++} // namespace strata::poly
+diff --git a/src/poly/stage_copy_test.cpp b/src/poly/stage_copy_test.cpp
+new file mode 100644
+index 00000000..78119fe5
+--- /dev/null
++++ b/src/poly/stage_copy_test.cpp
+@@ -0,0 +1,139 @@
++#include "stage_copy.hpp"
++
++#include <algorithm>
++#include <array>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++#if defined(_WIN32)
++#define NOMINMAX
++#include <windows.h>
++#elif defined(__unix__) || defined(__APPLE__)
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
++
++namespace {
++constexpr size_t kAlignment = 64;
++constexpr unsigned char kGuard = 0xd3;
++
++unsigned char* aligned(std::vector<unsigned char>& storage) {
++    const auto address = reinterpret_cast<uintptr_t>(storage.data());
++    return reinterpret_cast<unsigned char*>((address + kAlignment - 1) & ~(uintptr_t(kAlignment) - 1));
++}
++
++void check(bool ok, size_t n, size_t from, size_t to) {
++    if (ok) return;
++    std::fprintf(stderr, "FAIL n=%zu src=%zu dst=%zu\n", n, from, to);
++    std::exit(1);
++}
++
++// Guard bytes catch writes outside the destination. Explicit alignment makes each
++// offset an actual cache-line residue, independent of the allocator's alignment.
++size_t check_offsets(size_t n, size_t step) {
++    std::vector<unsigned char> source(n + 4 * kAlignment), destination(source.size());
++    auto* s = aligned(source) + kAlignment;
++    auto* d = aligned(destination) + kAlignment;
++    for (size_t i = 0; i < source.size(); ++i) source[i] = (i * 37 + n) % 251;
++    const auto before = source;
++    size_t cases = 0;
++    for (size_t from = 0; from < kAlignment; from += step) {
++        for (size_t to = 0; to < kAlignment; to += step) {
++            std::fill(destination.begin(), destination.end(), kGuard);
++            auto expected = destination;
++            std::copy_n(s + from, n, expected.data() + (d - destination.data()) + to);
++            strata::poly::stage_copy_streaming(d + to, s + from, n);
++            check(destination == expected && source == before, n, from, to);
++            ++cases;
++        }
++    }
++    return cases;
++}
++
++#if defined(_WIN32) || defined(__unix__) || defined(__APPLE__)
++// A readable guard byte cannot detect an over-read. Put both ends of the usable
++// pages against inaccessible pages, then test a copy flush with either end.
++class GuardedBuffer {
++public:
++    explicit GuardedBuffer(size_t bytes) {
++#if defined(_WIN32)
++        SYSTEM_INFO info;
++        GetSystemInfo(&info);
++        page_ = info.dwPageSize;
++#else
++        const long page = sysconf(_SC_PAGESIZE);
++        check(page > 0, bytes, 0, 0);
++        page_ = static_cast<size_t>(page);
++#endif
++        usable_ = ((bytes + page_ - 1) / page_) * page_;
++        total_ = usable_ + 2 * page_;
++#if defined(_WIN32)
++        mapping_ = static_cast<unsigned char*>(VirtualAlloc(nullptr, total_, MEM_RESERVE, PAGE_NOACCESS));
++        check(mapping_ != nullptr, bytes, 0, 0);
++        check(VirtualAlloc(mapping_ + page_, usable_, MEM_COMMIT, PAGE_READWRITE) != nullptr, bytes, 0, 0);
++#else
++        void* mapping = mmap(nullptr, total_, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++        check(mapping != MAP_FAILED, bytes, 0, 0);
++        mapping_ = static_cast<unsigned char*>(mapping);
++        check(mprotect(mapping_ + page_, usable_, PROT_READ | PROT_WRITE) == 0, bytes, 0, 0);
++#endif
++    }
++    ~GuardedBuffer() {
++#if defined(_WIN32)
++        VirtualFree(mapping_, 0, MEM_RELEASE);
++#else
++        munmap(mapping_, total_);
++#endif
++    }
++    GuardedBuffer(const GuardedBuffer&) = delete;
++    GuardedBuffer& operator=(const GuardedBuffer&) = delete;
++    unsigned char* at(size_t bytes, bool end) { return mapping_ + page_ + (end ? usable_ - bytes : 0); }
++private:
++    unsigned char* mapping_ = nullptr;
++    size_t page_ = 0, usable_ = 0, total_ = 0;
++};
++
++size_t check_protected_ends() {
++    size_t cases = 0;
++    // Traverse every tail residue above the streaming threshold and both sides
++    // of the 64/128-byte loop boundaries. Small lengths also cover the fallback.
++    for (size_t n = 1; n <= 4353; ++n) {
++        if (n > 129 && n < 4095) continue;
++        GuardedBuffer source(n), destination(n);
++        for (bool source_end : {false, true}) {
++            for (bool destination_end : {false, true}) {
++                auto* s = source.at(n, source_end);
++                auto* d = destination.at(n, destination_end);
++                for (size_t i = 0; i < n; ++i) s[i] = (i * 37 + n) % 251;
++                const std::vector<unsigned char> before(s, s + n);
++                std::fill_n(d, n, kGuard);
++                strata::poly::stage_copy_streaming(d, s, n);
++                check(std::equal(before.begin(), before.end(), d) && std::equal(before.begin(), before.end(), s),
++                      n, source_end, destination_end);
++                ++cases;
++            }
++        }
++    }
++    return cases;
++}
++#endif
++} // namespace
++
++int main() {
++    constexpr std::array<size_t, 21> lengths = {
++        0, 1, 15, 16, 17, 63, 64, 65, 127, 128, 129,
++        4095, 4096, 4097, 4159, 4160, 4161, 4223, 4224, 4225, 65535
++    };
++    size_t offsets = 0;
++    for (size_t n : lengths) offsets += check_offsets(n, 1);
++    // Real expert sizes; a sparse alignment sweep keeps this host-only test fast.
++    for (size_t n : {size_t(589824), size_t(720896)}) offsets += check_offsets(n, 15);
++    size_t protected_ends = 0;
++#if defined(_WIN32) || defined(__unix__) || defined(__APPLE__)
++    protected_ends = check_protected_ends();
++#else
++    std::puts("SKIP protected-page checks: no platform implementation");
++#endif
++    std::printf("PASS %zu aligned-offset cases, %zu protected-end cases\n", offsets, protected_ends);
++    return 0;
++}
