@@ -245,6 +245,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             }
         });
     }
+    static thread_local std::vector<int32_t> trows;
     for (size_t w0 = 0; w0 < trun.size(); w0 += (size_t) nth) {
         const int bn = (int) std::min((size_t) nth, trun.size() - w0);
         workers.run(bn * nth, [&](int t) {
@@ -289,27 +290,6 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         });
     }
 
-        const int r0 = tk.r0, r1 = tk.r1;
-        for (int r = r0; r < r1; ++r) {
-            const uint8_t* gate = e.gate + (size_t) r * gu_row;
-            const uint8_t* up = e.up + (size_t) r * gu_row;
-            for (int i = i0; i < i1; ++i) {
-                const int j = byp[i];
-                const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
-                float g = 0.f, u = 0.f;
-                tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
-                tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
-                if (gelu) {
-                    hp[(size_t) j * n_ff + r] =
-                        0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
-                    continue;
-                }
-                g = std::min(g, limit);
-                u = std::clamp(u, -limit, limit);
-                hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;
-            }
-        }
-    });
     uint8_t* hqp = hq.data();
     const auto hq_from = traits(td->vec_dot_type)->from_float;
     workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
