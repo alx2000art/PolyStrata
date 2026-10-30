@@ -212,11 +212,11 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             if (cnt >= 8) { trun.push_back(u); max_cnt = std::max(max_cnt, cnt); }
         }
     }
-    std::vector<char> tscratch;
+    AlignedBuf tscratch;
     AlignedBuf gt, ut;
     int sr_max = 0;
     if (!trun.empty()) {
-        tscratch.resize(cpu_tiled_scratch_bytes(nth));
+        tscratch.resize_bytes(cpu_tiled_scratch_bytes(nth));
         for (int ith = 0; ith < nth; ++ith) {
             int lo = 0, hi = 0;
             cpu_tiled_row_range(n_ff, ith, nth, &lo, &hi);
@@ -280,10 +280,10 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             }
             if (!cpu_tiled_mmul_one(e.gate, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
                                     trows.data(), i1 - i0, g, sr_max, lo, ith, nth,
-                                    tscratch.data())
+                                    (char*) tscratch.p)
                 || !cpu_tiled_mmul_one(e.up, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
                                        trows.data(), i1 - i0, u2, sr_max, lo, ith, nth,
-                                       tscratch.data())) {
+                                       (char*) tscratch.p)) {
                 return;   // not eligible after all
             }
             for (int i = i0; i < i1; ++i) {
