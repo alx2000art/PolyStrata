@@ -79,6 +79,7 @@ The chain adds these command-line switches to the engine:
 | `--q8-dequant N` | with `--kv q8_0`: 1 = packed dequant of a staged key row, 0 = a value at a time | 1 |
 | `--attend-chunks N` | 1: a batch above 65535 rows is attended in launches of that many; 0: one launch | 1 |
 | `--idx-mma N` | 1: the indexer's scores on the tensor cores where the card has them; 0: the scalar kernel | 1 |
+| `--cpu-tiled N` | 1: the CPU experts' gate/up through the tiled K-quant kernels (register tiling, AVX-512/VNNI); 0: the per-row vec_dot path. Tiled covers Q2_K only, other weight types take vec_dot regardless | 1 |
 | `--conversation-cache-mib` | `auto`: 40% of the RAM free once loaded, above the floor, at most 8192; a number: that many MiB | 0 (off) |
 
 The q8_0 KV cache is turned on per model with the engine's existing `--kv q8_0` flag, which this
