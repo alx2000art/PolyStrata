@@ -58,6 +58,9 @@ struct Options {
                                   ///< layer's experts take, with VRAM the expert cache lends it until the read is
                                   ///< done (end_read()), so that each layer's experts are copied once a read, not
                                   ///< once a call; 0 (or no more than stage_mib): never
+    int stage2_mib = 0;           ///< a second staging buffer of this many MiB: a call's rounds pass through two
+                                  ///< buffers in turn, so a round's copy on the upload stream runs beside the
+                                  ///< multiplication of the round before it; 0 = one buffer, the rounds in line
     int stage_ahead = 1024;       ///< from this many tokens, a call routes to most of a layer's experts, and the
                                   ///< ones that are not cached start their copy before the layer has routed; in a
                                   ///< read of several calls and this many tokens every call does; 0: never.  Under
@@ -501,7 +504,8 @@ protected:
     template <class F>
     void* record(F&& work);
     void moe_rows(Layer& L, int il, int n);
-    void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false);
+    void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false,
+               uint8_t* buf = nullptr);
     void mind_memory();
     void follow(int written);
     void follow_loop();
@@ -732,6 +736,13 @@ protected:
     void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
     void* ev_ahead_ = nullptr;                    ///< marks the last of them
     void* ev_free_ = nullptr;                     ///< marks a layer's last read of the staging buffer
+    uint8_t* stage2_ = nullptr;                   ///< the second staging buffer: a round with an odd number passes
+                                                  ///< through it while an even one passes through stage_, so a
+                                                  ///< round's upload runs beside the round before it
+    size_t stage2_bytes_ = 0;                     ///< stage2_'s size, the narrow one however wide a read has lent
+                                                  ///< stage_
+    void* ev_ahead2_ = nullptr;                   ///< marks the upload into stage2_ done
+    void* ev_free2_ = nullptr;                    ///< marks the card's last read of stage2_
     void* ev_hr_ = nullptr;                       ///< marks the card's last read of h_r_ by draft_input()
     int staged_il_ = -1;                          ///< the layer whose experts the buffer holds for its next call, or -1
     std::vector<int32_t> staged_;                 ///< those experts, in the buffer's order: one round of the layer's
