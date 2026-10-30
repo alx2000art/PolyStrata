@@ -153,15 +153,30 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
 
     // The workers get these through the pointers below: a thread_local named in their code would be their own.
-    static thread_local std::vector<uint8_t> act, hq;
-    static thread_local std::vector<float> h;
+    // 64B-aligned storage: the tiled kernels do ALIGNED 32-byte accesses on the
+    // activation and product rows, and a plain new[]/mmap pointer is 16 mod 64
+    // (glibc's mmap'd chunks carry a 16-byte header) - the aligned loads #GP.
+    struct AlignedBuf {
+        void* raw = nullptr;
+        void* p = nullptr;
+        size_t cap = 0;
+        ~AlignedBuf() { delete[] (char*) raw; }
+        void resize_bytes(size_t n) {
+            if (n <= cap) return;
+            delete[] (char*) raw;
+            raw = new char[n + 64];
+            p = (void*)(((uintptr_t) raw + 63) & ~(uintptr_t) 63);
+            cap = n;
+        }
+    };
+    static thread_local AlignedBuf act, hq, h;
     static thread_local std::vector<int> by, run;
-    act.resize((size_t) rows * a_bytes);
-    hq.resize((size_t) n * h_bytes);
-    h.resize((size_t) n * n_ff);
+    act.resize_bytes((size_t) rows * a_bytes);
+    hq.resize_bytes((size_t) n * h_bytes);
+    h.resize_bytes((size_t) n * n_ff * 4);
     // ggml's quantizers for the activations are scalar: microseconds a row, which on one thread kept the others
     // waiting, here and before the down products
-    uint8_t* actp = act.data();
+    uint8_t* actp = (uint8_t*) act.p;
     const auto act_from = traits(tg->vec_dot_type)->from_float;
     workers.run(rows, [&](int t) { act_from(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
 
@@ -175,7 +190,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const int n_run = (int) run.size();
     run.push_back(n);
 
-    float* hp = h.data();
+    float* hp = (float*) h.p;
     const int* byp = by.data();
     const int* runp = run.data();
 
@@ -198,7 +213,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         }
     }
     std::vector<char> tscratch;
-    std::vector<float> gt, ut;
+    AlignedBuf gt, ut;
     int sr_max = 0;
     if (!trun.empty()) {
         tscratch.resize(cpu_tiled_scratch_bytes(nth));
@@ -207,8 +222,8 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             cpu_tiled_row_range(n_ff, ith, nth, &lo, &hi);
             sr_max = std::max(sr_max, hi - lo);
         }
-        gt.resize((size_t) nth * max_cnt * sr_max);
-        ut.resize((size_t) nth * max_cnt * sr_max);
+        gt.resize_bytes((size_t) nth * max_cnt * sr_max * 4);
+        ut.resize_bytes((size_t) nth * max_cnt * sr_max * 4);
     }
     // the vec_dot tasks: the runs the tiled path does not take
     struct GuTask { int run; int r0; int r1; };
@@ -256,8 +271,8 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             int lo = 0, hi = 0;
             cpu_tiled_row_range(n_ff, ith, nth, &lo, &hi);
             const int sr = hi - lo;
-            float* g = gt.data() + (size_t) ith * max_cnt * sr_max;
-            float* u2 = ut.data() + (size_t) ith * max_cnt * sr_max;
+            float* g = (float*) gt.p + (size_t) ith * max_cnt * sr_max;
+            float* u2 = (float*) ut.p + (size_t) ith * max_cnt * sr_max;
             trows.resize((size_t) (i1 - i0) * 2);
             for (int i = i0; i < i1; ++i) {
                 trows[2 * (size_t) (i - i0)] = experts[byp[i]].row;
@@ -290,7 +305,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         });
     }
 
-    uint8_t* hqp = hq.data();
+    uint8_t* hqp = (uint8_t*) hq.p;
     const auto hq_from = traits(td->vec_dot_type)->from_float;
     workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
 
