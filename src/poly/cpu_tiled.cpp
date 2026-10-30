@@ -1184,7 +1184,9 @@ bool cpu_tiled_supported(int w_type) {
 }
 
 size_t cpu_tiled_scratch_bytes(int n_threads) {
-    return (size_t) n_threads * ggml_tiled_ws_size();
+    // +64 per slot: the tiled kernels require 64B-aligned slots (their tile fields
+    // pin aligned offsets), and a plain new[] buffer is only 16B-aligned
+    return (size_t) n_threads * (ggml_tiled_ws_size() + 64);
 }
 
 int cpu_tiled_group() {
@@ -1218,11 +1220,14 @@ bool cpu_tiled_mmul_one(const void* w, int64_t w_row_bytes, int w_type, int n_ou
     dt.t.src[0] = &wt.t;
     dt.t.src[1] = &at.t;
 
+    char* slot = scratch_base + (size_t) ith * (ggml_tiled_ws_size() + 64);
+    char* slot_aligned = (char*) (((uintptr_t) slot + 63) & ~(uintptr_t) 63);
+
     ggml_compute_params p = {};
     p.ith = ith; p.nth = nth;
     p.wsize = ggml_tiled_ws_size();
-    p.wthread = scratch_base + (size_t) ith * ggml_tiled_ws_size();
-    p.wdata = p.wthread;
+    p.wthread = slot_aligned;
+    p.wdata = slot_aligned;
 
     return ggml_compute_forward_mul_mat_id_tiled(&p, &dt.t, 0, n_tok, rows, scratch_base);
 }
