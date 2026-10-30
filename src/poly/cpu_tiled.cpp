@@ -886,7 +886,7 @@ static void ggml_compute_forward_mul_mat_id_tiled_one_expert(
     const char * src0_cur = (const char *) src0->data + cur_a * nb02;
 
     // this thread's workspace
-    tiled_ws * ws = (tiled_ws *) (scratch + (size_t) ith * ggml_tiled_ws_size());
+    tiled_ws * ws = (tiled_ws *) scratch;   // the caller provides this thread's slot
 
     // groups of TILED_MMID_GROUP rows; rounded up, the window tail is clamped in the gemm
     const int64_t ngroups = (ne01 + TILED_MMID_GROUP - 1) / TILED_MMID_GROUP;
@@ -1179,6 +1179,10 @@ struct tensor_shell {
 // at the small batches this engine routes to the CPU (runs of 8-30 rows; upstream exercises
 // it at ~64), under gdb frame #0 in one_expert<block_q3_K, ...>.  Q3_K keeps the vec_dot
 // path until the kernel is pinned down against upstream.
+size_t cpu_tiled_ws_slot_bytes() {
+    return ggml_tiled_ws_size() + 64;   // the slot plus the 64B alignment slack
+}
+
 bool cpu_tiled_supported(int w_type) {
     return w_type == GGML_TYPE_Q2_K;
 }
@@ -1189,47 +1193,35 @@ size_t cpu_tiled_scratch_bytes(int n_threads) {
     return (size_t) n_threads * (ggml_tiled_ws_size() + 64);
 }
 
-int cpu_tiled_group() {
-    return TILED_MMID_GROUP;
-}
-
-// the driver's weight-row partition for (ith, nth): rows [lo, hi) of n_out
-void cpu_tiled_row_range(int n_out, int ith, int nth, int* lo, int* hi) {
-    const int ngroups = (n_out + TILED_MMID_GROUP - 1) / TILED_MMID_GROUP;
-    *lo = (ngroups * ith) / nth * TILED_MMID_GROUP;
-    const int g1 = (ngroups * (ith + 1)) / nth;
-    *hi = std::min(n_out, g1 * TILED_MMID_GROUP);
-}
-
 // w: [n_out rows x n_in] of w_type, w_row_bytes per row (ggml block layout).
 // rows: n_tok (src1 row, batch 0) pairs into the full activation buffer.
-// out: the caller's slice [slice_rows x n_tok] floats, row-major; the kernel's
-// absolute rows r land at (r - row_lo) * n_tok + j.  Returns false when the
-// tiled path is not eligible — the caller falls back to vec_dot.
+// out: the full [n_out x n_tok] float panel, row-major. The kernel partitions
+// the routed tokens (n_tok) between ith/nth and writes all n_out rows of its slice.
+// Returns false when the tiled path is not eligible — the caller falls back to vec_dot.
 bool cpu_tiled_mmul_one(const void* w, int64_t w_row_bytes, int w_type, int n_out, int n_in,
                         const void* act, int64_t act_row_bytes, int rows_total,
                         const int32_t* rows, int n_tok,
-                        float* out, int out_stride, int row_lo,
-                        int ith, int nth, char* scratch_base) {
+                        float* out,
+                        int ith, int nth, char* ws_slot) {
     if (!cpu_tiled_supported(w_type) || n_tok < 8 || (n_in % 256) != 0) return false;
 
     tensor_shell wt(w_type, const_cast<void*>(w), n_in, n_out,
                     ggml_type_size((enum ggml_type) w_type), w_row_bytes);
     tensor_shell at(GGML_TYPE_Q8_K, const_cast<void*>(act), n_in, rows_total, 1, act_row_bytes);
-    tensor_shell dt(GGML_TYPE_F32, out - (size_t) row_lo, n_out, n_tok, 4, (int64_t) out_stride * 4);
+    // the kernel partitions the run's tokens (dst ne[1] = n_tok) between ith/nth and
+    // writes the full n_out-row panel for its slice: out is [n_out x n_tok], row-major
+    tensor_shell dt(GGML_TYPE_F32, out, n_out, n_tok, 4, (int64_t) n_out * 4);
     dt.t.src[0] = &wt.t;
     dt.t.src[1] = &at.t;
 
-    char* slot = scratch_base + (size_t) ith * (ggml_tiled_ws_size() + 64);
-    char* slot_aligned = (char*) (((uintptr_t) slot + 63) & ~(uintptr_t) 63);
-
+    // ws_slot is the caller's pre-aligned workspace slot (cpu_tiled_ws_slot_bytes())
     ggml_compute_params p = {};
     p.ith = ith; p.nth = nth;
     p.wsize = ggml_tiled_ws_size();
-    p.wthread = slot_aligned;
-    p.wdata = slot_aligned;
+    p.wthread = ws_slot;
+    p.wdata = ws_slot;
 
-    return ggml_compute_forward_mul_mat_id_tiled(&p, &dt.t, 0, n_tok, rows, scratch_base);
+    return ggml_compute_forward_mul_mat_id_tiled(&p, &dt.t, 0, n_tok, rows, ws_slot);
 }
 
 }  // namespace strata::poly
