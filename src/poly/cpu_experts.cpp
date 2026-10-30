@@ -1,6 +1,8 @@
 // src/poly/cpu_experts.cpp - see the header.
 #include "cpu_experts.hpp"
 
+#include "cpu_tiled.h"
+
 #include "ggml.h"
 #include "ggml-cpu.h"
 
@@ -140,7 +142,7 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
-                 int n_ff, const float* x, float limit, bool gelu, float* out,
+                 int n_ff, const float* x, float limit, bool gelu, float* out, bool tiled,
                  const std::function<void()>* meanwhile) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
@@ -151,15 +153,30 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
 
     // The workers get these through the pointers below: a thread_local named in their code would be their own.
-    static thread_local std::vector<uint8_t> act, hq;
-    static thread_local std::vector<float> h;
+    // 64B-aligned storage: the tiled kernels do ALIGNED 32-byte accesses on the
+    // activation and product rows, and a plain new[]/mmap pointer is 16 mod 64
+    // (glibc's mmap'd chunks carry a 16-byte header) - the aligned loads #GP.
+    struct AlignedBuf {
+        void* raw = nullptr;
+        void* p = nullptr;
+        size_t cap = 0;
+        ~AlignedBuf() { delete[] (char*) raw; }
+        void resize_bytes(size_t n) {
+            if (n <= cap) return;
+            delete[] (char*) raw;
+            raw = new char[n + 64];
+            p = (void*)(((uintptr_t) raw + 63) & ~(uintptr_t) 63);
+            cap = n;
+        }
+    };
+    static thread_local AlignedBuf act, hq, h;
     static thread_local std::vector<int> by, run;
-    act.resize((size_t) rows * a_bytes);
-    hq.resize((size_t) n * h_bytes);
-    h.resize((size_t) n * n_ff);
+    act.resize_bytes((size_t) rows * a_bytes);
+    hq.resize_bytes((size_t) n * h_bytes);
+    h.resize_bytes((size_t) n * n_ff * 4);
     // ggml's quantizers for the activations are scalar: microseconds a row, which on one thread kept the others
     // waiting, here and before the down products
-    uint8_t* actp = act.data();
+    uint8_t* actp = (uint8_t*) act.p;
     const auto act_from = traits(tg->vec_dot_type)->from_float;
     workers.run(rows, [&](int t) { act_from(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
 
@@ -173,38 +190,115 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const int n_run = (int) run.size();
     run.push_back(n);
 
-    float* hp = h.data();
+    float* hp = (float*) h.p;
     const int* byp = by.data();
     const int* runp = run.data();
-    const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
-    const int first = meanwhile ? 1 : 0;   // task 0, so it is taken at once
-    workers.run(first + n_run * gu_tasks, [&](int t) {
-        if (t < first) return (*meanwhile)();
-        t -= first;
-        const int i0 = runp[t / gu_tasks], i1 = runp[t / gu_tasks + 1];
-        const CpuExpert& e = experts[byp[i0]];
-        const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);
-        for (int r = r0; r < r1; ++r) {
-            const uint8_t* gate = e.gate + (size_t) r * gu_row;
-            const uint8_t* up = e.up + (size_t) r * gu_row;
-            for (int i = i0; i < i1; ++i) {
-                const int j = byp[i];
-                const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
-                float g = 0.f, u = 0.f;
-                tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
-                tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
-                if (gelu) {
-                    hp[(size_t) j * n_ff + r] =
-                        0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
-                    continue;
+
+    if (meanwhile) (*meanwhile)();   // posted beside the products before; inline is fine, it only posts
+
+    // The tiled runs (--cpu-tiled): a run of 8+ tokens on Q2_K weights goes through the vendored
+    // llama.cpp tiled kernels - a per-expert GEMM with register tiling, ~1.5-2x the per-row vec_dot on
+    // AVX512VNNI.  The kernel partitions the CALL's tokens between ith/nth and writes the raw
+    // gate/up products into the call-wide [rows x n_ff] panels at each token's own row; after the
+    // barrier this thread folds silu/gelu into hp for the tiled runs' tokens.  Runs under 8 tokens
+    // and the other types keep the vec_dot path below.
+    const int nth = workers.threads();
+    const bool tiled_ok = tiled && cpu_tiled_supported(gu_type) && (n_embd % 256) == 0;
+    std::vector<int> trun;                    // the tiled-eligible runs, ascending
+    if (tiled_ok) {
+        for (int u = 0; u < n_run; ++u) {
+            const int cnt = runp[u + 1] - runp[u];
+            if (cnt >= 8) trun.push_back(u);
+        }
+    }
+    // the vec_dot tasks: the runs the tiled path does not take
+    struct GuTask { int run; int r0; int r1; };
+    std::vector<GuTask> vtasks;
+    for (int u = 0; u < n_run; ++u) {
+        const int cnt = runp[u + 1] - runp[u];
+        if (tiled_ok && cnt >= 8 && std::binary_search(trun.begin(), trun.end(), u)) continue;
+        for (int r0 = 0; r0 < n_ff; r0 += kRowsPerTask)
+            vtasks.push_back({u, r0, std::min(n_ff, r0 + kRowsPerTask)});
+    }
+    if (!vtasks.empty()) {
+        workers.run((int) vtasks.size(), [&](int t) {
+            const GuTask& tk = vtasks[(size_t) t];
+            const int i0 = runp[tk.run], i1 = runp[tk.run + 1];
+            const CpuExpert& e = experts[byp[i0]];
+            for (int r = tk.r0; r < tk.r1; ++r) {
+                const uint8_t* gate = e.gate + (size_t) r * gu_row;
+                const uint8_t* up = e.up + (size_t) r * gu_row;
+                for (int i = i0; i < i1; ++i) {
+                    const int j = byp[i];
+                    const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
+                    float g = 0.f, u = 0.f;
+                    tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
+                    tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
+                    if (gelu) {
+                        hp[(size_t) j * n_ff + r] =
+                            0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
+                        continue;
+                    }
+                    g = std::min(g, limit);
+                    u = std::clamp(u, -limit, limit);
+                    hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;
                 }
-                g = std::min(g, limit);
-                u = std::clamp(u, -limit, limit);
-                hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;
+            }
+        });
+    }
+    // the tiled tasks: the raw products into the call-wide panels, then silu/gelu into hp
+    if (!trun.empty()) {
+        // per-thread tiled workspace, one per pool thread, persistent
+        static thread_local AlignedBuf tws;
+        tws.resize_bytes(cpu_tiled_ws_slot_bytes());
+        char* ws_slot = (char*) tws.p;
+
+        // the call-wide product panels [rows x n_ff]: the kernel writes a token's products
+        // at token * n_ff (the col_ptrs are built from the token's call row)
+        AlignedBuf g_panel, u_panel;
+        g_panel.resize_bytes((size_t) rows * n_ff * 4);
+        u_panel.resize_bytes((size_t) rows * n_ff * 4);
+        float* gp = (float*) g_panel.p;
+        float* up2 = (float*) u_panel.p;
+
+        static thread_local std::vector<int32_t> trows;
+        workers.run((int) trun.size() * nth, [&](int t) {
+            const int u = trun[(size_t) t / nth], ith = t % nth;
+            const int i0 = runp[u], i1 = runp[u + 1];
+            const CpuExpert& e = experts[byp[i0]];
+            trows.resize((size_t) (i1 - i0) * 2);
+            for (int i = i0; i < i1; ++i) {
+                trows[2 * (size_t) (i - i0)] = experts[byp[i]].row;
+                trows[2 * (size_t) (i - i0) + 1] = 0;
+            }
+            cpu_tiled_mmul_one(e.gate, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
+                               trows.data(), i1 - i0, gp, ith, nth, ws_slot);
+            cpu_tiled_mmul_one(e.up, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
+                               trows.data(), i1 - i0, up2, ith, nth, ws_slot);
+        });
+        // the barrier above: the panels hold every tiled run's raw products at token * n_ff
+        for (int u : trun) {
+            const int i0 = runp[u], i1 = runp[u + 1];
+            for (int i = i0; i < i1; ++i) {
+                const int tok = experts[byp[i]].row;
+                const float* gj = gp + (size_t) tok * n_ff;
+                const float* uj = up2 + (size_t) tok * n_ff;
+                for (int r = 0; r < n_ff; ++r) {
+                    const float pv = gj[r], uv = uj[r];
+                    if (gelu) {
+                        hp[(size_t) tok * n_ff + r] =
+                            0.5f * pv * (1.f + std::tanh(0.7978845608f * pv * (1.f + 0.044715f * pv * pv))) * uv;
+                        continue;
+                    }
+                    const float gc = std::min(pv, limit);
+                    hp[(size_t) tok * n_ff + r] =
+                        gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
+                }
             }
         }
-    });
-    uint8_t* hqp = hq.data();
+    }
+
+    uint8_t* hqp = (uint8_t*) hq.p;
     const auto hq_from = traits(td->vec_dot_type)->from_float;
     workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
 

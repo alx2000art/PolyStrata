@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
                 std::vector<float> cpu((size_t) n_embd), dev((size_t) n_embd);
                 const poly::CpuExpert ce{gate, up, down, 1.f};
                 poly::cpu_experts(workers, &ce, 1, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit, false,
-                                 cpu.data());
+                                 cpu.data(), false);
                 const double e_cpu = rel_error(cpu.data(), want);
                 double e_gpu = 0.0;
                 if (gpu) {
