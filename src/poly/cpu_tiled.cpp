@@ -694,6 +694,12 @@ static int ggml_tiled_narrow_k_extent(int64_t n_rows, int64_t ne00) {
     while (ke >= TILED_TILE_K && ne00 % ke != 0) {
         ke -= TILED_TILE_K;
     }
+    // cap at one slab (num_k=1): the multi-slab narrow path unpacks num_k*256-wide rows
+    // into the per-thread tile, and this engine's small routed runs (8-30 rows) drove
+    // num_k to 2-3 - the standard 512KB ws slot is sized for one slab, and the overflow
+    // past the slot ended in a SIGSEGV inside the microtile.  The single-slab tile is
+    // byte-identical math, a little less bandwidth on small batches.
+    if (ke > TILED_TILE_K) ke = TILED_TILE_K;
     return ke < TILED_TILE_K ? 0 : ke;
 }
 
