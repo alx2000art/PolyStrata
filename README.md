@@ -28,7 +28,8 @@ with an 8 GB card as well.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, the largest: a file of 79 to 114 GB, most of which stays in RAM.
 - **[DeepSeek V4 Flash](docs/DEEPSEEK.md)**, a file of 91 GB, most of which stays in RAM too. Its memory of a
-  conversation is small: a 128K context takes 0.7 GB more VRAM than 32K.
+  conversation is small: a 128K context takes 0.7 GB more VRAM than 32K. This fork carries a set of
+  engine speedups for it: [what this fork changes](#what-this-fork-changes-for-deepseek-v4-flash).
 - **[LFM2.5-24B-A2B](docs/LFM.md)** by Liquid AI, a file of 11 to 25 GB. Most of its layers have no attention, so a
   long conversation takes little VRAM: a 128K context takes 2 GB more than 32K. Its license allows commercial use
   only to companies with less than 10 million dollars of yearly revenue.
@@ -904,6 +905,49 @@ Every part and its numbers: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-wo
   pass through it once for the whole prompt.
 
 Every part and its numbers: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works).
+
+## What this fork changes for DeepSeek V4 Flash
+
+This repository is a fork of PolyStrata that carries a set of engine improvements written for one
+workload: **DeepSeek V4 Flash on a single NVIDIA card with a large pool of system RAM**, where most
+of the expert weights live in RAM and stream to the card over PCIe while the layers compute. On a
+Ryzen 9 7950X with an RTX 4080 SUPER 16 GB and 96 GB of RAM, reading a 12,000-token prompt went
+from 72.8 s to 41.4 s (−43 %) over the course of this work, with decode speed held steady.
+
+The work, roughly in order of impact:
+
+- **Attention and the indexer on tensor cores** — DeepSeek V4's attention takes two tokens per block
+  (`--attend-batch`), the late-position indexer's scores run on tensor cores where the card has them
+  (`--idx-mma`), and the small per-layer head-preparation GEMMs run as one packed GEMM per batch.
+- **Pinned experts** — the environment key `STRATA_POLY_PIN_EXPERTS=N` keeps N experts resident in
+  VRAM and uploads them straight from the model file, past the staging buffer.
+- **A CPU expert pool on tiled kernels** — the experts the fewest tokens chose are computed on the
+  CPU (`--cpu-share auto`), and their gate and up GEMMs run through tiled AVX-512/VNNI K-quant
+  kernels (`--cpu-tiled`) instead of the per-row path.
+- **The expert streaming machinery** — routed experts are read from their file position into pinned
+  buffers (`--file-reads`), the next chunk of a long prompt reads while the last layers of the
+  previous one compute (`--read-overlap`), and what the prompt routes to warms the expert cache
+  (`--read-heat`).
+- **The q8_0 KV cache** — the engine's `--kv q8_0` extended to DeepSeek V4, with a packed dequant of
+  a staged key row (`--q8-dequant`).
+- **Conversation memory and prompt checkpoints** — `--conversation-cache-mib` keeps a rolling cache
+  of the conversation in RAM, and `--prompt-cache` re-reads an agentic session's context in seconds
+  instead of minutes.
+
+Every flag, its default and its trade-off: [docs/FORK_FEATURES.md](docs/FORK_FEATURES.md),
+по-русски: [docs/FORK_FEATURES.ru.md](docs/FORK_FEATURES.ru.md).
+
+A tuned starting point for a 16 GB card with 64–96 GB of RAM (the measurements above):
+
+```text
+--max-context 132768 --kv q8_0 --tail-skip 4 --lookup 0 --read-heat 0 --file-reads 0
+--read-overlap 1 --prompt-cache 6 --cpu-tiled 1 --idx-mma 1 --attend-batch 0
+--stage-mib 512 --stage-read-mib 2048 --conversation-cache-mib 3072 --prompt-batch 2048
+```
+
+with `STRATA_POLY_PIN_EXPERTS=49152` in the server's environment. The zeros in it are deliberate,
+measured choices on that rig — `--attend-batch 0` after a quality incident, the rest for speed.
+Measure on your own hardware before adopting any of them; every flag turns one piece on and off.
 
 ## Credits and license
 
