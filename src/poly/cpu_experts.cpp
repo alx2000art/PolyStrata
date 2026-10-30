@@ -198,18 +198,17 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
 
     // The tiled runs (--cpu-tiled): a run of 8+ tokens on Q2_K weights goes through the vendored
     // llama.cpp tiled kernels - a per-expert GEMM with register tiling, ~1.5-2x the per-row vec_dot on
-    // AVX512VNNI.  The kernel partitions the run's tokens between ith/nth and writes the full
-    // [n_ff x cnt] panel of raw products for its slice; the waves give the concurrent tasks distinct
-    // tiled workspaces, and between waves this thread folds silu/gelu into hp.  Runs under 8 tokens
+    // AVX512VNNI.  The kernel partitions the CALL's tokens between ith/nth and writes the raw
+    // gate/up products into the call-wide [rows x n_ff] panels at each token's own row; after the
+    // barrier this thread folds silu/gelu into hp for the tiled runs' tokens.  Runs under 8 tokens
     // and the other types keep the vec_dot path below.
     const int nth = workers.threads();
     const bool tiled_ok = tiled && cpu_tiled_supported(gu_type) && (n_embd % 256) == 0;
     std::vector<int> trun;                    // the tiled-eligible runs, ascending
-    int max_cnt = 0;
     if (tiled_ok) {
         for (int u = 0; u < n_run; ++u) {
             const int cnt = runp[u + 1] - runp[u];
-            if (cnt >= 8) { trun.push_back(u); max_cnt = std::max(max_cnt, cnt); }
+            if (cnt >= 8) trun.push_back(u);
         }
     }
     // the vec_dot tasks: the runs the tiled path does not take
@@ -247,66 +246,53 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             }
         });
     }
-    // the tiled waves: B runs per wave (capped by the tile memory), nth tasks a run
+    // the tiled tasks: the raw products into the call-wide panels, then silu/gelu into hp
     if (!trun.empty()) {
         // per-thread tiled workspace, one per pool thread, persistent
         static thread_local AlignedBuf tws;
         tws.resize_bytes(cpu_tiled_ws_slot_bytes());
         char* ws_slot = (char*) tws.p;
 
-        const int64_t tile_budget = 64 << 20;   // g + u panels per wave
-        int B = nth;
-        const int64_t one = (int64_t) n_ff * max_cnt * 4 * 2;
-        if (one * B > tile_budget) B = std::max(1, (int) (tile_budget / one));
+        // the call-wide product panels [rows x n_ff]: the kernel writes a token's products
+        // at token * n_ff (the col_ptrs are built from the token's call row)
+        AlignedBuf g_panel, u_panel;
+        g_panel.resize_bytes((size_t) rows * n_ff * 4);
+        u_panel.resize_bytes((size_t) rows * n_ff * 4);
+        float* gp = (float*) g_panel.p;
+        float* up2 = (float*) u_panel.p;
 
         static thread_local std::vector<int32_t> trows;
-        AlignedBuf gt, ut;
-        gt.resize_bytes((size_t) B * n_ff * max_cnt * 4);
-        ut.resize_bytes((size_t) B * n_ff * max_cnt * 4);
-
-        for (size_t w0 = 0; w0 < trun.size(); w0 += (size_t) B) {
-            const int bn = (int) std::min((size_t) B, trun.size() - w0);
-            workers.run(bn * nth, [&](int t) {
-                const int b = t / nth, ith = t % nth;
-                const int u = trun[w0 + (size_t) b];
-                const int i0 = runp[u], i1 = runp[u + 1];
-                const CpuExpert& e = experts[byp[i0]];
-                float* g = (float*) gt.p + (size_t) b * n_ff * max_cnt;
-                float* u2 = (float*) ut.p + (size_t) b * n_ff * max_cnt;
-                trows.resize((size_t) (i1 - i0) * 2);
-                for (int i = i0; i < i1; ++i) {
-                    trows[2 * (size_t) (i - i0)] = experts[byp[i]].row;
-                    trows[2 * (size_t) (i - i0) + 1] = 0;
-                }
-                if (!cpu_tiled_mmul_one(e.gate, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
-                                        trows.data(), i1 - i0, g, ith, nth, ws_slot)
-                    || !cpu_tiled_mmul_one(e.up, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
-                                           trows.data(), i1 - i0, u2, ith, nth, ws_slot)) {
-                    return;   // not eligible after all
-                }
-            });
-            // silu/gelu + scatter for the wave's runs: the products sit in the gt/ut panels,
-            // token j of a run at panel[j * n_ff + r]
-            for (int b = 0; b < bn; ++b) {
-                const int u = trun[w0 + (size_t) b];
-                const int i0 = runp[u], i1 = runp[u + 1];
-                const float* gj = (const float*) gt.p + (size_t) b * n_ff * max_cnt;
-                const float* uj = (const float*) ut.p + (size_t) b * n_ff * max_cnt;
-                for (int i = i0; i < i1; ++i) {
-                    const int tok = experts[byp[i]].row;
-                    const float* gjt = gj + (size_t) (i - i0) * n_ff;
-                    const float* ujt = uj + (size_t) (i - i0) * n_ff;
-                    for (int r = 0; r < n_ff; ++r) {
-                        const float pv = gjt[r], uv = ujt[r];
-                        if (gelu) {
-                            hp[(size_t) tok * n_ff + r] =
-                                0.5f * pv * (1.f + std::tanh(0.7978845608f * pv * (1.f + 0.044715f * pv * pv))) * uv;
-                            continue;
-                        }
-                        const float gc = std::min(pv, limit);
+        workers.run((int) trun.size() * nth, [&](int t) {
+            const int u = trun[(size_t) t / nth], ith = t % nth;
+            const int i0 = runp[u], i1 = runp[u + 1];
+            const CpuExpert& e = experts[byp[i0]];
+            trows.resize((size_t) (i1 - i0) * 2);
+            for (int i = i0; i < i1; ++i) {
+                trows[2 * (size_t) (i - i0)] = experts[byp[i]].row;
+                trows[2 * (size_t) (i - i0) + 1] = 0;
+            }
+            cpu_tiled_mmul_one(e.gate, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
+                               trows.data(), i1 - i0, gp, ith, nth, ws_slot);
+            cpu_tiled_mmul_one(e.up, gu_row, gu_type, n_ff, n_embd, actp, a_bytes, rows,
+                               trows.data(), i1 - i0, up2, ith, nth, ws_slot);
+        });
+        // the barrier above: the panels hold every tiled run's raw products at token * n_ff
+        for (int u : trun) {
+            const int i0 = runp[u], i1 = runp[u + 1];
+            for (int i = i0; i < i1; ++i) {
+                const int tok = experts[byp[i]].row;
+                const float* gj = gp + (size_t) tok * n_ff;
+                const float* uj = up2 + (size_t) tok * n_ff;
+                for (int r = 0; r < n_ff; ++r) {
+                    const float pv = gj[r], uv = uj[r];
+                    if (gelu) {
                         hp[(size_t) tok * n_ff + r] =
-                            gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
+                            0.5f * pv * (1.f + std::tanh(0.7978845608f * pv * (1.f + 0.044715f * pv * pv))) * uv;
+                        continue;
                     }
+                    const float gc = std::min(pv, limit);
+                    hp[(size_t) tok * n_ff + r] =
+                        gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
                 }
             }
         }

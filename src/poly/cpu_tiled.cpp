@@ -1208,9 +1208,10 @@ bool cpu_tiled_mmul_one(const void* w, int64_t w_row_bytes, int w_type, int n_ou
     tensor_shell wt(w_type, const_cast<void*>(w), n_in, n_out,
                     ggml_type_size((enum ggml_type) w_type), w_row_bytes);
     tensor_shell at(GGML_TYPE_Q8_K, const_cast<void*>(act), n_in, rows_total, 1, act_row_bytes);
-    // the kernel partitions the run's tokens (dst ne[1] = n_tok) between ith/nth and
-    // writes the full n_out-row panel for its slice: out is [n_out x n_tok], row-major
-    tensor_shell dt(GGML_TYPE_F32, out, n_out, n_tok, 4, (int64_t) n_out * 4);
+    // the kernel partitions the call's tokens (dst ne[1] = rows_total) between ith/nth and
+    // writes the full n_out-row panel for its slice: out is [n_out x rows_total], row-major
+    // (the expert_rows pairs carry the token's row in the whole call)
+    tensor_shell dt(GGML_TYPE_F32, out, n_out, rows_total, 4, (int64_t) n_out * 4);
     dt.t.src[0] = &wt.t;
     dt.t.src[1] = &at.t;
 
