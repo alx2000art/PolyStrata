@@ -746,6 +746,8 @@ protected:
     void* ev_hr_ = nullptr;                       ///< marks the card's last read of h_r_ by draft_input()
     int staged_il_ = -1;                          ///< the layer whose experts the buffer holds for its next call, or -1
     std::vector<int32_t> staged_;                 ///< those experts, in the buffer's order: one round of the layer's
+    bool staged_in2_ = false;                     ///< staged_ was uploaded into stage2_, not stage_: the held round's
+                                                  ///< buffer is the uploader call's, not the reader call's index's
     double ahead_ms_ = 0, route_ms_ = 0;          ///< what that layer's copy ahead took, and the card to its routing
     bool shared_ahead_ = false;                   ///< read() runs several calls: each copies ahead, whatever its size
     size_t stage_bytes_ = 0, chunk_bytes_ = 0;

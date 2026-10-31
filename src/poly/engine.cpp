@@ -2760,6 +2760,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int gt = (int) L.gu_type, dt = (int) L.d_type;
     const int64_t ff = n_ff_exp_, ff2 = 2 * ff;
     int holds = -1;   // the round in the buffer when this call is done
+    bool held_in2 = staged_in2_;   // and the buffer it sits in, until an upload of this call moves it
     // The card's part.  With the CPU's beside it, the rows of its experts' places are left at nothing.
     const auto card = [&] {
         if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * n_embd_ * sizeof(float), cs(st_)), "expert rows");
@@ -2803,18 +2804,23 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         }
         const int from = mine && kept < 0 ? 1 : 0;
         holds = early ? 0 : kept;
+        held_in2 = !early && held_in2;   // an ahead copy goes to stage_, a held one keeps its buffer
         for (int turn = 0; turn < n_round; ++turn) {
             const int r = kept < 0 ? (turn + from) % n_round : turn == 0 ? kept : turn - (turn <= kept ? 1 : 0);
             const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
             const size_t down_at = pad((size_t) m * gu2);
             const int r0 = bounds[g0], rows = bounds[g0 + m] - r0;
-            // The round r lives in the buffer r & 1, whatever call put it there, so staged_ keeps its meaning
-            // with two of them.  Its upload goes on the upload stream and waits only the buffer's last reader,
-            // which is the round before the one beside it: a round's copy runs beside the multiplication of the
-            // round before it.  With one buffer the copy waits the last read of the buffer, as it did.
+            // A round's copy goes on the upload stream and waits only its buffer's last reader, which is the
+            // round before the one beside it: a round's copy runs beside the multiplication of the round before
+            // it.  With one buffer the copy waits the last read of the buffer, as it did.  A held round (kept)
+            // reads the buffer its data was uploaded to, not the one this call's index points at: the rounds are
+            // counted anew every call, and the same expert list can sit at an odd index of this call having been
+            // uploaded to the first buffer at an even index of the one before — reading by parity gave the card
+            // the previous call's weights (the T1 gate's coherent answers to another question).
+            const bool second = r == kept ? staged_in2_ : (r & 1) != 0 && stage2_ != nullptr;
             uint8_t* buf = stage_;
             void* rdy = ev_ahead_, * fre = ev_free_;
-            if ((r & 1) && stage2_) {
+            if (second) {
                 buf = stage2_;
                 rdy = ev_ahead2_;
                 fre = ev_free2_;
@@ -2824,6 +2830,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                 stage(L, group_.data() + g0, m, up_, n_cpu > 0, buf);
                 ck(cudaEventRecord((cudaEvent_t) rdy, cs(up_)), "expert staging");
                 holds = r;
+                held_in2 = second;
             }
             if (rows == 0) continue;   // nothing routed to the experts that go ahead
             ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) rdy, 0), "expert staging");
@@ -2870,6 +2877,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     if (ahead && holds >= 0) {
         staged_.assign(group_.begin() + round_[(size_t) holds], group_.begin() + round_[(size_t) holds + 1]);
         staged_il_ = il;
+        staged_in2_ = held_in2;
     }
 }
 
