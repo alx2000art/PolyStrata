@@ -44,10 +44,10 @@ SWEEP_VERSION="${SWEEP_VERSION:-$(git -C "$STRATA_DIR" describe --always --dirty
 AB="${AB:-$STRATA_DIR/ab_patches.py}"                         # где лежит ab_patches.py
 OUT_DIR="${OUT_DIR:-$STRATA_DIR/bench_sweep}"
 API_KEY="${API_KEY:-}"              # ключ: из окружения или поля api_key конфига (блок проверок ниже)
-SUITE="${SUITE:-long}"              # quick | long | poly
+SUITE="${SUITE:-poly}"              # poly = long + doc-30k: большой вход даёт чистый prefill-сигнал
 REPEAT="${REPEAT:-2}"               # 2 повтора: prefill в сводке берётся из повтора 0 (холодного),
                                     # decode — максимум по повторам (защита от «лотереи драфта»)
-WARMUP="${WARMUP:-1}"
+WARMUP="${WARMUP:-3}"
 TEMPERATURE="${TEMPERATURE:-0.0}"
 SEED="${SEED:-42}"
 THINKING="${THINKING:-off}"         # off = --no-thinking (меньше разброса), on = как в проде
@@ -217,7 +217,7 @@ log "  конфиг:     $CONFIG  (порт $PORT, модель $MODEL)"
 log "  версия:     $SWEEP_VERSION  (суффикс -dirty = файл правлен руками!)"
 log "  base URL:   $BASE_URL"
 log "  сьют:       $SUITE, repeat $REPEAT, warmup $WARMUP, thinking $THINKING"
-log "  фич:        ${#FEATURES[@]}, вариантов: ${#VARIANTS[@]} (примерно 10-20 мин на вариант при suite long)"
+  log "  фич:        ${#FEATURES[@]}, вариантов: ${#VARIANTS[@]} (примерно 12-25 мин на вариант при suite poly)"
 log "  результаты: $OUT_DIR"
 log "=============================================================="
 
