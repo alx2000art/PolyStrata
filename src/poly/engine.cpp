@@ -2567,6 +2567,10 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
 // A call that copies only the experts it routes to leaves a share of them to the CPU, which computes them while
 // the others are copied: the share that had the two take about as long (Options::cpu_share).
 void Engine::moe_rows(Layer& L, int il, int n) {
+    // debug/bisect knobs for the second staging buffer: SERIAL waits both buffers' last read before an
+    // upload (the overlap off, the rotation on), DEBUG prints every round's upload/read to stderr
+    static const bool s2_serial_ = std::getenv("STRATA_POLY_STAGE2_SERIAL") != nullptr;
+    static const bool s2_debug_ = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
     const bool ahead = opt_.stage_ahead > 0 && (n >= opt_.stage_ahead || shared_ahead_);
@@ -2826,13 +2830,24 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                 fre = ev_free2_;
             }
             if (r != kept && !(r == 0 && early) && rows > 0) {
-                ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) fre, 0), "expert staging");
+                if (s2_serial_) {   // STRATA_POLY_STAGE2_SERIAL: an upload waits BOTH buffers' last reads, the
+                                    // overlap off with the rotation on — bisects an ordering race from a data one
+                    ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
+                    ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free2_, 0), "expert staging");
+                } else {
+                    ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) fre, 0), "expert staging");
+                }
+                if (s2_debug_) std::fprintf(stderr,
+                    "[stage2] il=%d upload r=%d/%d buf=%d kept=%d early=%d mine=%d g0=%d m=%d rows=%d\n",
+                    il, r, n_round, (int) second, kept, (int) early, (int) mine, g0, m, rows);
                 stage(L, group_.data() + g0, m, up_, n_cpu > 0, buf);
                 ck(cudaEventRecord((cudaEvent_t) rdy, cs(up_)), "expert staging");
                 holds = r;
                 held_in2 = second;
             }
             if (rows == 0) continue;   // nothing routed to the experts that go ahead
+            if (s2_debug_) std::fprintf(stderr,
+                "[stage2] il=%d read   r=%d/%d buf=%d r0=%d rows=%d\n", il, r, n_round, (int) second, r0, rows);
             ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) rdy, 0), "expert staging");
             int most = 0;
             for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
