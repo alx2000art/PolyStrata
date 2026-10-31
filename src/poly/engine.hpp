@@ -67,6 +67,7 @@ struct Options {
                                   ///< it a call copies only the experts it routes to, which with 8 GB of VRAM was
                                   ///< the faster of the two up to about 1,000 tokens
     int read_overlap = 1;         ///< a prompt read in several Engine::read() chunks: the next chunk's host work
+    int prompt_halves = 0;        ///< a prompt batch in two halves: the next half's attention overlaps this one's CPU experts
                                   ///< and uploads overlap the chunk before's last layers by an event, instead of
                                   ///< the card draining between chunks (--read-overlap); 0: drain as before
     bool file_reads = true;       ///< routed experts come out of their file by position (pread, ReadFile) into
@@ -503,7 +504,7 @@ protected:
     void moe_add(int n);
     template <class F>
     void* record(F&& work);
-    void moe_rows(Layer& L, int il, int n);
+    void moe_rows(Layer& L, int il, int n, const std::function<void()>* meanwhile = nullptr);
     void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false,
                uint8_t* buf = nullptr);
     void mind_memory();

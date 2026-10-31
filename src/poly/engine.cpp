@@ -2566,7 +2566,7 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
 // L.ahead before it knows the routing, on a stream of its own, so the upload runs under the layer's attention.
 // A call that copies only the experts it routes to leaves a share of them to the CPU, which computes them while
 // the others are copied: the share that had the two take about as long (Options::cpu_share).
-void Engine::moe_rows(Layer& L, int il, int n) {
+void Engine::moe_rows(Layer& L, int il, int n, const std::function<void()>* meanwhile) {
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
     const bool ahead = opt_.stage_ahead > 0 && (n >= opt_.stage_ahead || shared_ahead_);
@@ -2853,7 +2853,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             done = Clock::now();
         });
         cpu_experts(*workers_, host_.data(), (int) host_.size(), n, gt, dt, n_embd_, n_ff_exp_, h_x_, limit, gelu_,
-                    h_cpu_, opt_.cpu_tiled != 0, nullptr);
+                    h_cpu_, opt_.cpu_tiled != 0, meanwhile);
         const double cpu = ms_since(start);
         behind.wait();
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
@@ -3000,7 +3000,11 @@ void Engine::run(const int32_t* tokens, int n) {
     //
     // A half's launches are the ones its tokens have in a call of their own, at their rows of the buffers
     // (shift_rows()), so each token comes out as it would alone.
-    if (n > 1 && windowed_ && !all_cached() && halves_) {
+    // --prompt-halves: the window pipeline for a prompt batch.  The batch in two halves; while the workers
+    // compute a half's CPU experts, moe_rows' meanwhile hands the card the previous half's sum, tail and the
+    // layers' heads up to this one's router - the attention of the next half runs under this half's CPU phase.
+    const bool phalves = !windowed_ && opt_.prompt_halves && n >= 1024 && !all_cached();
+    if (n > 1 && (windowed_ ? halves_ : phalves) && !all_cached()) {
         const int first[3] = {0, (n + 1) / 2, n};   // half k is the tokens [first[k], first[k + 1])
         const unsigned bits = snap_bits_;           // the window's tokens that leave the recurrent state
         int at = 0;
@@ -3056,7 +3060,9 @@ void Engine::run(const int32_t* tokens, int n) {
                         }
                     };
                     const int m = half(k);
-                    const bool add = moe(L, il, m, late.k >= 0 ? &other : nullptr);
+                    bool add = false;
+                    if (windowed_) add = moe(L, il, m, late.k >= 0 ? &other : nullptr);
+                    else moe_rows(L, il, m, late.k >= 0 ? &other : nullptr);
                     if (failed) std::rethrow_exception(failed);
                     late = {k, il, add};
                 }
