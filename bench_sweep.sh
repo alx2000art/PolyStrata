@@ -39,6 +39,8 @@ set -uo pipefail
 # ------------------------- настройки (можно перекрыть через env) ------------
 STRATA_DIR="${STRATA_DIR:-$HOME/PolyStrata}"                  # каталог PolyStrata
 CONFIG="${CONFIG:-$STRATA_DIR/strata-dsv4-ud-iq2_xxs.json}"   # live-конфиг модели
+# версия = коммит, из которого запущен скрипт; "-dirty" = файл правлен руками
+SWEEP_VERSION="${SWEEP_VERSION:-$(git -C "$STRATA_DIR" describe --always --dirty 2>/dev/null || echo not-git)}"
 AB="${AB:-$STRATA_DIR/ab_patches.py}"                         # где лежит ab_patches.py
 OUT_DIR="${OUT_DIR:-$STRATA_DIR/bench_sweep}"
 API_KEY="${API_KEY:-}"              # ключ: из окружения или поля api_key конфига (блок проверок ниже)
@@ -75,29 +77,41 @@ FEATURES=(
   "stage2|--stage2-mib|512|0"
 )
 
+split_feat() {  # "имя|--ключ|ВКЛ|ВЫКЛ" -> FEAT_NAME/FEAT_KEY/FEAT_ON/FEAT_OFF.
+  # Разбор чистыми подстановками параметров: без read/IFS/herestring — на боксе
+  # они отдали пустые поля (пустые спеки свипов 10-31 при рабочем массиве),
+  # здесь разбор не зависит ни от окружения, ни от версии шелла.
+  FEAT_NAME="${1%%|*}"
+  local rest="${1#*|}"
+  FEAT_KEY="${rest%%|*}"
+  rest="${rest#*|}"
+  FEAT_ON="${rest%%|*}"
+  FEAT_OFF="${rest#*|}"
+}
+
 all_off_spec() {  # все фичи ВЫКЛ — эталон
-  local out="" e n k on off
+  local out="" e
   for e in "${FEATURES[@]}"; do
-    IFS='|' read -r n k on off <<< "$e"
-    out+=" $k $off"
+    split_feat "$e"
+    out+=" $FEAT_KEY $FEAT_OFF"
   done
   echo "${out# }"
 }
 
 all_on_spec() {  # все фичи ВКЛ (ваш рабочий набор)
-  local out="" e n k on off
+  local out="" e
   for e in "${FEATURES[@]}"; do
-    IFS='|' read -r n k on off <<< "$e"
-    out+=" $k $on"
+    split_feat "$e"
+    out+=" $FEAT_KEY $FEAT_ON"
   done
   echo "${out# }"
 }
 
 only_on_spec() {  # $1 = имя фичи: эталон + включена только она
-  local want="$1" out="" e n k on off
+  local want="$1" out="" e
   for e in "${FEATURES[@]}"; do
-    IFS='|' read -r n k on off <<< "$e"
-    if [[ "$n" == "$want" ]]; then out+=" $k $on"; else out+=" $k $off"; fi
+    split_feat "$e"
+    if [[ "$FEAT_NAME" == "$want" ]]; then out+=" $FEAT_KEY $FEAT_ON"; else out+=" $FEAT_KEY $FEAT_OFF"; fi
   done
   echo "${out# }"
 }
@@ -109,8 +123,8 @@ VARIANTS+=("01-all-off-b|$(all_off_spec)")   # эталон ещё раз — п
 VARIANTS+=("10-all-on|$(all_on_spec)")       # всё включено (ваш конфиг)
 i=20
 for e in "${FEATURES[@]}"; do
-  IFS='|' read -r n k on off <<< "$e"
-  VARIANTS+=("${i}-only-${n}|$(only_on_spec "$n")")
+  split_feat "$e"
+  VARIANTS+=("${i}-only-${FEAT_NAME}|$(only_on_spec "$FEAT_NAME")")
   i=$((i + 1))
 done
 VARIANTS+=("15-all-off-m|$(all_off_spec)")   # контроль дрейфа в середине свипа
@@ -121,7 +135,7 @@ VARIANTS+=("15-all-off-m|$(all_off_spec)")   # контроль дрейфа в 
 # дубликатов). Без этого строка конфига с --stage2-mib 512 протекла бы во все
 # "выкл"-варианты (ночь 10-31: все 17 вариантов прошли с одним прод-конфигом).
 # На бинарнике без stage2 крутки не поднимутся и будут пропущены.
-VARIANTS+=("50-on-stage2-512|$(all_on_spec) --stage2-mib 512")    # = прод-набор (пара к 10-all-on: мера шума)
+VARIANTS+=("50-on-stage2-512|$(all_on_spec)")                     # один в один 10-all-on — мера шума
 VARIANTS+=("51-on-stage2-256|$(all_on_spec) --stage2-mib 256")    # меньше отъёма кэша
 VARIANTS+=("52-eta-stage2-512|$(all_off_spec) --stage2-mib 512")  # механизм в чистоте
 # --- доля CPU-пула (поверх ВСЕГО НАБОРА: «фикс против auto» на проде).
@@ -139,7 +153,7 @@ VARIANTS+=("57-on-share100|$(all_on_spec) --cpu-share 1.0")
 # поверх ВСЁ-ВКЛЮЧЕНО — эффект крутки на рабочем конфиге:
 # VARIANTS+=("45-on-pb2048|$(all_on_spec) --prompt-batch 2048")
 # VARIANTS+=("46-on-convcache0|$(all_on_spec) --conversation-cache-mib 0")
-VARIANTS+=("99-all-off-c|$(all_off_spec) --stage2-mib 0")   # контроль дрейфа: эталон в конце свипа
+VARIANTS+=("99-all-off-c|$(all_off_spec)")   # контроль дрейфа (stage2 гасится самой спекой эталона)
 
 # ------------------------- проверки -----------------------------------------
 log()  { printf '%s\n' "$*"; }
@@ -200,6 +214,7 @@ exec > >(tee -a "$OUT_DIR/sweep.log") 2>&1
 log "=============================================================="
 log "PolyStrata bench sweep (эталон: все фичи выключены)"
 log "  конфиг:     $CONFIG  (порт $PORT, модель $MODEL)"
+log "  версия:     $SWEEP_VERSION  (суффикс -dirty = файл правлен руками!)"
 log "  base URL:   $BASE_URL"
 log "  сьют:       $SUITE, repeat $REPEAT, warmup $WARMUP, thinking $THINKING"
 log "  фич:        ${#FEATURES[@]}, вариантов: ${#VARIANTS[@]} (примерно 10-20 мин на вариант при suite long)"
