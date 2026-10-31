@@ -124,6 +124,13 @@ VARIANTS+=("15-all-off-m|$(all_off_spec)")   # контроль дрейфа в 
 VARIANTS+=("50-on-stage2-512|$(all_on_spec) --stage2-mib 512")    # = прод-набор (пара к 10-all-on: мера шума)
 VARIANTS+=("51-on-stage2-256|$(all_on_spec) --stage2-mib 256")    # меньше отъёма кэша
 VARIANTS+=("52-eta-stage2-512|$(all_off_spec) --stage2-mib 512")  # механизм в чистоте
+# --- доля CPU-пула (поверх ВСЕГО НАБОРА: «фикс против auto» на проде).
+# ВАЖНО: --cpu-tiled сам по себе булев (0/1) — "0.7" через atoi() = тихое
+# ВЫКЛЮЧЕНИЕ tiled; долей работ рулит --cpu-share (auto = движок балансирует
+# сам по таймингам). В проде ключа нет = auto, так что утечки в другие ячейки нет.
+VARIANTS+=("55-on-share50|$(all_on_spec) --cpu-share 0.5")
+VARIANTS+=("56-on-share70|$(all_on_spec) --cpu-share 0.7")
+VARIANTS+=("57-on-share100|$(all_on_spec) --cpu-share 1.0")
 # поверх ЭТАЛОНА — прочие крутки (раскомментируйте нужное):
 # VARIANTS+=("40-eta-pb2048|$(all_off_spec) --prompt-batch 2048")
 # VARIANTS+=("41-eta-tailskip0|$(all_off_spec) --tail-skip 0")
