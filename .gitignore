@@ -70,3 +70,6 @@ build-vision-cuda12.bat
 
 # local Windows HIP packaging output
 dist-hip/
+
+# bench_sweep results (variant captures, logs)
+/bench_sweep/
