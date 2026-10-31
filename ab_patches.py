@@ -84,36 +84,228 @@ OPTINS: list[tuple[str, list[str], str]] = [
 
 # --------------------------------------------------------------------------- suite (ab_strata's)
 
-def _filler(words: int, kind: str) -> str:
-    """Deterministic pseudo-text of roughly `words` words (stable token counts)."""
-    if kind == "code":
-        base = (
-            "def compute_step(state, index, gain=0.125):",
-            "    total = 0.0",
-            "    for i, value in enumerate(state):",
-            "        total += value * gain * (index % 7 + 1)",
-            "        if total > 1024.0:",
-            "            total -= 512.0",
-            "    return total",
-            "",
-        )
-    else:
-        base = (
-            "The survey station logged another quiet interval before the "
-            "afternoon shift began recalibrating the eastern sensors.",
-            "Wind readings stayed within the expected band while the crew "
-            "compared them against last week's archived measurements.",
-            "A brief note in the maintenance log mentioned a loose panel on "
-            "the secondary mast, already scheduled for the next inspection.",
-            "Meanwhile the database synchronized its hourly snapshot and the "
-            "operators reviewed the anomaly flags queued since midnight.",
-        )
-    out: list[str] = []
+# The suite's prompts were once one sentence cycled to the target length, and at
+# temperature 0 the model answered by locking onto that periodicity — the outputs
+# were loops mirroring the prompt.  A corpus of distinct paragraphs keeps the
+# word counts stable while giving the decoder non-periodic context: the corpus
+# runs about 2.4k words, so a repetition period exceeds any generation cap in
+# the suite and the model never sees a short cycle to ride.
+
+_VARIED_PROSE = """\
+Lighthouses along the Baltic were first lit under Peter the Great: a tower fire in Kronstadt in 1704 began a tradition whose core has never changed — a light source, a Fresnel lens, and a published table of characteristics that lets a captain tell one light from another. Many of those towers still run on nineteenth-century optics, with a solar panel where the keeper used to sleep.
+
+A sourdough starter is a negotiated settlement between yeast and bacteria: the yeast lifts the loaf, the lactobacilli make the acid that flavors it, and each feeding decides who dominates. Bakers talk about their starters the way sailors talk about weather, because a starter that turns too sour or rises too slow will reshape an entire bakery's schedule.
+
+The Kepler telescope confirmed more exoplanets than every ground observatory combined: for nine years it stared at one patch of sky in Cygnus, catching stars that dimmed by hundredths of a percent as planets crossed their faces. When two reaction wheels failed, the mission was reborn as K2, balancing against the pressure of sunlight the way a canoe rider leans into wind.
+
+The Sicilian Defense begins 1.e4 c5 and is the sharpest reply to a king's pawn opening: Black trades symmetry for imbalance from the first move, playing for a win rather than mere equality. In the Dragon variation the bishop fianchettoes to g7, stares across the whole board, and waits out White's attack before counterattacking down the c-file.
+
+An ant trail is a solved logistics problem: pheromone marks act as a distributed algorithm where every forager reinforces the route that reached food fastest, and the slower paths evaporate from disuse. Leafcutter colonies go further — they cultivate fungus gardens underground, a form of agriculture that predates human farming by tens of millions of years.
+
+Swing differs from bebop in how the beat is placed: swing players lean against the pulse so dancers can stay in step, while bebop is concert music, often above two hundred beats per minute, where the soloist trades virtuosity for nothing at all. Parker and Gillespie built it in the basements off Fifty-Second Street after the big bands went broke.
+
+A suspension bridge holds itself up through two ideas: a catenary cable draped between towers carries the deck through vertical hangers, and the cable's ends are anchored by the sheer mass of the shore. The real enemy was never weight but wind — the Tacoma Narrows collapse of 1940 put aerodynamics into every span calculation forever.
+
+Roasting coffee is the chemistry of sugars and amino acids: the Maillard reaction builds color and body while caramelization supplies sweetness. A light roast keeps acidity and fruit; a dark roast trades those away for weight and bitterness. The gap between a floral Ethiopian and a harsh robusta is usually decided by the roasting profile, not the bean.
+
+The 1980 Moscow Olympics are remembered for a cartoon bear, a home-team medal count, and a boycott: the United States and fifty other committees stayed home after the invasion of Afghanistan. The games ran anyway, and the closing ceremony — a giant Misha bear weeping and lifting off with balloons — outlived the politics that shaped it.
+
+Ball lightning has never been reproduced reliably in a laboratory: thousands of sightings, contested physics, theories ranging from plasma toroids to silicon vapor kicked up when ordinary lightning strikes soil. The best spectrograph was an accident — a 2012 reading from a rooftop instrument in Qinghai that caught half a second of silicon and iron emission lines.
+
+Roman aqueducts worked without pumps for centuries because gradient does the labor: a drop of roughly thirty centimeters per kilometer, surveyed with chorobates and plumb lines, carries water from a hillside spring to a city fountain. The Pont du Gard loses less elevation over its whole length than a kitchen counter is tall.
+
+A forest's mycelial network moves nutrients the way a market moves prices: trees trade sugar to fungi for phosphorus and water, and the exchange rates shift with the season. Seedlings in deep shade survive their first years on subsidies delivered through those threads — a fact that reshaped how foresters think about clear-cutting.
+
+The Voyager probes launched in 1977 with less computing power than a car key and are still transmitting from beyond the heliopause. Their plutonium heaters fade by about four watts a year, so mission controllers shut down instruments one by one, like a crew rationing supplies on the longest voyage anyone has ever taken.
+
+People who grow up bilingual switch languages at a speed that looks effortless and is actually a feat of inhibition: the brain suppresses the unused language on every single word. Eye-tracking studies show the other language is never fully silent — it is held underwater, still costing a few milliseconds on every glance.
+
+Glaciers are archives: each year's snow seals the previous year's atmosphere beneath it, and ice cores read like ledger books of ancient storms, eruptions, and lead smelting. The bubbles in a core drilled in Greenland hold air that no human breathed between the fall of Rome and the invention of the steam engine.
+
+A honeybee's waggle dance is a map drawn in the dark: the angle of the figure encodes the bearing to flowers relative to the sun, and the duration encodes distance. Skeptics once glued tiny magnets to the dancers' backs to test whether the performance was theater — the recruits still found the flowers.
+
+Gothic cathedrals solved a wall problem with flying buttresses: once the roof's outward thrust is caught by external arches, the walls stop being structure and become glass. Builders learned the limits empirically — the choir of Beauvais reached for the tallest vault in Europe and collapsed in 1284.
+
+The platypus broke every category European taxonomists owned: a mammal with a duck's bill that lays eggs, swims with electroreceptors in its skin, and carries venom in a hind spur. The first specimen sent to London in 1799 was inspected for stitches — naturalists assumed a taxidermist's hoax.
+
+Lord Kelvin's tide predictor was a mechanical computer assembled from pulleys and gears: it summed harmonic components with brass and string, producing a year of tide tables in a few cranks. Navies ran machines like it into the 1960s, because the moon's arithmetic never changes and brass never crashes.
+
+The Antikythera mechanism, raised from a shipwreck in 1901, predicted eclipses with bronze gears cut before the Roman Empire. X-ray tomography revealed at least thirty hand-cut wheels and a dial that followed the four-year cycle of the Olympic games — an astronomy manual built as jewelry.
+
+London's Great Stink of 1858 gave Joseph Bazalgette his mandate: interceptor sewers laid at a gentle grade beneath the city, embankments that narrowed the Thames on purpose, and pumping stations built like cathedrals. The system he sized for two million people still carries the waste of nearly nine.
+
+Container shipping changed the cost of moving things more than the cost of making them: a standardized steel box cut port labor by an order of magnitude and made global supply chains ordinary. Before the 1956 container experiment, loading a ship cost more per ton than sailing it across an ocean.
+
+A hummingbird's heart beats over a thousand times a minute in flight and nearly stops in torpor at night, dropping its body temperature to save a few grams of fat. They burn energy faster than any vertebrate their size and starve within hours without flowers — a lifestyle written in narrow margins.
+
+The Voynich manuscript resists every approach thrown at it: cipher analysis, linguistic statistics, even radiocarbon dating — the vellum is early fifteenth century, the script still unnamed. Drawings of unidentifiable plants have outlived every proposed author, from Roger Bacon to an elaborate forgery that the dating ruled out.
+
+In the deep ocean most animals make their own light: lures, warning flares, and counter-illumination that erases a silhouette against the dim blue above. Ninety percent of species down there are bioluminescent — darkness is not the absence of light but its most heavily invested currency.
+
+English spelling froze while pronunciation kept moving: the Great Vowel Shift turned "name" from two syllables into one and left "knight" with letters nobody says. Chaucer's rhymes are a map of sounds that vanished; every modern spelling exception is a fossil of a vowel that moved.
+
+Coastal deserts in Chile and Morocco harvest water from fog with mesh nets: fine threads catch droplets, which coalesce and run into gutters — a few square meters can supply a village's drinking water. The idea is ancient, the material modern, and the yield depends entirely on the wind's cooperation.
+
+A pottery kiln is an argument with heat: stoneware needs over twelve hundred degrees, wood-fired kilns climb unevenly, and ash landing on a pot mid-firing makes glazes no recipe can repeat. Japanese anagama firings run for days with crews stoking in shifts, trading sleep for surfaces that resemble landscapes.
+
+In 1907 a German apothecary patented pigeon photography: a breast-mounted camera on a timer, birds bred for the job, aerial views of towns that no balloon could approach. The military took it seriously for a decade before aircraft made the pigeons obsolete — the patent survives only in archives.
+
+The Svalbard Global Seed Vault is built into a mountain above the Arctic Circle: seeds stored at minus eighteen degrees survive decades even if the power fails, because the permafrost is the backup cooler. It is designed for wars, outages, and centuries — the least dramatic insurance policy ever carved into rock.
+
+A peregrine falcon's stoop has been clocked near three hundred ninety kilometers per hour, the fastest animal measured in any medium. Its nostrils carry baffle cones that keep the lungs from rupturing at that speed — an engineering detail later borrowed by jet engine designers.
+
+Books printed after 1850 crumble because publishers moved to wood-pulp paper treated with alum sizing: the pages acidify from within. Volumes from the fifteenth century, printed on rag paper, often outlive newspapers from the 1980s — durability followed fashion, not progress.
+
+The 1858 transatlantic cable worked for three weeks and passed a message a minute before it failed; the celebration parades came first, the physics lessons after. Voltage had been pushed too high trying to force speed through a line whose bandwidth was a handful of words per minute.
+
+Snowflakes grow six-fold symmetric because the ice lattice is hexagonal, but every branch's final shape depends on the humidity and temperature it met on the way down. No two are identical for the same reason two rivers never cut identical valleys — the journey is recorded in the structure.
+
+London's smogs killed by numbers: the December 1952 episode took roughly twelve thousand lives and looked, from the street, like ordinary fog. The Clean Air Act that followed defined smokeless zones and pushed households off raw coal — one of the clearest cases of legislation written by a weather event.
+
+The Giant's Causeway looks laid by masons, but its hexagonal columns are contraction: basalt cooled slowly and evenly, and shrinkage cracked the rock into columns with a natural preference for six sides. The same physics patterns cooling lava in Iceland and drying mud in a puddle."""
+
+_VARIED_CODE = """\
+# A fixed-window rate limiter.
+class RateLimiter:
+    def __init__(self, limit, window):
+        self.limit, self.window = limit, window
+        self.hits = {}
+
+    def allow(self, key, now):
+        window_start = now - self.window
+        queue = [t for t in self.hits.get(key, []) if t > window_start]
+        if len(queue) >= self.limit:
+            self.hits[key] = queue
+            return False
+        queue.append(now)
+        self.hits[key] = queue
+        return True
+
+# An LRU cache with list-ordered eviction.
+class LRUCache:
+    def __init__(self, capacity):
+        self.cap = capacity
+        self.data = {}
+        self.order = []
+
+    def get(self, key):
+        if key not in self.data:
+            return None
+        self.order.remove(key)
+        self.order.append(key)
+        return self.data[key]
+
+    def put(self, key, value):
+        if key in self.data:
+            self.order.remove(key)
+        elif len(self.data) >= self.cap:
+            del self.data[self.order.pop(0)]
+        self.data[key] = value
+        self.order.append(key)
+
+# A quoted-CSV field splitter that survives doubled quotes.
+def split_csv_line(line, separator=","):
+    fields, current, in_quotes = [], [], False
     i = 0
-    while len(out) < words:
-        out.extend(base[i % len(base)].split())
+    while i < len(line):
+        char = line[i]
+        if char == '"':
+            if in_quotes and i + 1 < len(line) and line[i + 1] == '"':
+                current.append('"')
+                i += 1
+            else:
+                in_quotes = not in_quotes
+        elif char == separator and not in_quotes:
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(char)
         i += 1
-    return " ".join(out[:words])
+    fields.append("".join(current))
+    return fields
+
+# Binary search over an array that was sorted and then rotated.
+def search_rotated(values, target):
+    low, high = 0, len(values) - 1
+    while low <= high:
+        middle = (low + high) // 2
+        if values[middle] == target:
+            return middle
+        if values[low] <= values[middle]:
+            if values[low] <= target < values[middle]:
+                high = middle - 1
+            else:
+                low = middle + 1
+        else:
+            if values[middle] < target <= values[high]:
+                low = middle + 1
+            else:
+                high = middle - 1
+    return -1
+
+# Kahn's algorithm: a topological sort that reports cycles by returning None.
+def toposort(graph):
+    indegree = {node: 0 for node in graph}
+    for node, edges in graph.items():
+        for nxt in edges:
+            indegree[nxt] += 1
+    ready = [node for node, degree in indegree.items() if degree == 0]
+    order = []
+    while ready:
+        node = ready.pop()
+        order.append(node)
+        for nxt in graph.get(node, []):
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                ready.append(nxt)
+    return order if len(order) == len(graph) else None
+
+# Fletcher-16: a positional checksum that catches transpositions a plain sum misses.
+def fletcher16(data):
+    sum1 = sum2 = 0
+    for byte in data:
+        sum1 = (sum1 + byte) % 255
+        sum2 = (sum2 + sum1) % 255
+    return (sum2 << 8) | sum1
+
+# A retry decorator with exponential backoff and a final honest raise.
+import time as _time
+import random as _random
+
+def retry(attempts=5, base_delay=0.2, exceptions=(Exception,)):
+    def wrap(fn):
+        def inner(*args, **kwargs):
+            delay = base_delay
+            for attempt in range(attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except exceptions:
+                    if attempt == attempts - 1:
+                        raise
+                    _time.sleep(delay * (0.5 + _random.random()))
+                    delay *= 2
+        return inner
+    return wrap"""
+
+def _filler(words: int, kind: str) -> str:
+    """Deterministic varied text of roughly `words` words (stable token counts).
+
+    The corpus paragraphs are distinct on purpose: the old filler cycled one
+    sentence, and at temperature 0 the model answered by locking onto that
+    periodicity — the outputs were loops mirroring the prompt.  The corpus runs
+    about 2.4k words, so a repetition period exceeds any generation cap in the
+    suite and the decoder never sees a short cycle to ride."""
+    corpus = _VARIED_CODE if kind == "code" else _VARIED_PROSE
+    paras = [p.strip() for p in corpus.split("\n\n") if p.strip()]
+    out: list[str] = []
+    total = 0
+    i = 0
+    while total < words:
+        para = paras[i % len(paras)]
+        out.append(para)
+        total += len(para.split())
+        i += 1
+    return " ".join(" ".join(out).split()[:words])
 
 
 def build_suite(suite: str) -> list[dict[str, Any]]:
