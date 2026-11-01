@@ -1072,6 +1072,10 @@ void usage() {
                  "  --stage-read-mib N     a prompt read of several batches grows the staging buffer to N MiB (at\n"
                  "                         most a layer's experts) with VRAM the expert cache lends it until the\n"
                  "                         answer starts (default 0 = never)\n"
+                 "  --stage2-mib N         a second staging buffer: a batch's rounds go through two buffers in\n"
+                 "                         turn, so a round's copy runs beside the multiplication of the round\n"
+                 "                         before it instead of after it (default 0 = one buffer, the rounds in\n"
+                 "                         line)\n"
                  "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -1180,6 +1184,7 @@ int main(int argc, char** argv) {
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--stage-read-mib") o.stage_read_mib = std::atoi(val());
+        else if (a == "--stage2-mib") o.stage2_mib = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
