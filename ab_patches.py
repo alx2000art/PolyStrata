@@ -287,21 +287,22 @@ def retry(attempts=5, base_delay=0.2, exceptions=(Exception,)):
         return inner
     return wrap"""
 
-def _filler(words: int, kind: str) -> str:
+def _filler(words: int, kind: str, start: int = 0) -> str:
     """Deterministic varied text of roughly `words` words (stable token counts).
 
     The corpus paragraphs are distinct on purpose: the old filler cycled one
     sentence, and at temperature 0 the model answered by locking onto that
     periodicity — the outputs were loops mirroring the prompt.  The corpus runs
     about 2.4k words, so a repetition period exceeds any generation cap in the
-    suite and the decoder never sees a short cycle to ride."""
+    suite and the decoder never sees a short cycle to ride.  `start` rotates
+    into the corpus so several short prompts don't share one seed text."""
     corpus = _VARIED_CODE if kind == "code" else _VARIED_PROSE
     paras = [p.strip() for p in corpus.split("\n\n") if p.strip()]
     out: list[str] = []
     total = 0
     i = 0
     while total < words:
-        para = paras[i % len(paras)]
+        para = paras[(i + start) % len(paras)]
         out.append(para)
         total += len(para.split())
         i += 1
@@ -327,9 +328,40 @@ def build_suite(suite: str) -> list[dict[str, Any]]:
         spec += [
             ("doc-30k", 23000, "text", 2048, "very long prompt: read overlap, attention batching"),
         ]
+    if suite == "decode":
+        # Короткий промпт (префилл — шум), длинная генерация: метрика варианта
+        # почти целиком decode.  max_tokens 2048 даёт 1500+ реальных токенов
+        # ответа; seed'ы промптов разнесены по корпусу, чтобы не совпадали.
+        spec = [
+            ("essay-80", 80, "text", 2048, "decode-heavy: long prose continuation from a short seed"),
+            ("story-80", 80, "text", 2048, "decode-heavy: narrative continuation"),
+            ("explain-80", 70, "text", 2048, "decode-heavy: technical explanation"),
+            ("list-80", 70, "text", 2048, "decode-heavy: structured enumeration"),
+            ("code-120", 120, "code", 2048, "decode-heavy: code generation from a short spec"),
+        ]
     prompts = []
     for pid, words, kind, max_tokens, probes in spec:
-        body = _filler(words, kind)
+        body = _filler(words, kind, start=len(prompts) if suite == "decode" else 0)
+        if suite == "decode":
+            if kind == "code":
+                instruction = (
+                    "The module below is the start of a library. Extend it with at "
+                    "least four more complete functions in the same style, each with "
+                    "a docstring, and a small self-test under "
+                    "if __name__ == \"__main__\". Do not summarize.\n\n"
+                )
+            else:
+                instruction = (
+                    "Read the seed below and continue it with at least fifteen "
+                    "paragraphs (1200+ words). Stay in the same style and level of "
+                    "detail; do not summarize and do not wrap up early.\n\n"
+                )
+        else:
+            instruction = (
+                "Read the text below and continue it with at least "
+                "three paragraphs (300+ words). Stay in the same "
+                "style, do not summarize.\n\n"
+            )
         prompts.append(
             {
                 "id": pid,
@@ -339,11 +371,7 @@ def build_suite(suite: str) -> list[dict[str, Any]]:
                 "messages": [
                     {
                         "role": "user",
-                        "content": (
-                            "Read the text below and continue it with at least "
-                            "three paragraphs (300+ words). Stay in the same "
-                            "style, do not summarize.\n\n" + body
-                        ),
+                        "content": instruction + body,
                     }
                 ],
             }
