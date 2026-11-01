@@ -1993,10 +1993,15 @@ void Engine::alloc() {
         d_slots_ = (void**) dmalloc((size_t) n_layer_ * n_expert_ * sizeof(void*), "scratch");
         tab_ = (int32_t*) dmalloc(tab, "scratch");
         h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
-        iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
-        std::vector<int32_t> ramp(rr);
-        std::iota(ramp.begin(), ramp.end(), 0);
-        ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
+        // The mmq launches cover row tiles padded to the round's widest expert, and the kernels read ids[i]
+        // for the padding rows too: the table carries a tile of zeros past the ramp so those reads stay inside
+        // the allocation (compute-sanitizer flagged them here; a padding row's product is dropped by its
+        // expert's row count, so the zeros never reach dst).
+        constexpr size_t kIotaPad = 256;
+        iota_ = (int32_t*) dmalloc((rr + kIotaPad) * sizeof(int32_t), "scratch");
+        std::vector<int32_t> ramp(rr + kIotaPad, 0);
+        std::iota(ramp.begin(), ramp.begin() + rr, 0);
+        ck(cudaMemcpy(iota_, ramp.data(), (rr + kIotaPad) * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
 
         // One layer's experts pass through it at a time, so it never holds more than a layer has.  A model of
         // small experts has a few hundred MiB a layer, and the rest of the default would be VRAM that the
