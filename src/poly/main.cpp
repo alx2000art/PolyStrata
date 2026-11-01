@@ -1068,6 +1068,10 @@ void usage() {
                  "  --stage-read-mib N     a prompt read of several batches grows the staging buffer to N MiB (at\n"
                  "                         most a layer's experts) with VRAM the expert cache lends it until the\n"
                  "                         answer starts (default 0 = never)\n"
+                 "  --stage2-mib N         a second staging buffer: a batch's rounds go through two buffers in\n"
+                 "                         turn, so a round's copy runs beside the multiplication of the round\n"
+                 "                         before it instead of after it (default 0 = one buffer, the rounds in\n"
+                 "                         line)\n"
                  "  --read-overlap N       1: the next chunk of a long prompt's read overlaps the last layers of the\n"
                  "                         chunk before, its uploads waiting by an event and not the card draining\n"
                  "                         (default 1; 0 = the card drains between the chunks)\n"
@@ -1193,6 +1197,7 @@ int main(int argc, char** argv) {
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--stage-read-mib") o.stage_read_mib = std::atoi(val());
+        else if (a == "--stage2-mib") o.stage2_mib = std::atoi(val());
         else if (a == "--read-overlap") o.read_overlap = std::atoi(val());
         else if (a == "--file-reads") o.file_reads = std::atoi(val()) != 0;
         else if (a == "--read-heat") o.read_heat = std::atoi(val());
