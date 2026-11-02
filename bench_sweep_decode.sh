@@ -94,10 +94,10 @@ KNOBS_DECODE=(
   "pool-only|--ram-experts-mib 2048"                  # пул без префетча — база для pool-pf*
   "pool-pf4|--ram-experts-mib 2048 --prefetch-k 4"    # read-ahead догадок в RAM-пул (decode-окна)
   "pool-pf8|--ram-experts-mib 2048 --prefetch-k 8"
-  "topk-2|--resident-topk 2"    # Maya's Turbo-семантика: K тяжелейших из маршрутизированных, top-1 жив
-  "topk-3|--resident-topk 3"    # их быстрый прогон у Maya на DSv4: 3 из 6
-  "topk-4|--resident-topk 4"
 )
+# (клеток --resident-topk больше нет: живая статистика показала, что топ-3 экспертов DSv4 несут лишь ~65%
+# веса маршрутизированных — кап оглупляет; ключ остался в MANAGED_KEYS, чтобы свип погасил его, если он
+# затесался в конфиг)
 KNOBS_PREFILL=(
   "tail-skip-2|--tail-skip 2"
   "tail-skip-6|--tail-skip 6"
