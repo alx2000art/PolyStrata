@@ -373,6 +373,14 @@ Engine::~Engine() {
         swap_cv_.notify_all();
         follower_.join();
     }
+    if (pf_thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> l(pf_m_);
+            pf_quit_ = true;
+        }
+        pf_cv_.notify_all();
+        pf_thread_.join();
+    }
     if (swap_st_) cudaStreamSynchronize(cs(swap_st_));
     if (up_) cudaStreamSynchronize(cs(up_));
     if (rs_) cudaStreamSynchronize(cs(rs_));
@@ -2038,10 +2046,22 @@ void Engine::alloc() {
             }
         if (slot > 0) {
             ram_pool_ = std::make_unique<RamPool>((size_t) opt_.ram_experts_mib << 20, slot, n_layer_, n_expert_);
-            std::fprintf(stderr, "strata-poly: the RAM expert pool holds %d experts of %.1f MiB (%d MoE layers)
-",
+            std::fprintf(stderr, "strata-poly: the RAM expert pool holds %d experts of %.1f MiB (%d MoE layers)\n",
                          ram_pool_->slots(), (double) slot / (1024 * 1024), moe);
         }
+    }
+    // The read-ahead of the next MoE layer's likeliest experts (--prefetch-k): it reads the guesses into the
+    // pool, so it is nothing without one.
+    if (opt_.prefetch_k > 0 && ram_pool_) {
+        d_pf_ = dmalloc((size_t) 16 * n_expert_ * sizeof(float), "scratch");
+        h_pf_ = (float*) hmalloc((size_t) 16 * n_expert_ * sizeof(float), "pinned memory");
+        cudaEvent_t ev = nullptr;
+        ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "read ahead");
+        ev_pf_ = ev;
+        pf_scratch_ = std::malloc(ram_pool_->slot_bytes());
+        if (pf_scratch_) pf_thread_ = std::thread([this] { pf_read(); });
+    } else if (opt_.prefetch_k > 0) {
+        std::fprintf(stderr, "strata-poly: --prefetch-k needs --ram-experts-mib; the read-ahead stays off\n");
     }
     if (mmq_) {
         const size_t rr = n * n_used_,
@@ -2605,6 +2625,60 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
     ck(cudaMemsetAsync(buf + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
 }
 
+// The guess-reader's loop (--prefetch-k): the engine guesses the next MoE layer's routing at the end of the
+// layer before it - the lin and the copy run on the card's stream, under the next layer's attention - and this
+// thread waits for the guess to land, then reads the likeliest experts the VRAM cache and the pool do not hold
+// from the mapping into the pool.  Reading the mapping is the point: its pages fault in now, beside the card's
+// work, instead of a round later inside the staging.
+void Engine::pf_read() {
+    cudaSetDevice(device_);
+    const size_t ne = (size_t) n_expert_;
+    std::unique_lock<std::mutex> lk(pf_m_);
+    for (;;) {
+        pf_cv_.wait(lk, [&] { return pf_req_ || pf_quit_; });
+        if (pf_quit_) return;
+        const int j = pf_j_, n = std::min(pf_n_, 16);
+        pf_req_ = false;
+        pf_busy_ = true;
+        lk.unlock();
+        // a throw out of a std::thread ends the process: the sync's error leaves this round's guess unread
+        try {
+            const Layer& L = layers_[(size_t) j];
+            const int k = std::min(opt_.prefetch_k, 16);
+            int32_t top[16][16];
+            int have[16];
+            for (int r = 0; r < n; ++r) {
+                const float* g = h_pf_ + (size_t) r * ne;
+                int got = 0;
+                float best[16];
+                for (int e = 0; e < n_expert_; ++e) {
+                    const float s = g[e];
+                    if (got == k && s <= best[k - 1]) continue;
+                    int at = got < k ? got++ : k - 1;
+                    for (; at > 0 && best[at - 1] < s; --at) best[at] = best[at - 1], top[r][at] = top[r][at - 1];
+                    best[at] = s;
+                    top[r][at] = e;
+                }
+                have[r] = got;
+            }
+            uint8_t* gu = (uint8_t*) pf_scratch_, * down = gu + 2 * L.gu_bytes;
+            for (int q = 0; q < k; ++q)
+                for (int r = 0; r < n; ++r) {
+                    if (q >= have[r]) continue;
+                    const size_t e = (size_t) top[r][q];
+                    if (L.slot[e] || ram_pool_->holds(j, (int) e)) continue;
+                    std::memcpy(gu, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(gu + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(down, L.exp_down + e * L.d_bytes, L.d_bytes);
+                    ram_pool_->fill(j, (int) e, gu, down, 2 * L.gu_bytes, L.d_bytes);
+                }
+        } catch (const std::exception&) {
+        }
+        lk.lock();
+        pf_busy_ = false;
+    }
+}
+
 // A MoE layer for a prompt batch: the experts on the GPU, by llama.cpp's MMQ.  A row is a token and one
 // of the experts it routes to.  The rows are sorted by expert, the experts of the VRAM cache first; the other
 // experts pass through the staging buffer, as many at a time as it holds.  A full batch starts the copy of
@@ -2956,6 +3030,31 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         staged_.assign(group_.begin() + round_[(size_t) holds], group_.begin() + round_[(size_t) holds + 1]);
         staged_il_ = il;
         staged_in2_ = held_in2;
+    }
+    // --prefetch-k: the next MoE layer's routing, guessed on this layer's input.  The lin and the copy run on
+    // the card's stream and land under the next layer's attention; the guess-reader then reads the likeliest
+    // experts the VRAM cache and the pool do not hold into the pool.  A guess nobody uses only ages in it.
+    if (opt_.prefetch_k > 0 && ram_pool_ && pf_scratch_ && n <= 16 && !layers_.empty() &&
+        std::less_equal<const Layer*>()(layers_.data(), &L) && &L < layers_.data() + layers_.size()) {
+        int j = (int) (&L - layers_.data()) + 1;
+        while (j < n_layer_ && !layers_[(size_t) j].moe) ++j;
+        if (j < n_layer_) {
+            bool free = false;
+            {
+                std::lock_guard<std::mutex> lk(pf_m_);
+                free = !pf_req_ && !pf_busy_;
+                if (free) pf_j_ = j, pf_n_ = n;
+            }
+            if (free) {
+                lin(layers_[(size_t) j].gate_inp, xn_, (float*) d_pf_, n);
+                ck(cudaMemcpyAsync(h_pf_, d_pf_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost,
+                                   cs(st_)), "read ahead");
+                ck(cudaEventRecord((cudaEvent_t) ev_pf_, cs(st_)), "read ahead");
+                std::lock_guard<std::mutex> lk(pf_m_);
+                pf_req_ = true;
+                pf_cv_.notify_one();
+            }
+        }
     }
 }
 

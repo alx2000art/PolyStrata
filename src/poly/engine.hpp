@@ -89,6 +89,10 @@ struct Options {
                                   ///< scalar kernel
     int expert_mma = 0;           ///< the experts' Q3_K products on the tensor cores through this fork's own
                                   ///< kernel (expert_mma.hpp), and not llama.cpp's generic mmq; 0: the generic
+    int prefetch_k = 0;           ///< read ahead this many of each token's likeliest experts of the next MoE
+                                  ///< layer, guessed on this layer's input while the card takes the next one's
+                                  ///< attention; the misses go into the RAM pool (needs --ram-experts-mib);
+                                  ///< 0: never.  Decode and verify windows only (16 tokens at most)
     int ram_experts_mib = 0;      ///< a RAM pool of this many MiB keeping the most used experts outside VRAM
                                   ///< whole in the process's own memory (ram_pool.hpp): their reads stop
                                   ///< touching the page cache, which holds the model's files only while
@@ -514,6 +518,7 @@ protected:
     void moe_rows(Layer& L, int il, int n);
     void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false,
                uint8_t* buf = nullptr);
+    void pf_read();                                         ///< the guess-reader's loop
     void mind_memory();
     void follow(int written);
     void follow_loop();
@@ -732,6 +737,12 @@ protected:
     void *mq_ = nullptr, *mq2_ = nullptr;                   ///< the rows quantized for the two products
     void *mqm_ = nullptr, *mqm2_ = nullptr;                 ///< the same rows in expert_mma's own per-32 format
     std::unique_ptr<RamPool> ram_pool_;                     ///< the kept experts outside VRAM, when it is on
+    std::thread pf_thread_;                                 ///< the guess-reader of the next MoE layer
+    std::mutex pf_m_;
+    std::condition_variable pf_cv_;
+    bool pf_req_ = false, pf_quit_ = false, pf_busy_ = false;
+    int pf_j_ = -1, pf_n_ = 0;                              ///< the layer the guess names, and its tokens
+    void *d_pf_ = nullptr, *h_pf_ = nullptr, *ev_pf_ = nullptr, *pf_scratch_ = nullptr;
     void* mqx_ = nullptr;                                   ///< lin()'s tokens quantized for a product
     int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
     int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...

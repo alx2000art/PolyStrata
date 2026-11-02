@@ -44,6 +44,12 @@ public:
     int slots() const { return n_slots_; }
     size_t slot_bytes() const { return slot_bytes_; }
 
+    /// 1 when the expert's bytes sit in the pool now.
+    bool holds(int il, int e) {
+        std::lock_guard<std::mutex> lk(m_);
+        return keys_[(size_t) il * n_experts_ + (size_t) e] >= 0;
+    }
+
     /// On a hit copies the expert's gate|up into dst_gu and its down into dst_down, and makes it the most
     /// recently used.  On a miss leaves the destinations alone and returns 0.  The slot's busy flag keeps
     /// its bytes stable between the two locks, so the slot number rides in a local.

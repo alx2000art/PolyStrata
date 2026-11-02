@@ -1099,6 +1099,11 @@ void usage() {
                  "                         VRAM whole in the process's own memory: their reads stop touching\n"
                  "                         the page cache, which holds the model's files only while nothing\n"
                  "                         else wants the RAM (default 0 = through the page cache, as before)\n"
+                 "  --prefetch-k N         read ahead N of each token's likeliest experts of the next MoE layer,\n"
+                 "                         guessed on this layer's input while the card takes the next one's\n"
+                 "                         attention; the misses go into --ram-experts-mib's pool.  Decode and\n"
+                 "                         verify windows only (16 tokens at most); needs --ram-experts-mib\n"
+                 "                         (default 0 = never)\n"
                  "  --cpu-tiled N          1: the CPU experts' gate/up through the tiled K-quant kernels\n"                 "                         (default 1; 0 = the per-row vec_dot path)\n"                 "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -1215,6 +1220,7 @@ int main(int argc, char** argv) {
         else if (a == "--idx-mma") o.idx_mma = std::atoi(val());
         else if (a == "--expert-mma") o.expert_mma = std::atoi(val());
         else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoi(val());
+        else if (a == "--prefetch-k") o.prefetch_k = std::atoi(val());
         else if (a == "--cpu-tiled") o.cpu_tiled = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
