@@ -167,8 +167,10 @@ __global__ __launch_bounds__(256) void expert_mma_mul_kernel(const uint8_t* __re
 #pragma unroll
                 for (int q = 0; q < 32; ++q) sA[row][j * 32 + q] = __float2half(0.f);
             }
-            sSC[row][8 * hb + 2 * j] = sc0;
-            sSC[row][8 * hb + 2 * j + 1] = sc1;
+            // the window holds one half of the block, so its eight subs sit at 2j and 2j + 1 (an 8*hb offset
+            // here ran past the row's eight slots and the second window read the neighbor's scales)
+            sSC[row][2 * j] = sc0;
+            sSC[row][2 * j + 1] = sc1;
         }
         // ---- sB: the codes of BN xq rows; sBD: their per-32 scales.  A thread fills one 16-value half of
         // one 32-block of its column: (t >> 3) the column, ((t >> 1) & 3) the block, (t & 1) the half.
