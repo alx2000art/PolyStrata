@@ -248,7 +248,8 @@ void ck(const char* what) {
 }  // namespace
 
 bool ExpertMma::fits(int ggml_type, int64_t w_cols) {
-    return ggml_type == kQ3K && w_cols > 0 && w_cols % 128 == 0 && device_cc() >= 8;
+    // a Q3_K block is 256 values: the matrix width goes by whole blocks
+    return ggml_type == kQ3K && w_cols > 0 && w_cols % 256 == 0 && device_cc() >= 8;
 }
 
 size_t ExpertMma::x8_bytes(int64_t rows, int64_t cols) {
@@ -267,7 +268,7 @@ void ExpertMma::mul(const void* w, int64_t w_rows, int64_t w_cols, size_t stride
                     const int32_t* bounds, const int32_t* ids, int64_t total_rows, int64_t max_rows, float* dst,
                     int64_t ld_dst, void* stream) {
     if (n <= 0 || max_rows <= 0) return;
-    if (w_cols % 128 != 0) throw std::runtime_error("expert mma: w_cols is not a multiple of 128");
+    if (w_cols % 256 != 0) throw std::runtime_error("expert mma: w_cols is not a whole number of Q3_K blocks");
     const dim3 grid((unsigned) ((w_rows + BM - 1) / BM), (unsigned) ((max_rows + BN - 1) / BN), (unsigned) n);
     expert_mma_mul_kernel<<<grid, 256, 0, (cudaStream_t) stream>>>(
         (const uint8_t*) w, (int) w_rows, (int) w_cols, stride, (const uint8_t*) xq, bounds, ids, total_rows, dst,

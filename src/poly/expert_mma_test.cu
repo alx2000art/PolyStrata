@@ -22,8 +22,6 @@ namespace {
 
 using namespace strata::poly;
 
-constexpr int kQ3KBytes = 110;
-
 // dequantize_q3_K (the validated reference), one block of 256 values, full precision
 void dequant_q3k(const uint8_t* block, float* out) {
     const uint8_t* hm = block;
@@ -189,6 +187,9 @@ int check(int m, int w_rows, int w_cols, const std::vector<int>& bounds, bool sc
     if (scramble) cudaMemcpy(dids, ids.data(), ids.size() * 4, cudaMemcpyHostToDevice);
     ExpertMma::mul(dw, w_rows, w_cols, (size_t) w_rows * row_bytes, m, dxq, dbounds,
                    scramble ? dids : nullptr, total_rows, total_rows, ddst, ld_dst, 0);
+    cudaError_t sync = cudaDeviceSynchronize();   // this case's errors stay this case's
+    if (sync != cudaSuccess) std::printf("     CUDA on this case: %s
+", cudaGetErrorString(sync));
     std::vector<float> got(want.size());
     cudaMemcpy(got.data(), ddst, got.size() * 4, cudaMemcpyDeviceToHost);
     cudaFree(dw), cudaFree(dxq), cudaFree(dbounds), cudaFree(dids), cudaFree(ddst);
@@ -230,7 +231,7 @@ int main() {
     }
     std::mt19937 rng(7);
     int bad = 0;
-    bad += check(1, 16, 128, {0, 32}, false, rng, true);      // one BK step, one Q3_K block: the whole dump
+    bad += check(1, 16, 256, {0, 32}, false, rng, true);      // one Q3_K block, both halves: the whole dump
     bad += check(1, 160, 1024, {0, 100}, false, rng, false);
     bad += check(3, 160, 1024, {0, 37, 37, 100}, false, rng, false);    // an expert without rows
     bad += check(3, 160, 1024, {0, 37, 37, 100}, true, rng, false);     // the same, scrambled dst
