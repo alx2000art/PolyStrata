@@ -170,26 +170,25 @@ __global__ __launch_bounds__(256) void expert_mma_mul_kernel(const uint8_t* __re
             sSC[row][8 * hb + 2 * j] = sc0;
             sSC[row][8 * hb + 2 * j + 1] = sc1;
         }
-        // ---- sB: the codes of BN xq rows; sBD: their per-32 scales
+        // ---- sB: the codes of BN xq rows; sBD: their per-32 scales.  A thread fills one 16-value half of
+        // one 32-block of its column: (t >> 3) the column, ((t >> 1) & 3) the block, (t & 1) the half.
         {
-            const int col = threadIdx.x >> 3, kc = (threadIdx.x & 7) * 16;
+            const int col = threadIdx.x >> 3, b32 = (threadIdx.x >> 1) & 3, h16 = threadIdx.x & 1;
+            const int kc = 32 * b32 + 16 * h16;
             const int xq_row = be0 + tok0 + col;
             half* sb = sB[col];
             float bd = 0.f;
             if (xq_row < be1 && xq_row < total_rows) {
-                const uint8_t* blk = xq + (size_t) xq_row * q_row + (size_t) ((k0 + kc) >> 5) * 36;
+                const uint8_t* blk = xq + (size_t) xq_row * q_row + (size_t) ((k0 >> 5) + b32) * 36;
                 bd = __half2float(*reinterpret_cast<const half*>(blk));
                 const char* qs = reinterpret_cast<const char*>(blk + 4);
 #pragma unroll
-                for (int q = 0; q < 16; ++q) {
-                    sb[kc + q] = __float2half((float) qs[q]);
-                    sb[kc + 16 + q] = __float2half((float) qs[q + 16]);
-                }
+                for (int q = 0; q < 16; ++q) sb[kc + q] = __float2half((float) qs[16 * h16 + q]);
             } else {
 #pragma unroll
-                for (int q = 0; q < 32; ++q) sb[kc + q] = __float2half(0.f);
+                for (int q = 0; q < 16; ++q) sb[kc + q] = __float2half(0.f);
             }
-            if ((threadIdx.x & 1) == 0) sBD[col][((k0 + kc) >> 5) & 3] = bd;
+            if (h16 == 0) sBD[col][b32] = bd;
         }
         __syncthreads();
 
