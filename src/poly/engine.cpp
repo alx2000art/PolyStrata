@@ -2371,6 +2371,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             float w_all = 0.f;
             for (int k = 0; k < n_used_; ++k) w_all += w[k];
             for (int k = 0; k < n_used_; ++k) {
+                if (ids[k] < 0) continue;   // --resident-topk dropped this place of the token
                 host_rel[n_host] = w_all > 0.f ? w[k] / w_all : 1.f;
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];

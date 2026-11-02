@@ -482,7 +482,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
         float full = 0.f, kept = 0.f;
         for (int k = 0; k < n_used_; ++k) full += w[k];
         for (int k = 0; k < used; ++k) kept += w[k];
-        if (g_topk_stats) {
+        if (g_topk_stats && full > 0.f) {
             const uint64_t t = g_topk_tokens.fetch_add(1) + 1;
             float pre = 0.f;
             for (int k = 0; k < used; ++k) g_topk_share[(size_t) k].fetch_add((pre += w[k]) / full);
