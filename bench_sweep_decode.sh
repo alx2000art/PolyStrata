@@ -64,7 +64,8 @@ FORCE="${FORCE:-0}"
 MANAGED_KEYS="--read-overlap --file-reads --read-heat --attend-batch --attend-chunks
 --group-heads --q8-dequant --idx-mma --cpu-tiled --lookup --stage2-mib --stage-mib
 --prompt-cache --window --expert-swaps --kv-whole
---tail-skip --stage-ahead --prompt-batch --stage-read-mib --threads --draft-vocab --no-graphs"
+--tail-skip --stage-ahead --prompt-batch --stage-read-mib --threads --draft-vocab --no-graphs
+--ram-experts-mib --conversation-cache-mib"
 
 BASELINE_SPEC="--read-overlap 1 --file-reads 0 --read-heat 0 --attend-batch 0
 --attend-chunks 1 --group-heads 16 --q8-dequant 1 --idx-mma 1 --cpu-tiled 1
@@ -106,6 +107,10 @@ KNOBS_PREFILL=(
   "threads-16|--threads 16"
   "no-graphs|--no-graphs __FLAG__"
   "stage2-off|--stage2-mib 0"
+  "ram-pool-2048|--ram-experts-mib 2048"   # свой RAM-пул горячих экспертов (ram_pool.hpp)
+  "ram-pool-6144|--ram-experts-mib 6144"
+  "convcache-0|--conversation-cache-mib 0"     # освободить RAM под страницы экспертов
+  "convcache-1024|--conversation-cache-mib 1024"
 )
 KNOBS_PRESET="${KNOBS_PRESET:-decode}"
 case "$KNOBS_PRESET" in

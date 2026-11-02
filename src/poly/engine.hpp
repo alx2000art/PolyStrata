@@ -87,6 +87,11 @@ struct Options {
                                   ///< launch, as before, which that many rows fail
     int idx_mma = 1;              ///< the indexer's scores on the tensor cores where the card has them; 0: the
                                   ///< scalar kernel
+
+    int ram_experts_mib = 0;      ///< a RAM pool of this many MiB keeping the most used experts outside VRAM
+                                  ///< whole in the process's own memory (ram_pool.hpp): their reads stop
+                                  ///< touching the page cache, which holds the model's files only while
+                                  ///< nothing else wants the RAM; 0 = read through the page cache as before
     int cpu_tiled = 1;            ///< the CPU experts' gate/up through the vendored llama.cpp tiled K-quant
                                   ///< kernels (AVX512VNNI); 0: the per-row vec_dot path
     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
@@ -184,6 +189,8 @@ struct Stats {
 int most_likely(const float* logits, int n);
 
 class Mmq;
+
+class RamPool;
 
 /// A picture in a sequence: n rows that stand where n tokens would, each the vision encoder's output for a patch,
 /// as wide as a token's embedding.  The patches come line after line, nx to a line.
@@ -722,6 +729,8 @@ protected:
     std::unique_ptr<Mmq> mmq_;   ///< null when the card has no MMQ tile for the experts' types
     float *gu_ = nullptr, *hx_ = nullptr, *dx_ = nullptr;   ///< the rows' gate|up, hidden and down values
     void *mq_ = nullptr, *mq2_ = nullptr;                   ///< the rows quantized for the two products
+
+    std::unique_ptr<RamPool> ram_pool_;                     ///< the kept experts outside VRAM, when it is on
     void* mqx_ = nullptr;                                   ///< lin()'s tokens quantized for a product
     int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
     int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...

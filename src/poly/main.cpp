@@ -1092,6 +1092,13 @@ void usage() {
                  "                         (default 1; 0 = one launch, which that many rows fail)\n"
                  "  --idx-mma N            1: the indexer's scores on the tensor cores where the card has them\n"
                  "                         (default 1; 0 = the scalar kernel)\n"
+
+                 "                         (prefill; the rows to a plain per-32 int8, the codes in f16 mma\n"
+                 "                         fragments); 0 = llama.cpp's generic mmq (default 0).  Needs sm_80+\n"
+                 "  --ram-experts-mib N    a RAM pool of this many MiB keeping the most used experts outside\n"
+                 "                         VRAM whole in the process's own memory: their reads stop touching\n"
+                 "                         the page cache, which holds the model's files only while nothing\n"
+                 "                         else wants the RAM (default 0 = through the page cache, as before)\n"
                  "  --cpu-tiled N          1: the CPU experts' gate/up through the tiled K-quant kernels\n"                 "                         (default 1; 0 = the per-row vec_dot path)\n"                 "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -1206,6 +1213,8 @@ int main(int argc, char** argv) {
         else if (a == "--q8-dequant") o.q8_dequant = std::atoi(val());
         else if (a == "--attend-chunks") o.attend_chunks = std::atoi(val());
         else if (a == "--idx-mma") o.idx_mma = std::atoi(val());
+
+        else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoi(val());
         else if (a == "--cpu-tiled") o.cpu_tiled = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
