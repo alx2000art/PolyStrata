@@ -101,6 +101,7 @@ KNOBS_PREFILL=(
   "stage-ahead-2048|--stage-ahead 2048"
   "prompt-batch-1024|--prompt-batch 1024"
   "prompt-batch-4096|--prompt-batch 4096"
+  "prompt-batch-8192|--prompt-batch 8192"   # у Maya 8192/16384 там, где RAM держит экспертов: +29..47% prefill
   "stage-read-mib-0|--stage-read-mib 0"
   "stage-read-mib-4096|--stage-read-mib 4096"
   "threads-16|--threads 16"
