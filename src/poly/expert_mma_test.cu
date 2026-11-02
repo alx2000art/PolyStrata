@@ -188,8 +188,7 @@ int check(int m, int w_rows, int w_cols, const std::vector<int>& bounds, bool sc
     ExpertMma::mul(dw, w_rows, w_cols, (size_t) w_rows * row_bytes, m, dxq, dbounds,
                    scramble ? dids : nullptr, total_rows, total_rows, ddst, ld_dst, 0);
     cudaError_t sync = cudaDeviceSynchronize();   // this case's errors stay this case's
-    if (sync != cudaSuccess) std::printf("     CUDA on this case: %s
-", cudaGetErrorString(sync));
+    if (sync != cudaSuccess) std::printf("     CUDA on this case: %s\n", cudaGetErrorString(sync));
     std::vector<float> got(want.size());
     cudaMemcpy(got.data(), ddst, got.size() * 4, cudaMemcpyDeviceToHost);
     cudaFree(dw), cudaFree(dxq), cudaFree(dbounds), cudaFree(dids), cudaFree(ddst);
