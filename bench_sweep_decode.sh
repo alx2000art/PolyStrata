@@ -91,6 +91,7 @@ KNOBS_DECODE=(
   "stage-mib-1024|--stage-mib 1024"
   "stage-mib-2048|--stage-mib 2048"
   "prompt-cache-6|--prompt-cache 6"
+  "pool-only|--ram-experts-mib 2048"                  # пул без префетча — база для pool-pf*
   "pool-pf4|--ram-experts-mib 2048 --prefetch-k 4"    # read-ahead догадок в RAM-пул (decode-окна)
   "pool-pf8|--ram-experts-mib 2048 --prefetch-k 8"
 )
