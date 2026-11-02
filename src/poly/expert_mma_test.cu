@@ -7,6 +7,7 @@
 // usage: poly_expert_mma_test   (exit 0: every product inside the tolerance)
 #include "expert_mma.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
