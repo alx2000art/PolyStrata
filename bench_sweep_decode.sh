@@ -52,36 +52,67 @@ STOP_WAIT="${STOP_WAIT:-90}"
 WARM_PASSES="${WARM_PASSES:-1}"     # один полный проход сьюта греет файловый кэш GGUF
 FORCE="${FORCE:-0}"
 
-# ------------------------- эталон (прод-набор) -------------------------------
+# ------------------------- эталон (рабочий конфиг, 2026-11-02) ---------------
 # Все ключи, которыми свип управляет, перечислены здесь явно — вариант
 # определяется ТОЛЬКО своей спекой, наследования между вариантами нет.
 # Формат спеки: пары "--ключ значение"; "__FLAG__" после ключа = голый флаг.
+# Эталон = рабочий конфиг продакшена: read-heat/file-reads 0 (на живой
+# нагрузке замедляют, вопреки свипу 11-01 на синтетике), attend-batch 0,
+# stage2 512 включён.  --prompt-cache гасится для чистоты замера (продовое
+# значение 6 вернёт финальный restore); threads/draft-vocab/no-graphs не
+# заданы = дефолты движка.
 MANAGED_KEYS="--read-overlap --file-reads --read-heat --attend-batch --attend-chunks
 --group-heads --q8-dequant --idx-mma --cpu-tiled --lookup --stage2-mib --stage-mib
---prompt-cache --window --expert-swaps --kv-whole"
+--prompt-cache --window --expert-swaps --kv-whole
+--tail-skip --stage-ahead --prompt-batch --stage-read-mib --threads --draft-vocab --no-graphs"
 
-BASELINE_SPEC="--read-overlap 1 --file-reads 1 --read-heat 1 --attend-batch 1
+BASELINE_SPEC="--read-overlap 1 --file-reads 0 --read-heat 0 --attend-batch 0
 --attend-chunks 1 --group-heads 16 --q8-dequant 1 --idx-mma 1 --cpu-tiled 1
---lookup 0 --stage2-mib 0 --stage-mib 512 --prompt-cache 0 --window 8
+--lookup 0 --stage2-mib 512 --stage-mib 512 --tail-skip 4 --stage-ahead 1024
+--prompt-batch 2048 --stage-read-mib 2048 --prompt-cache 0 --window 8
 --expert-swaps 64"
-# (без --kv-whole: стрип в apply_variant гарантирует, что флага нет)
+# (без --kv-whole и --no-graphs: стрип в apply_variant гарантирует, что флагов нет)
 
-# ------------------------- decode-ручки --------------------------------------
+# ------------------------- ручки ---------------------------------------------
 # Формат: "имя|дельта-спеки" — поверх эталона меняется одна ручка.
-KNOBS=(
+# Набор выбирается KNOBS_PRESET: decode (дефолт, SUITE=decode) или prefill
+# (SUITE=long: короткий прогрев и префилловые ручки).
+KNOBS_DECODE=(
   "window-4|--window 4"
   "window-12|--window 12"
-  "window-16|--window 16"
   "swaps-24|--expert-swaps 24"
   "swaps-128|--expert-swaps 128"
-  "swaps-0|--expert-swaps 0"
   "lookup-3|--lookup 3"
   "lookup-8|--lookup 8"
+  "draft-vocab-32768|--draft-vocab 32768"
+  "draft-vocab-65536|--draft-vocab 65536"
   "kv-whole|--kv-whole __FLAG__"
   "stage-mib-1024|--stage-mib 1024"
   "stage-mib-2048|--stage-mib 2048"
   "prompt-cache-6|--prompt-cache 6"
 )
+KNOBS_PREFILL=(
+  "tail-skip-2|--tail-skip 2"
+  "tail-skip-6|--tail-skip 6"
+  "tail-skip-8|--tail-skip 8"
+  "read-heat-1|--read-heat 1"        # перепроверка на синтетике вердикта живой нагрузки
+  "file-reads-1|--file-reads 1"
+  "stage-ahead-0|--stage-ahead 0"
+  "stage-ahead-2048|--stage-ahead 2048"
+  "prompt-batch-1024|--prompt-batch 1024"
+  "prompt-batch-4096|--prompt-batch 4096"
+  "stage-read-mib-0|--stage-read-mib 0"
+  "stage-read-mib-4096|--stage-read-mib 4096"
+  "threads-16|--threads 16"
+  "no-graphs|--no-graphs __FLAG__"
+  "stage2-off|--stage2-mib 0"
+)
+KNOBS_PRESET="${KNOBS_PRESET:-decode}"
+case "$KNOBS_PRESET" in
+  decode)  KNOBS=("${KNOBS_DECODE[@]}")  ;;
+  prefill) KNOBS=("${KNOBS_PREFILL[@]}") ;;
+  *) echo "KNOBS_PRESET: decode | prefill" >&2; exit 1 ;;
+esac
 
 # ------------------------- варианты -----------------------------------------
 VARIANTS=()
