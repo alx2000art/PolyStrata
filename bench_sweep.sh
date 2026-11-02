@@ -147,6 +147,10 @@ VARIANTS+=("52-eta-stage2-512|$(all_off_spec) --stage2-mib 512")  # механи
 # ВАЖНО: --cpu-tiled сам по себе булев (0/1) — "0.7" через atoi() = тихое
 # ВЫКЛЮЧЕНИЕ tiled; долей работ рулит --cpu-share (auto = движок балансирует
 # сам по таймингам). В проде ключа нет = auto, так что утечки в другие ячейки нет.
+# --- собственное mma-ядро Q3_K продуктов (--expert-mma, ветка feat/expert-mma).  На бинарнике без
+# флага сервер не поднимется и вариант будет пропущен с записью в лог.
+VARIANTS+=("58-eta-expertmma|$(all_off_spec) --expert-mma 1")   # механизм в чистоте против эталона
+VARIANTS+=("59-on-expertmma|$(all_on_spec) --expert-mma 1")     # поверх всего набора
 VARIANTS+=("55-on-share50|$(all_on_spec) --cpu-share 0.5")
 VARIANTS+=("56-on-share70|$(all_on_spec) --cpu-share 0.7")
 VARIANTS+=("57-on-share100|$(all_on_spec) --cpu-share 1.0")

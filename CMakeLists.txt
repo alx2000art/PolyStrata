@@ -2066,7 +2066,8 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
 
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
                             src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp
-                            src/poly/kernels.cu src/poly/kernels_dsv4.cu src/core/conversation_memory.cpp)
+                            src/poly/kernels.cu src/poly/kernels_dsv4.cu src/poly/expert_mma.cu
+                            src/core/conversation_memory.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories} ${_strata_tiled_ggml_src})
   # the driver's virtual memory calls: the attention caches grow with the conversation; on HIP they are HIP's
   # memory management calls, which the HIP runtime itself provides (hip_compat/cuda.h)
@@ -2090,7 +2091,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   # poly_draft_race_test MODEL.gguf [RUNS] [LAYER_SPLIT]
   add_executable(poly_draft_race_test src/poly/draft_race_test.cpp src/poly/engine.cpp src/poly/glm5next.cpp
                                       src/poly/qwen35.cpp src/poly/gemma4.cpp src/poly/deepseek4.cpp
-                                      src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
+                                      src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu src/poly/expert_mma.cu
                                       src/core/conversation_memory.cpp)
   target_include_directories(poly_draft_race_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                          ${_strata_gpu_include_directories} ${_strata_tiled_ggml_src})
@@ -2134,6 +2135,11 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   target_include_directories(poly_dsv4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                    ${_strata_gpu_include_directories})
   target_link_libraries(poly_dsv4_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
+  # the experts' Q3_K tensor-core products against the same arithmetic on the host; needs a card, run by hand
+  add_executable(poly_expert_mma_test src/poly/expert_mma_test.cu src/poly/expert_mma.cu)
+  target_include_directories(poly_expert_mma_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                                          ${_strata_gpu_include_directories})
+  target_link_libraries(poly_expert_mma_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
   # the pool of the CPU experts, without a model
   add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp)
   target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include ${_strata_gg}/src)

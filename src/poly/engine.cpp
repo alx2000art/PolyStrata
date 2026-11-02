@@ -7,6 +7,7 @@
 #include "gemma4.hpp"
 #include "glm5next.hpp"
 #include "lfm2moe.hpp"
+#include "expert_mma.hpp"
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
@@ -2768,12 +2769,23 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const float limit = clamp_exp_[(size_t) il];
     const int gt = (int) L.gu_type, dt = (int) L.d_type;
     const int64_t ff = n_ff_exp_, ff2 = 2 * ff;
+    // --expert-mma: the products of the Q3_K weights on the fork's own tensor-core kernel.  The buffers are
+    // taken on the first call that needs them: the types are the GGUF's, the same every call.
+    const bool xm = opt_.expert_mma != 0 && ExpertMma::fits(gt, n_embd_);
+    const bool xm2 = xm && ExpertMma::fits(dt, n_ff_exp_);
+    if (xm && !mqm_) {
+        mqm_ = dmalloc(ExpertMma::x8_bytes((int64_t) rows_ * n_used_, n_embd_), "scratch");
+        if (xm2) mqm2_ = dmalloc(ExpertMma::x8_bytes((int64_t) rows_ * n_used_, n_ff_exp_), "scratch");
+    }
     int holds = -1;   // the round in the buffer when this call is done
     bool held_in2 = staged_in2_;   // and the buffer it sits in, until an upload of this call moves it
     // The card's part.  With the CPU's beside it, the rows of its experts' places are left at nothing.
     const auto card = [&] {
         if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * n_embd_ * sizeof(float), cs(st_)), "expert rows");
-        if (rg > 0) Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rg, st_);
+        if (rg > 0) {
+            if (xm) ExpertMma::quantize(xn_, d_tok, mqm_, n_embd_, n_embd_, rg, st_);
+            else Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rg, st_);
+        }
 
         // The cached experts whose slots lie one behind the other are the matrices of one launch, as the experts of
         // a staging round are; a launch for each class that has rows among them.  The cache is filled a layer's
@@ -2856,12 +2868,19 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) rdy, 0), "expert staging");
             int most = 0;
             for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
-            mmq_->mul(buf, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
+            if (xm) ExpertMma::mul(buf, ff2, n_embd_, gu2, m, mqm_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
+            else mmq_->mul(buf, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
             if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_);
             else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
-            Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
-            mmq_->mul(buf + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r), d_place + r0,
-                      rows, most, dx_, n_embd_, st_);
+            if (xm2) {
+                ExpertMma::quantize(hx_ + (size_t) r0 * ff, nullptr, mqm2_, ff, ff, rows, st_);
+                ExpertMma::mul(buf + down_at, n_embd_, ff, L.d_bytes, m, mqm2_, d_rel + (g0 - n_cached + r),
+                               d_place + r0, rows, most, dx_, n_embd_, st_);
+            } else {
+                Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
+                mmq_->mul(buf + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r),
+                          d_place + r0, rows, most, dx_, n_embd_, st_);
+            }
             ck(cudaEventRecord((cudaEvent_t) fre, cs(st_)), "expert staging");
         }
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
