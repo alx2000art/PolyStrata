@@ -2340,6 +2340,9 @@ void Engine::moe_router(const Layer& L, int n) {
 // when experts were computed on the CPU: their sum waits in h_cpu_ for moe_add().  `first` is run once, by the
 // thread that hands the cached experts to the card and ahead of them.
 bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+    // --resident-topk's cap lives in route(), and moe_rows may not run at all during an answer: moe() sets
+    // the width itself.
+    route_used_ = opt_.resident_topk > 0 && n <= 16 ? std::min(opt_.resident_topk, n_used_) : n_used_;
     const size_t e_row = (size_t) n_embd_;
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
@@ -3399,16 +3402,19 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
             }
         }
         if (!L.moe) continue;
+        // --resident-topk's cap lives in route(), while the card paths route inside their recorded graphs
+        // with the full width: a capped window takes the moe() path, whose routing is the host's.
+        const bool capped = opt_.resident_topk > 0 && n <= 16 && opt_.resident_topk < n_used_;
         if (batched(L, n)) {
             moe_rows(L, il, n);
         } else {
             ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
             if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, n); });
             else moe_shared(L, il, n);
-            if (card && L.card == 1 && replay) {
+            if (!capped && card && L.card == 1 && replay) {
                 replayed(L.card_moe, rec, [&] { moe_card(L, il, n); });
                 stats_.gpu_experts += n * n_used_;
-            } else if (card && moe_card(L, il, n)) {
+            } else if (!capped && card && moe_card(L, il, n)) {
                 stats_.gpu_experts += n * n_used_;
             } else if (moe(L, il, n)) {
                 moe_add(n);
