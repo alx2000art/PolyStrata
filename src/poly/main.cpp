@@ -1104,6 +1104,10 @@ void usage() {
                  "                         attention; the misses go into --ram-experts-mib's pool.  Decode and\n"
                  "                         verify windows only (16 tokens at most); needs --ram-experts-mib\n"
                  "                         (default 0 = never)\n"
+                 "  --resident-topk N      a decode window computes only the N heaviest of each token's routed\n"
+                 "                         experts, wherever they live, the top-1 always kept and the kept\n"
+                 "                         weights renormalised the model's way; prefill stays exact.  Changes\n"
+                 "                         the answers (Maya's Turbo's cap; DSv4 routes 6) (default 0 = all)\n"
                  "  --cpu-tiled N          1: the CPU experts' gate/up through the tiled K-quant kernels\n"                 "                         (default 1; 0 = the per-row vec_dot path)\n"                 "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -1221,6 +1225,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-mma") o.expert_mma = std::atoi(val());
         else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoi(val());
         else if (a == "--prefetch-k") o.prefetch_k = std::atoi(val());
+        else if (a == "--resident-topk") o.resident_topk = std::atoi(val());
         else if (a == "--cpu-tiled") o.cpu_tiled = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());

@@ -65,7 +65,7 @@ MANAGED_KEYS="--read-overlap --file-reads --read-heat --attend-batch --attend-ch
 --group-heads --q8-dequant --idx-mma --cpu-tiled --lookup --stage2-mib --stage-mib
 --prompt-cache --window --expert-swaps --kv-whole
 --tail-skip --stage-ahead --prompt-batch --stage-read-mib --threads --draft-vocab --no-graphs
---ram-experts-mib --conversation-cache-mib --prefetch-k"
+--ram-experts-mib --conversation-cache-mib --prefetch-k --resident-topk"
 
 BASELINE_SPEC="--read-overlap 1 --file-reads 0 --read-heat 0 --attend-batch 0
 --attend-chunks 1 --group-heads 16 --q8-dequant 1 --idx-mma 1 --cpu-tiled 1
@@ -94,6 +94,9 @@ KNOBS_DECODE=(
   "pool-only|--ram-experts-mib 2048"                  # пул без префетча — база для pool-pf*
   "pool-pf4|--ram-experts-mib 2048 --prefetch-k 4"    # read-ahead догадок в RAM-пул (decode-окна)
   "pool-pf8|--ram-experts-mib 2048 --prefetch-k 8"
+  "topk-2|--resident-topk 2"    # Maya's Turbo-семантика: K тяжелейших из маршрутизированных, top-1 жив
+  "topk-3|--resident-topk 3"    # их быстрый прогон у Maya на DSv4: 3 из 6
+  "topk-4|--resident-topk 4"
 )
 KNOBS_PREFILL=(
   "tail-skip-2|--tail-skip 2"

@@ -89,6 +89,10 @@ struct Options {
                                   ///< scalar kernel
     int expert_mma = 0;           ///< the experts' Q3_K products on the tensor cores through this fork's own
                                   ///< kernel (expert_mma.hpp), and not llama.cpp's generic mmq; 0: the generic
+    int resident_topk = 0;        ///< a decode window computes only this many of each token's routed experts -
+                                  ///< the K heaviest, wherever they live, the top-1 always kept, the kept
+                                  ///< weights renormalised the model's way; prefill stays exact.  Changes the
+                                  ///< answers (Maya's Turbo's cap); 0 = every routed expert computes
     int prefetch_k = 0;           ///< read ahead this many of each token's likeliest experts of the next MoE
                                   ///< layer, guessed on this layer's input while the card takes the next one's
                                   ///< attention; the misses go into the RAM pool (needs --ram-experts-mib);
@@ -616,6 +620,8 @@ protected:
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
+    mutable int route_used_ = 0;  ///< the experts a route() call picks: n_used_, or --resident-topk's K in a
+                                  ///< decode window (set by moe_rows, which knows the call's size)
     int rows_ = 1;            ///< tokens the scratch is sized for
     int read_rows_ = 1;       ///< the most tokens read() takes
     // read()'s calls between two layers: r_ holds two calls' rows, and with more calls than that the others'

@@ -2063,6 +2063,7 @@ void Engine::alloc() {
     } else if (opt_.prefetch_k > 0) {
         std::fprintf(stderr, "strata-poly: --prefetch-k needs --ram-experts-mib; the read-ahead stays off\n");
     }
+    route_used_ = n_used_;
     if (mmq_) {
         const size_t rr = n * n_used_,
                      tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1)) * sizeof(int32_t);

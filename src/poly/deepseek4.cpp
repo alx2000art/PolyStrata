@@ -443,9 +443,12 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
         const float x = logits[e];
         probs[e] = std::sqrt(x > 20.0f ? x : std::log(1.0f + std::exp(x)));
     }
+    // --resident-topk: the window computes route_used_ experts (its K heaviest, the top-1 among them); the
+    // tail of the row is dropped (-1, weight 0) and the model's own normalisation renormalises the kept ones.
+    const int used = std::min(route_used_, n_used_);
     float sum = 0.f;
     if (!B.by_token.empty() && token >= 0 && token < n_vocab_) {
-        for (int k = 0; k < n_used_; ++k) {
+        for (int k = 0; k < used; ++k) {
             ids[k] = B.by_token[(size_t) token * n_used_ + k];
             w[k] = probs[ids[k]];
             sum += w[k];
@@ -453,7 +456,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
     } else {
         float* pick = probs + n_expert_;
         for (int e = 0; e < n_expert_; ++e) pick[e] = probs[e] + B.probs_b[(size_t) e];
-        for (int k = 0; k < n_used_; ++k) {
+        for (int k = 0; k < used; ++k) {
             int best = 0;
             for (int e = 1; e < n_expert_; ++e)
                 if (pick[e] > pick[best]) best = e;
@@ -463,6 +466,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
             sum += w[k];
         }
     }
+    for (int k = used; k < n_used_; ++k) ids[k] = -1, w[k] = 0.f;
     const float denom = w_norm_ ? std::max(sum, kMinWeightSum) : 1.f;
     for (int k = 0; k < n_used_; ++k) {
         w[k] /= denom;
@@ -473,6 +477,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
 bool DeepSeek4::route_card(int il, int n, int32_t* ids, float* w) {
     const Block& B = blocks_[(size_t) il];
     if (!B.by_token.empty()) return false;
+    if (route_used_ < n_used_) return false;   // the cap lives in route(); the card's rows know one width
     route_rows(rl_, n_expert_, n_used_, n, 2, 1.f, fp(B.probs_b_dev), nullptr, w_norm_, w_scale_, ids, w, st_);
     return true;
 }
