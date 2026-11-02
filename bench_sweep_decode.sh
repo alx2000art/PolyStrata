@@ -191,6 +191,22 @@ HEALTH_URL="${BASE_URL%/v1}/health"
 BACKUP="$CONFIG.bench-backup-$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+# прошлый прогон дошёл до конца (summary.md на месте и все варианты с захватами) — не подмешиваться к
+# нему: свежий забег пишется в соседнюю папку с меткой времени.  Оборванный — добирается на месте
+# (готовые ячейки пропускаются, как и было).
+complete=0
+if [[ -f "$OUT_DIR/summary.md" ]]; then
+  complete=1
+  for entry in "${VARIANTS[@]}"; do
+    [[ -f "$OUT_DIR/${entry%%|*}.json" ]] || { complete=0; break; }
+  done
+fi
+if (( complete )) && ((${#VARIANTS[@]} > 0)); then
+  new_dir="$OUT_DIR-$(date +%Y%m%d-%H%M%S)"
+  log "предыдущий прогон в $OUT_DIR завершён целиком — свежий пишется в $new_dir"
+  OUT_DIR="$new_dir"
+  mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+fi
 exec > >(tee -a "$OUT_DIR/sweep.log") 2>&1
 
 log "=============================================================="
