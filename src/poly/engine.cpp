@@ -9,6 +9,7 @@
 #include "lfm2moe.hpp"
 #include "expert_mma.hpp"
 #include "mmq.hpp"
+#include "ram_pool.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
@@ -2024,6 +2025,24 @@ void Engine::alloc() {
     h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
     h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
 
+    // The RAM pool of the experts outside VRAM (--ram-experts-mib): a slot holds one expert whole, as wide
+    // as the widest MoE layer's.  The host threads copy out of it in place of the mapping, whose pages the
+    // page cache keeps only while nothing else wants the RAM.
+    if (opt_.ram_experts_mib > 0) {
+        size_t slot = 0;
+        int moe = 0;
+        for (const Layer& L : layers_)
+            if (L.exp_gate && L.gu_bytes) {
+                slot = std::max(slot, 2 * L.gu_bytes + L.d_bytes);
+                ++moe;
+            }
+        if (slot > 0) {
+            ram_pool_ = std::make_unique<RamPool>((size_t) opt_.ram_experts_mib << 20, slot, n_layer_, n_expert_);
+            std::fprintf(stderr, "strata-poly: the RAM expert pool holds %d experts of %.1f MiB (%d MoE layers)
+",
+                         ram_pool_->slots(), (double) slot / (1024 * 1024), moe);
+        }
+    }
     if (mmq_) {
         const size_t rr = n * n_used_,
                      tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1)) * sizeof(int32_t);
@@ -2523,6 +2542,12 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
     }
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
     const bool by_file = opt_.file_reads;
+    // --ram-experts-mib: the pool serves the mapped path (a file read goes to the files whatever the pool
+    // holds); a task takes an expert whole, so a hit's two copies and a miss's fill never race each other.
+    // The misses memcpy plainly: the fill reads its own bytes back, which non-temporal stores would not
+    // promise.
+    const bool pooled = ram_pool_ && own && !by_file;
+    const int pool_il = own ? (int) (&L - layers_.data()) : -1;
     // A task of the pool must not throw - a worker takes no exception out of it - so the first read that fails
     // is kept and thrown on the engine's thread, where the batch's caller sees it, once every task is done.
     std::exception_ptr read_err = nullptr;
@@ -2554,7 +2579,21 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
                 if (!err_taken.exchange(true)) read_err = std::current_exception();
             }
         };
-        (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
+        const auto copy_pooled = [&](int i) {
+            const size_t j = (size_t) i, e = (size_t) experts[(size_t) j0 + j];
+            try {
+                uint8_t* gu_dst = h + j * gu2, * d_dst = h + c * gu2 + j * L.d_bytes;
+                if (ram_pool_->copy_out(pool_il, (int) e, gu_dst, d_dst, gu2, L.d_bytes)) return;
+                std::memcpy(gu_dst, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                std::memcpy(gu_dst + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+                std::memcpy(d_dst, L.exp_down + e * L.d_bytes, L.d_bytes);
+                ram_pool_->fill(pool_il, (int) e, gu_dst, d_dst, gu2, L.d_bytes);
+            } catch (...) {
+                if (!err_taken.exchange(true)) read_err = std::current_exception();
+            }
+        };
+        if (pooled) (alone ? *stagers_ : *workers_).run((int) c, copy_pooled);
+        else (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
         if (read_err) std::rethrow_exception(read_err);
         ck(cudaMemcpyAsync(buf + (size_t) j0 * gu2, h, c * gu2, cudaMemcpyHostToDevice, cs(stream)),
            "expert staging");
