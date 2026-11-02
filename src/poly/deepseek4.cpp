@@ -8,12 +8,22 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
 namespace strata::poly {
 namespace {
+
+// STRATA_POLY_TOPK_STATS=1: under --resident-topk, route() accumulates how much of a token's routed weight
+// the kept prefixes carry and prints the running shares every 2,048 capped tokens.
+const bool g_topk_stats = std::getenv("STRATA_POLY_TOPK_STATS") != nullptr;
+std::atomic<uint64_t> g_topk_tokens{0};
+std::atomic<double> g_topk_share[16] = {};
 
 constexpr int kHc = 4;   // what kernels.cu is written for; checked at load
 constexpr size_t kScoreBytes = size_t(128) << 20;   // a prompt batch's indexer scores at most
@@ -448,7 +458,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
     const int used = std::min(route_used_, n_used_);
     float sum = 0.f;
     if (!B.by_token.empty() && token >= 0 && token < n_vocab_) {
-        for (int k = 0; k < used; ++k) {
+        for (int k = 0; k < n_used_; ++k) {
             ids[k] = B.by_token[(size_t) token * n_used_ + k];
             w[k] = probs[ids[k]];
             sum += w[k];
@@ -456,7 +466,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
     } else {
         float* pick = probs + n_expert_;
         for (int e = 0; e < n_expert_; ++e) pick[e] = probs[e] + B.probs_b[(size_t) e];
-        for (int k = 0; k < used; ++k) {
+        for (int k = 0; k < n_used_; ++k) {
             int best = 0;
             for (int e = 1; e < n_expert_; ++e)
                 if (pick[e] > pick[best]) best = e;
@@ -466,7 +476,27 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
             sum += w[k];
         }
     }
-    for (int k = used; k < n_used_; ++k) ids[k] = -1, w[k] = 0.f;
+    // the cap trims the full pick: the kept ones' sum feeds the model's normalisation, and under
+    // STRATA_POLY_TOPK_STATS the run accumulates how much of the routed weight the kept prefixes carry
+    if (used < n_used_) {
+        float full = 0.f, kept = 0.f;
+        for (int k = 0; k < n_used_; ++k) full += w[k];
+        for (int k = 0; k < used; ++k) kept += w[k];
+        if (g_topk_stats) {
+            const uint64_t t = g_topk_tokens.fetch_add(1) + 1;
+            float pre = 0.f;
+            for (int k = 0; k < used; ++k) g_topk_share[(size_t) k].fetch_add((pre += w[k]) / full);
+            if (t % 2048 == 0) {
+                std::fprintf(stderr, "strata-poly: topk kept %d of %d over %llu tokens, weight share:",
+                             used, n_used_, (unsigned long long) t);
+                for (int k = 0; k < used; ++k)
+                    std::fprintf(stderr, " %d: %.1f%%", k + 1, 100.0 * g_topk_share[(size_t) k].load() / (double) t);
+                std::fprintf(stderr, "\n");
+            }
+        }
+        for (int k = used; k < n_used_; ++k) ids[k] = -1, w[k] = 0.f;
+        sum = kept;
+    }
     const float denom = w_norm_ ? std::max(sum, kMinWeightSum) : 1.f;
     for (int k = 0; k < n_used_; ++k) {
         w[k] /= denom;
