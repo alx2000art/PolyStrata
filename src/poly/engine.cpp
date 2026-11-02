@@ -2648,7 +2648,7 @@ void Engine::pf_read() {
             int32_t top[16][16];
             int have[16];
             for (int r = 0; r < n; ++r) {
-                const float* g = h_pf_ + (size_t) r * ne;
+                const float* g = (const float*) h_pf_ + (size_t) r * ne;
                 int got = 0;
                 float best[16];
                 for (int e = 0; e < n_expert_; ++e) {
