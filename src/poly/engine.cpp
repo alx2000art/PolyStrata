@@ -10,6 +10,17 @@
 #include "expert_mma.hpp"
 #include "mmq.hpp"
 #include "ram_pool.hpp"
+
+// The pool's two paths, each switchable for the bisect of a live misbehaviour: STRATA_POLY_POOL_STAGE=0
+// keeps the staging reads off the pool, STRATA_POLY_POOL_SWAP=0 the decode swaps.
+static const bool g_pool_stage_ = [] {
+    const char* v = std::getenv("STRATA_POLY_POOL_STAGE");
+    return !v || std::strcmp(v, "0") != 0;
+}();
+static const bool g_pool_swap_ = [] {
+    const char* v = std::getenv("STRATA_POLY_POOL_SWAP");
+    return !v || std::strcmp(v, "0") != 0;
+}();
 #include "qwen35.hpp"
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
@@ -1603,19 +1614,20 @@ void Engine::follow_loop() {
                 // --ram-experts-mib: the pool is the rung between the file and the cache.  A hit promotes
                 // out of RAM at memcpy speed, no file touch; a miss reads as it did and settles into the
                 // pool, so the next ask for it climbs the ladder instead of the file again.
-                if (ram_pool_ && ram_pool_->copy_out(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu,
+                const bool pool_here = ram_pool_ && g_pool_swap_;
+                if (pool_here && ram_pool_->copy_out(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu,
                                                      L.d_bytes)) {
                     // promoted out of the pool
                 } else if (opt_.file_reads) {
                     L.gu_file->read(L.gu_at + e * L.gu_stride, s->pinned, gu);
                     L.up_file->read(L.up_at + e * L.gu_stride, s->pinned + gu, gu);
                     L.d_file->read(L.d_at + e * L.d_bytes, s->pinned + 2 * gu, L.d_bytes);
-                    if (ram_pool_) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
+                    if (pool_here) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
                 } else {
                     std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
                     std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
                     std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
-                    if (ram_pool_) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
+                    if (pool_here) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
                 }
             } catch (const std::runtime_error& read_err) {
                 lk.lock();
@@ -2059,6 +2071,34 @@ void Engine::alloc() {
                                                   n_expert_);
             std::fprintf(stderr, "strata-poly: the RAM expert pool holds %d experts of %.1f MiB (%d MoE layers)\n",
                          ram_pool_->slots(), (double) slot / (1024 * 1024), moe);
+        }
+        // STRATA_POLY_POOL_SELFTEST=1: every MoE layer, a sampled expert each - the mapping's bytes into the
+        // pool, out again, byte compared.  The keys, the offsets and the sizes against the real model.
+        if (std::getenv("STRATA_POLY_POOL_SELFTEST") && ram_pool_) {
+            const size_t sb = ram_pool_->slot_bytes();
+            uint8_t* ref = (uint8_t*) std::malloc(sb);
+            uint8_t* got = (uint8_t*) std::malloc(sb);
+            int checked = 0, bad = 0;
+            if (ref && got)
+                for (int il = 0; il < (int) layers_.size(); ++il) {
+                    const Layer& L = layers_[(size_t) il];
+                    if (!L.exp_gate || !L.gu_bytes) continue;
+                    for (int e = 0; e < n_expert_; e += 29) {
+                        std::memcpy(ref, L.exp_gate + (size_t) e * L.gu_stride, L.gu_bytes);
+                        std::memcpy(ref + L.gu_bytes, L.exp_up + (size_t) e * L.gu_stride, L.gu_bytes);
+                        std::memcpy(ref + 2 * L.gu_bytes, L.exp_down + (size_t) e * L.d_bytes, L.d_bytes);
+                        ram_pool_->fill(il, e, ref, ref + 2 * L.gu_bytes, 2 * L.gu_bytes, L.d_bytes);
+                        std::memset(got, 0xEE, sb);
+                        if (!ram_pool_->copy_out(il, e, got, got + 2 * L.gu_bytes, 2 * L.gu_bytes, L.d_bytes,
+                                                 "selftest"))
+                            ++bad;
+                        else if (std::memcmp(ref, got, 2 * L.gu_bytes + L.d_bytes) != 0)
+                            ++bad;
+                        ++checked;
+                    }
+                }
+            std::fprintf(stderr, "strata-poly: pool selftest: %d experts checked, %d mismatches\n", checked, bad);
+            std::free(ref), std::free(got);
         }
     }
     // The read-ahead of the next MoE layer's likeliest experts (--prefetch-k): it reads the guesses into the
@@ -2582,7 +2622,7 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
     // holds); a task takes an expert whole, so a hit's two copies and a miss's fill never race each other.
     // The misses memcpy plainly: the fill reads its own bytes back, which non-temporal stores would not
     // promise.
-    const bool pooled = ram_pool_ && own && !by_file;
+    const bool pooled = ram_pool_ && own && !by_file && g_pool_stage_;
     const int pool_il = own ? (int) (&L - layers_.data()) : -1;
     // A task of the pool must not throw - a worker takes no exception out of it - so the first read that fails
     // is kept and thrown on the engine's thread, where the batch's caller sees it, once every task is done.
