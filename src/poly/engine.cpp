@@ -3117,6 +3117,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) rdy, 0), "expert staging");
             // with size classes, a launch for each class that has rows in the round, as wide a tile as its
             // experts need; the bounds' empty ranges cover the round's other experts
+            int most = 0;
+            for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
             const auto each_class = [&](auto&& launch) {
                 if (n_tile == 1) return launch(0, most);
                 for (int k = 0; k < n_tile; ++k) {
