@@ -2087,6 +2087,14 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   target_link_libraries(poly_expert_parity PRIVATE strata_poly_mmq strata_kernels ggml-cpu ggml-base
                                                   ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
                                                   Threads::Threads)
+  # STRATA_POLY_STAGED_TILES: the size-class launches against one launch, bit for bit; needs a card
+  add_executable(poly_mmq_tiles_test src/poly/mmq_tiles_test.cu)
+  target_include_directories(poly_mmq_tiles_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                                         ${_strata_gpu_include_directories})
+  target_link_libraries(poly_mmq_tiles_test PRIVATE strata_poly_mmq ${_strata_gpu_blas_target}
+                                                    ${_strata_gpu_runtime_target} Threads::Threads)
+  add_test(NAME poly_mmq_tiles_test COMMAND poly_mmq_tiles_test)
+  set_tests_properties(poly_mmq_tiles_test PROPERTIES SKIP_RETURN_CODE 77)
   # a read with the draft block repeats bit for bit; needs the model file, so it is run by hand:
   # poly_draft_race_test MODEL.gguf [RUNS] [LAYER_SPLIT]
   add_executable(poly_draft_race_test src/poly/draft_race_test.cpp src/poly/engine.cpp src/poly/glm5next.cpp
