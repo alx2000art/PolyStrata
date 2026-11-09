@@ -11,6 +11,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -34,6 +35,7 @@ public:
         busy_.assign((size_t) n_slots_, 0);
         tick_.assign((size_t) n_slots_, 0);
         who_.assign((size_t) n_slots_, -1);
+        slot_hash_.assign((size_t) n_slots_, 0);
     }
 
     ~RamPool() { delete[] buf_; }
@@ -53,7 +55,7 @@ public:
     /// On a hit copies the expert's gate|up into dst_gu and its down into dst_down, and makes it the most
     /// recently used.  On a miss leaves the destinations alone and returns 0.  The slot's busy flag keeps
     /// its bytes stable between the two locks, so the slot number rides in a local.
-    bool copy_out(int il, int e, void* dst_gu, void* dst_down, size_t gu2, size_t d_bytes) {
+    bool copy_out(int il, int e, void* dst_gu, void* dst_down, size_t gu2, size_t d_bytes, const char* via = "hit") {
         if (!n_slots_) return false;
         int s = -1;
         uint64_t now;
@@ -66,6 +68,12 @@ public:
         }
         std::memcpy(dst_gu, buf_ + (size_t) s * slot_bytes_, gu2);
         std::memcpy(dst_down, buf_ + (size_t) s * slot_bytes_ + gu2, d_bytes);
+        if (verify_) {
+            const uint64_t h = hash_slot((size_t) s);
+            if (h != slot_hash_[(size_t) s])
+                std::fprintf(stderr, "[pool] TORN slot %d key (%d,%d) via %s: hash %016llx != %016llx\n", s, il, e,
+                             via, (unsigned long long) h, (unsigned long long) slot_hash_[(size_t) s]);
+        }
         std::lock_guard<std::mutex> lk(m_);
         busy_[(size_t) s] = 0;
         tick_[(size_t) s] = now;
@@ -93,12 +101,23 @@ public:
         }
         std::memcpy(buf_ + (size_t) s * slot_bytes_, src_gu, gu2);
         std::memcpy(buf_ + (size_t) s * slot_bytes_ + gu2, src_down, d_bytes);
+        if (verify_) slot_hash_[(size_t) s] = hash_slot((size_t) s);
         std::lock_guard<std::mutex> lk(m_);
         busy_[(size_t) s] = 0;
         tick_[(size_t) s] = now;
     }
 
 private:
+    /// a stride scan of the slot's bytes, for STRATA_POLY_POOL_VERIFY
+    uint64_t hash_slot(size_t s) const {
+        uint64_t h = 1469598103934665603ull;
+        const uint8_t* p = buf_ + s * slot_bytes_;
+        for (size_t at = 0; at < slot_bytes_; at += 64) h = (h ^ p[at]) * 1099511628211ull;
+        return h ^ (h >> 27);
+    }
+
+    bool verify_ = false;
+    std::vector<uint64_t> slot_hash_;
     size_t slot_bytes_ = 0;
     int n_layers_ = 1, n_experts_ = 1, n_slots_ = 0;
     uint8_t* buf_ = nullptr;
