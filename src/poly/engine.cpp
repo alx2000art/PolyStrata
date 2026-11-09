@@ -1600,14 +1600,22 @@ void Engine::follow_loop() {
             // read that fails ends the follower as an upload that fails does: the error goes to the engine's thread
             // in swap_error_, which follow() throws.
             try {
-                if (opt_.file_reads) {
+                // --ram-experts-mib: the pool is the rung between the file and the cache.  A hit promotes
+                // out of RAM at memcpy speed, no file touch; a miss reads as it did and settles into the
+                // pool, so the next ask for it climbs the ladder instead of the file again.
+                if (ram_pool_ && ram_pool_->copy_out(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu,
+                                                     L.d_bytes)) {
+                    // promoted out of the pool
+                } else if (opt_.file_reads) {
                     L.gu_file->read(L.gu_at + e * L.gu_stride, s->pinned, gu);
                     L.up_file->read(L.up_at + e * L.gu_stride, s->pinned + gu, gu);
                     L.d_file->read(L.d_at + e * L.d_bytes, s->pinned + 2 * gu, L.d_bytes);
+                    if (ram_pool_) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
                 } else {
                     std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
                     std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
                     std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+                    if (ram_pool_) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
                 }
             } catch (const std::runtime_error& read_err) {
                 lk.lock();
