@@ -116,7 +116,7 @@ private:
     uint64_t hash_slot(size_t s) const {
         uint64_t h = 1469598103934665603ull;
         const uint8_t* p = buf_ + s * slot_bytes_;
-        for (size_t at = 0; at < slot_bytes_; at += 64) h = (h ^ p[at]) * 1099511628211ull;
+        for (size_t at = 0; at < slot_bytes_; ++at) h = (h ^ p[at]) * 1099511628211ull;   // every byte
         return h ^ (h >> 27);
     }
 
