@@ -1808,8 +1808,7 @@ void Engine::load(const Options& o) {
             staged_tiles_ = t;
         } else {
             std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGED_TILES=%s is not ascending row counts a comma apart: "
-                                 "ignored
-", v);
+                                 "ignored\n", v);
         }
     }
 
