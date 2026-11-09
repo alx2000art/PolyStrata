@@ -1,0 +1,28 @@
+{
+ "exe": "E:\\Projects\\PolyStrata\\work\\bench\\eng-lfm\\strata-poly.exe",
+ "args": [
+  "--model",
+  "E:\\Projects\\PolyStrata\\models\\lfm25-UD-Q4_K_XL\\LFM2.5-24B-A2B-UD-Q4_K_XL.gguf",
+  "--max-context",
+  "36864",
+  "--expert-profile",
+  "E:\\Projects\\PolyStrata\\packs\\lfm25-ud-q4_k_xl\\expert-profile.txt",
+  "--conversation-cache-mib",
+  "8192",
+  "--threads",
+  "13",
+  "--prompt-batch",
+  "2048"
+ ],
+ "cwd": "E:\\Projects\\PolyStrata",
+ "tokenizer": "E:\\Projects\\PolyStrata\\packs\\lfm25-ud-q4_k_xl\\tokenizer",
+ "model_name": "lfm2.5-24b-a2b-ud-q4_k_xl",
+ "display_name": "LFM2.5-24B-A2B UD-Q4_K_XL",
+ "log": "E:\\Projects\\PolyStrata\\strata-lfm25-ud-q4_k_xl.log",
+ "lib_dirs": [
+  "E:\\Projects\\PolyStrata\\.venv\\Lib\\site-packages\\nvidia\\cu13\\bin\\x86_64"
+ ],
+ "port": 8190,
+ "gpu": 0,
+ "gpus_asked": true
+}
