@@ -1,0 +1,17 @@
+{
+ "gguf": "E:/Projects/PolyStrata/models/lfm25-UD-Q4_K_XL/LFM2.5-24B-A2B-UD-Q4_K_XL.gguf",
+ "llama_server": "C:/lcpp-bench/b11540/llama-server.exe",
+ "strata_cfg": "E:/Projects/PolyStrata/strata-lfm25-ud-q4_k_xl.json",
+ "serve": "E:/Projects/PolyStrata/serve",
+ "cwd": "E:/Projects/PolyStrata",
+ "configs": [
+  {
+   "name": "polystrata-flash",
+   "kind": "strata",
+   "args": [],
+   "override": {
+    "--max-context": "36864"
+   }
+  }
+ ]
+}
