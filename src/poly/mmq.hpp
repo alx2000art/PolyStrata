@@ -19,6 +19,10 @@ public:
 
     /// This build multiplies ggml_type, and the card has a tile for a matrix of [w_rows, w_cols] of it.
     static bool fits(int ggml_type, int64_t w_rows, int64_t w_cols);
+    /// A row's product with a matrix of ggml_type is the same to the bit however the rows are split between
+    /// launches.  Not on a card where llama.cpp splits a tile's sum between blocks by the launch's tile count
+    /// (stream-k: NVIDIA from Volta, AMD CDNA): there another split adds the partial sums in another order.
+    static bool split_exact(int ggml_type, int64_t w_rows);
     /// Bytes of `rows` rows of `cols` values as quantize() writes them.
     static size_t q8_bytes(int64_t rows, int64_t cols);
 

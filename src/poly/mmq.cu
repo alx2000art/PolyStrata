@@ -37,6 +37,19 @@ Mmq::~Mmq() { delete (ggml_backend_cuda_context*) ctx_; }
 // step they read on into what lies behind it, and multiply that by the zeros quantize() pads the rows of x with.
 // So what lies behind a matrix must be readable and must not be read as an infinite block scale: the engine keeps
 // zero bytes there (kTail in runtime.hpp), as ggml-cuda does behind its tensors.
+// launch_mul_mat_q's choice for each tile width: with stream-k the blocks share the tiles' sums out by the number
+// of tiles, and a fixup adds the parts
+bool Mmq::split_exact(int type, int64_t w_rows) {
+    const ggml_type t = (ggml_type) type;
+    const bool fallback = w_rows % 128 != 0;
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    for (int J = 8; J <= 128; J += 8) {
+        const ggml_cuda_mmq_config c = ggml_cuda_mmq_get_config(t, J, fallback, cc);
+        if (c.type != GGML_TYPE_COUNT && c.stream_k) return false;
+    }
+    return true;
+}
+
 bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
     const ggml_type t = (ggml_type) type;
     switch (t) {

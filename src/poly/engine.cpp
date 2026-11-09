@@ -1791,7 +1791,8 @@ void Engine::load(const Options& o) {
     // experts of up to 8 rows in one launch, up to 16 in the next, up to 32 in the next, the rest in the last.  One
     // launch takes its tile width from its largest expert, and a tile computes that many columns whatever rows
     // are in them: with the median staged expert at 15 rows, a 64-column tile is 43% full.  The numbers are
-    // ascending row counts; the results are bit for bit those of one launch.
+    // ascending row counts.  The results are one launch's to the bit, except where llama.cpp's MMQ uses stream-k
+    // (Mmq::split_exact()), which adds a row's partial sums in an order set by the launch's tile count.
     if (const char* v = std::getenv("STRATA_POLY_STAGED_TILES"); v && *v) {
         std::vector<int> t;
         bool ok = true;
@@ -2950,7 +2951,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     } else {
         // A round's rows lie class after class, and a class has bounds in which the other classes' experts have none
         // (as the cached experts' cb below), so that a launch's tile is as wide as its class's largest expert needs.
-        // The same results, for a row's product does not depend on the tile it is in.
+        // A row's product does not depend on the tile it is in, so the results are one launch's (within rounding
+        // where MMQ uses stream-k).
         for (int r = 0; r < n_round; ++r) {
             const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
             round_row_[(size_t) r] = at;
