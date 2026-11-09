@@ -232,9 +232,21 @@ HEALTH_URL="${BASE_URL%/v1}/health"
 BACKUP="$CONFIG.bench-backup-$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
-# прошлый прогон дошёл до конца (summary.md на месте и все варианты с захватами) — не подмешиваться к
-# нему: свежий забег пишется в соседнюю папку с меткой времени.  Оборванный — добирается на месте
-# (готовые ячейки пропускаются, как и было).
+# Маркер run-id.txt хранит сьют того, что лежит в папке: чужой забег или завершённый целиком — свежая
+# папка с меткой времени, свой недоигранный — добирается на месте.
+run_id="$SUITE"
+id_file="$OUT_DIR/run-id.txt"
+old_id="$(cat "$id_file" 2>/dev/null || echo '')"
+has_json="$(ls "$OUT_DIR"/*.json 2>/dev/null | head -1)"
+if [[ -n "$has_json" && "$old_id" != "$run_id" ]]; then
+  new_dir="$OUT_DIR-$(date +%Y%m%d-%H%M%S)"
+  log "в $OUT_DIR лежит забег '$old_id' — свежий ('$run_id') пишется в $new_dir"
+  OUT_DIR="$new_dir"
+  id_file="$OUT_DIR/run-id.txt"
+  mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+fi
+printf '%s
+' "$run_id" > "$id_file"
 complete=0
 if [[ -f "$OUT_DIR/summary.md" ]]; then
   complete=1
@@ -247,6 +259,8 @@ if (( complete )) && ((${#VARIANTS[@]} > 0)); then
   log "предыдущий прогон в $OUT_DIR завершён целиком — свежий пишется в $new_dir"
   OUT_DIR="$new_dir"
   mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+  printf '%s
+' "$run_id" > "$OUT_DIR/run-id.txt"
 fi
 exec > >(tee -a "$OUT_DIR/sweep.log") 2>&1
 
@@ -372,10 +386,10 @@ run_capture() {  # $1 = имя варианта, $2 = сьют (не задан:
     --timeout "$TIMEOUT_S" ${extra[@]+"${extra[@]}"}
 }
 
-variant_done() {  # $1 = имя: уже есть валидный захват?
+variant_done() {  # $1 = имя: уже есть валидный захват СВОЕГО сьюта?
   local f="$OUT_DIR/$1.json"
   [[ -f "$f" ]] || return 1
-  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") else 1)' "$f" 2>/dev/null
+  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") and d.get("meta",{}).get("suite")==sys.argv[2] else 1)' "$f" "$SUITE" 2>/dev/null
 }
 
 # ------------------------- главный цикл -------------------------------------
