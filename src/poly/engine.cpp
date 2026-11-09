@@ -61,6 +61,7 @@ namespace {
 // widths saved less work than their launches cost.
 constexpr int kTile[] = {32, 128};
 constexpr int kClasses = (int) (sizeof(kTile) / sizeof(kTile[0])) + 1;
+constexpr int kMaxStagedTiles = 8;   // the most size classes STRATA_POLY_STAGED_TILES makes of the staged experts
 
 int tile_class(int rows) {
     int c = 0;
@@ -1786,6 +1787,31 @@ void Engine::load(const Options& o) {
     if (block_ != dg_.get()) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;
 
+    // STRATA_POLY_STAGED_TILES=8,16,32: a prompt batch's staged experts go to llama.cpp's MMQ in size classes, the
+    // experts of up to 8 rows in one launch, up to 16 in the next, up to 32 in the next, the rest in the last.  One
+    // launch takes its tile width from its largest expert, and a tile computes that many columns whatever rows
+    // are in them: with the median staged expert at 15 rows, a 64-column tile is 43% full.  The numbers are
+    // ascending row counts; the results are bit for bit those of one launch.
+    if (const char* v = std::getenv("STRATA_POLY_STAGED_TILES"); v && *v) {
+        std::vector<int> t;
+        bool ok = true;
+        for (const char* p = v; *p && ok;) {
+            char* end = nullptr;
+            const long x = std::strtol(p, &end, 10);
+            ok = end != p && x > 0 && x < 100000 && (t.empty() || x > t.back()) && (*end == ',' || !*end) &&
+                 (int) t.size() < kMaxStagedTiles - 1;
+            t.push_back((int) x);
+            p = *end ? end + 1 : end;
+        }
+        if (ok) {
+            staged_tiles_ = t;
+        } else {
+            std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGED_TILES=%s is not ascending row counts a comma apart: "
+                                 "ignored
+", v);
+        }
+    }
+
     // STRATA_FREEZE_EXPERTS=1: an answer's experts are the cache's as it was at the request's first token.  The
     // split between the card's experts and the CPU's (moe()) decides a layer's sums to the last bit - the two
     // paths add in different orders - so a greedy answer is a function of the request alone only while the split
@@ -2117,7 +2143,8 @@ void Engine::alloc() {
     route_used_ = n_used_;
     if (mmq_) {
         const size_t rr = n * n_used_,
-                     tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1)) * sizeof(int32_t);
+                     tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1) +
+                            2 * kMaxStagedTiles * (2 * (size_t) n_expert_ + 2)) * sizeof(int32_t);
         mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
         mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
         mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
@@ -2759,6 +2786,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     int32_t* rel = bounds + n_expert_ + 1;
     float* w = (float*) (rel + 2 * n_expert_ + 2);
     int32_t* cb = (int32_t*) (w + cap);   // per class: the cached experts' first rows, in the order of the slots
+    // STRATA_POLY_STAGED_TILES: per size class and round, the staged experts' first rows (tb), and the same counted
+    // from the round's first row (tb + n_tile * tile_row)
+    int32_t* tb = cb + kClasses * ((size_t) n_expert_ + 1);
     router_scores(L, n);
     // Routed on the card, a batch hands the host its picks: the host took longer to route a batch of 1,024 tokens
     // than the card took for its experts.
@@ -2817,6 +2847,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int32_t* d_rel = d_bounds + n_expert_ + 1;
     const float* d_w = (const float*) (d_rel + 2 * n_expert_ + 2);
     const int32_t* d_cb = (const int32_t*) (d_w + cap);
+    const int32_t* d_tb = d_cb + kClasses * cb_row;
 
     // A token's routing is a softmax over every expert and a search for the largest few.  On one thread it was
     // 0.9 s of the 2.4 s a 7,709-token prompt took with 40 layers of 256 experts, so the host's threads take a
@@ -2877,13 +2908,70 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int n_group = (int) group_.size();
     auto rows_of = [&](int g) { return count_[(size_t) group_[(size_t) g]]; };
 
+    // a round is what the staging buffer holds at a time; round_ has the first group of each, and the end.  The
+    // rounds go to two buffers by their number's parity (the round r to the buffer r & 1), so a round of an odd
+    // number is sized to the second buffer, which stays narrow however wide a read has lent the first one.
+    const size_t gu2 = 2 * L.gu_bytes;
+    const int per_round = (int) (stage_bytes_ / (gu2 + L.d_bytes));
+    const int per_round2 = stage2_ ? (int) (stage2_bytes_ / (gu2 + L.d_bytes)) : 0;
+    round_.assign(1, n_cached);
+    if (n_ahead > 0) round_.push_back(n_cached + n_ahead);
+    while (round_.back() < n_group) {
+        const int r = (int) round_.size() - 1;   // the round being sized
+        const int per = (r & 1) && per_round2 > 0 ? per_round2 : per_round;
+        round_.push_back(std::min(round_.back() + per, n_group));
+    }
+    const int n_round = (int) round_.size() - 1;
+    // STRATA_POLY_STAGED_TILES: the size classes of a round's experts
+    const int n_tile = (int) staged_tiles_.size() + 1;
+    const size_t tile_row = (size_t) 2 * n_expert_ + 2;
+    const auto tile_of = [&](int rows) {
+        int t = 0;
+        while (t < n_tile - 1 && rows > staged_tiles_[(size_t) t]) ++t;
+        return t;
+    };
+
     int at = 0;
-    for (int g = 0; g < n_group; ++g) {
+    for (int g = 0; g < n_cached; ++g) {
         bounds[g] = at;
         first_[(size_t) group_[(size_t) g]] = at;
         at += rows_of(g);
     }
-    bounds[n_group] = at;
+    bounds[n_cached] = at;
+    round_row_.assign((size_t) n_round + 1, 0);
+    if (n_tile == 1) {
+        for (int g = n_cached; g < n_group; ++g) {
+            bounds[g] = at;
+            first_[(size_t) group_[(size_t) g]] = at;
+            at += rows_of(g);
+        }
+        bounds[n_group] = at;
+        for (int r = 0; r <= n_round; ++r) round_row_[(size_t) r] = bounds[round_[(size_t) r]];
+    } else {
+        // A round's rows lie class after class, and a class has bounds in which the other classes' experts have none
+        // (as the cached experts' cb below), so that a launch's tile is as wide as its class's largest expert needs.
+        // The same results, for a row's product does not depend on the tile it is in.
+        for (int r = 0; r < n_round; ++r) {
+            const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
+            round_row_[(size_t) r] = at;
+            for (int k = 0; k < n_tile; ++k) {
+                int32_t* ta = tb + (size_t) k * tile_row + (size_t) (g0 - n_cached + r);
+                int32_t* tr = ta + (size_t) n_tile * tile_row;
+                for (int j = 0; j < m; ++j) {
+                    ta[j] = at;
+                    tr[j] = at - round_row_[(size_t) r];
+                    if (tile_of(rows_of(g0 + j)) == k) {
+                        first_[(size_t) group_[(size_t) (g0 + j)]] = at;
+                        at += rows_of(g0 + j);
+                    }
+                }
+                ta[m] = at;
+                tr[m] = at - round_row_[(size_t) r];
+            }
+        }
+        round_row_[(size_t) n_round] = at;
+        bounds[n_group] = at;
+    }
     const int rg = at;   // the card's rows
     host_.clear();
     for (int i = 0; i < rr; ++i) {
@@ -2898,21 +2986,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         tok[row] = i / n_used_;
         place[row] = i;
     }
-    const size_t gu2 = 2 * L.gu_bytes;
-    // a round is what the staging buffer holds at a time; round_ has the first group of each, and the end.  The
-    // rounds go to two buffers by their number's parity (the round r to the buffer r & 1), so a round of an odd
-    // number is sized to the second buffer, which stays narrow however wide a read has lent the first one.
-    const int per_round = (int) (stage_bytes_ / (gu2 + L.d_bytes));
-    const int per_round2 = stage2_ ? (int) (stage2_bytes_ / (gu2 + L.d_bytes)) : 0;
-    round_.assign(1, n_cached);
-    if (n_ahead > 0) round_.push_back(n_cached + n_ahead);
-    while (round_.back() < n_group) {
-        const int r = (int) round_.size() - 1;   // the round being sized
-        const int per = (r & 1) && per_round2 > 0 ? per_round2 : per_round;
-        round_.push_back(std::min(round_.back() + per, n_group));
-    }
-    const int n_round = (int) round_.size() - 1;
-    for (int r = 0; r < n_round; ++r)
+    // STRATA_POLY_STAGED_TILES: the per-round relative bounds (rel) only in the single-class layout; the class
+    // layout's down bounds come from the tb tables' second half.
+    for (int r = 0; n_tile == 1 && r < n_round; ++r)
         for (int g = round_[(size_t) r]; g <= round_[(size_t) r + 1]; ++g)
             rel[g - n_cached + r] = bounds[g] - bounds[round_[(size_t) r]];
     // A class's launch runs over every cached expert of a run of slots, and the others must have no rows in it:
@@ -2927,7 +3003,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         b[n_chan] = at;
     }
     ck(cudaMemcpyAsync(tab_, h_tab_,
-                       (3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row) * sizeof(int32_t),
+                       (3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row +
+                        2 * n_tile * tile_row * (n_tile > 1)) * sizeof(int32_t),
                        cudaMemcpyHostToDevice, cs(st_)),
        "expert rows");
 
@@ -2999,7 +3076,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             const int r = kept < 0 ? (turn + from) % n_round : turn == 0 ? kept : turn - (turn <= kept ? 1 : 0);
             const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
             const size_t down_at = pad((size_t) m * gu2);
-            const int r0 = bounds[g0], rows = bounds[g0 + m] - r0;
+            // STRATA_POLY_STAGED_TILES: the round's rows lie class after class, the round's span is round_row_'s
+            const int r0 = round_row_[(size_t) r], rows = round_row_[(size_t) r + 1] - r0;
             // A round's copy goes on the upload stream and waits only its buffer's last reader, which is the
             // round before the one beside it: a round's copy runs beside the multiplication of the round before
             // it.  With one buffer the copy waits the last read of the buffer, as it did.  A held round (kept)
@@ -3035,21 +3113,36 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             if (s2_debug_) std::fprintf(stderr,
                 "[stage2] il=%d read   r=%d/%d buf=%d r0=%d rows=%d\n", il, r, n_round, (int) second, r0, rows);
             ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) rdy, 0), "expert staging");
-            int most = 0;
-            for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
-            if (xm) ExpertMma::mul(buf, ff2, n_embd_, gu2, m, mqm_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
-            else mmq_->mul(buf, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
+            // with size classes, a launch for each class that has rows in the round, as wide a tile as its
+            // experts need; the bounds' empty ranges cover the round's other experts
+            const auto each_class = [&](auto&& launch) {
+                if (n_tile == 1) return launch(0, most);
+                for (int k = 0; k < n_tile; ++k) {
+                    int top = 0;
+                    for (int g = g0; g < g0 + m; ++g)
+                        if (tile_of(rows_of(g)) == k) top = std::max(top, rows_of(g));
+                    if (top > 0) launch(k, top);
+                }
+            };
+            each_class([&](int k, int top) {
+                const int32_t* b = n_tile == 1 ? d_bounds + g0 : d_tb + (size_t) k * tile_row + (size_t) (g0 - n_cached + r);
+                if (xm) ExpertMma::mul(buf, ff2, n_embd_, gu2, m, mqm_, b, iota_, rg, top, gu_, ff2, st_);
+                else mmq_->mul(buf, gt, ff2, n_embd_, gu2, m, mq_, b, iota_, rg, top, gu_, ff2, st_);
+            });
             if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_);
             else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
-            if (xm2) {
-                ExpertMma::quantize(hx_ + (size_t) r0 * ff, nullptr, mqm2_, ff, ff, rows, st_);
-                ExpertMma::mul(buf + down_at, n_embd_, ff, L.d_bytes, m, mqm2_, d_rel + (g0 - n_cached + r),
-                               d_place + r0, rows, most, dx_, n_embd_, st_);
-            } else {
-                Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
-                mmq_->mul(buf + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r),
-                          d_place + r0, rows, most, dx_, n_embd_, st_);
-            }
+            if (xm2) ExpertMma::quantize(hx_ + (size_t) r0 * ff, nullptr, mqm2_, ff, ff, rows, st_);
+            else Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
+            each_class([&](int k, int top) {
+                const int32_t* b = (n_tile == 1 ? d_rel + (g0 - n_cached + r)
+                                                : d_tb + (size_t) (n_tile + k) * tile_row + (size_t) (g0 - n_cached + r));
+                if (xm2)
+                    ExpertMma::mul(buf + down_at, n_embd_, ff, L.d_bytes, m, mqm2_, b, d_place + r0, rows, top,
+                                   dx_, n_embd_, st_);
+                else
+                    mmq_->mul(buf + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, b, d_place + r0, rows, top,
+                              dx_, n_embd_, st_);
+            });
             ck(cudaEventRecord((cudaEvent_t) fre, cs(st_)), "expert staging");
         }
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
