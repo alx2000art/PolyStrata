@@ -2053,7 +2053,10 @@ void Engine::alloc() {
                 ++moe;
             }
         if (slot > 0) {
-            ram_pool_ = std::make_unique<RamPool>((size_t) opt_.ram_experts_mib << 20, slot, n_layer_, n_expert_);
+            // the key space covers the draft block too: it is layers_[n_layer_], and its swaps climb the
+            // same pool - a pool keyed by n_layer_ alone gave its index past the keys and served garbage.
+            ram_pool_ = std::make_unique<RamPool>((size_t) opt_.ram_experts_mib << 20, slot, (int) layers_.size(),
+                                                  n_expert_);
             std::fprintf(stderr, "strata-poly: the RAM expert pool holds %d experts of %.1f MiB (%d MoE layers)\n",
                          ram_pool_->slots(), (double) slot / (1024 * 1024), moe);
         }

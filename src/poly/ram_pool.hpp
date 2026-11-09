@@ -48,6 +48,7 @@ public:
 
     /// 1 when the expert's bytes sit in the pool now.
     bool holds(int il, int e) {
+        if (il < 0 || il >= n_layers_ || e < 0 || e >= n_experts_) return false;
         std::lock_guard<std::mutex> lk(m_);
         return keys_[(size_t) il * n_experts_ + (size_t) e] >= 0;
     }
@@ -57,6 +58,7 @@ public:
     /// its bytes stable between the two locks, so the slot number rides in a local.
     bool copy_out(int il, int e, void* dst_gu, void* dst_down, size_t gu2, size_t d_bytes, const char* via = "hit") {
         if (!n_slots_) return false;
+        if (il < 0 || il >= n_layers_ || e < 0 || e >= n_experts_) return false;   // outside the key space: miss
         int s = -1;
         uint64_t now;
         {
@@ -84,6 +86,8 @@ public:
     /// is reading.  With every slot busy the fill is dropped quietly: the read itself already happened.
     void fill(int il, int e, const void* src_gu, const void* src_down, size_t gu2, size_t d_bytes) {
         if (!n_slots_ || gu2 + d_bytes > slot_bytes_) return;
+        if (il < 0 || il >= n_layers_ || e < 0 || e >= n_experts_) return;   // outside the key space: drop
+        
         const size_t x = (size_t) il * n_experts_ + (size_t) e;
         int s = -1;
         uint64_t now = ++clock_;
