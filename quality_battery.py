@@ -43,14 +43,18 @@ def ask(base, key, model, prompt):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
-        "max_tokens": 400,
+        "max_tokens": 600,
+        "reasoning_budget_tokens": 0,   # the battery wants the answer, not the thinking
         "stream": False,
     }).encode("utf-8")
     req = urllib.request.Request(base + "/chat/completions", data=body,
                                  headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as r:
         d = json.loads(r.read().decode("utf-8"))
-    return d["choices"][0]["message"]["content"]
+    text = d["choices"][0]["message"].get("content")
+    if not text:
+        text = "(no content: the reply's thinking ate the budget)"
+    return text
 
 
 def main():
