@@ -65,7 +65,8 @@ MANAGED_KEYS="--read-overlap --file-reads --read-heat --attend-batch --attend-ch
 --group-heads --q8-dequant --idx-mma --cpu-tiled --lookup --stage2-mib --stage-mib
 --prompt-cache --window --expert-swaps --kv-whole
 --tail-skip --stage-ahead --prompt-batch --stage-read-mib --threads --draft-vocab --no-graphs
---ram-experts-mib --conversation-cache-mib --prefetch-k --resident-topk"
+--ram-experts-mib --conversation-cache-mib --prefetch-k --resident-topk
+--vram-pool"
 
 BASELINE_SPEC="--read-overlap 1 --file-reads 0 --read-heat 0 --attend-batch 0
 --attend-chunks 1 --group-heads 16 --q8-dequant 1 --idx-mma 1 --cpu-tiled 1
@@ -116,6 +117,7 @@ KNOBS_PREFILL=(
   "stage2-off|--stage2-mib 0"
   "ram-pool-2048|--ram-experts-mib 2048"   # свой RAM-пул горячих экспертов (ram_pool.hpp)
   "ram-pool-6144|--ram-experts-mib 6144"
+  "staged-tiles|@STRATA_POLY_STAGED_TILES 8,16,32"   # размерные классы staged-экспертов (апстрим PR 149)
   "convcache-0|--conversation-cache-mib 0"     # освободить RAM под страницы экспертов
   "convcache-1024|--conversation-cache-mib 1024"
 )
@@ -260,8 +262,14 @@ while i < len(args):
     i += 1
 toks = spec.split()
 i = 0
+env_sets = {}
 while i < len(toks):
     k = toks[i]
+    if k.startswith("@"):          # "@VAR value" - переменная окружения двигателя (cfg["env"])
+        v = toks[i + 1] if i + 1 < len(toks) else ""
+        env_sets[k[1:]] = v
+        i += 2 if i + 1 < len(toks) else 1
+        continue
     if i + 1 < len(toks) and toks[i + 1] == "__FLAG__":
         kept.append(k)          # голый флаг без значения (--kv-whole)
         i += 2
@@ -296,6 +304,13 @@ while i < len(kept):
         final.append(a)
         i += 1
 cfg["args"] = final
+# env-ячейки: спека задаёт значения, а управляемые env-переменные вне спеки сносятся
+cfg.setdefault("env", {})
+env_managed = [k[1:] for k in spec.split() if k.startswith("@")]
+for k in list(cfg["env"]):
+    if k.startswith("STRATA_POLY_") and k not in env_sets and k not in ("STRATA_POLY_PIN_EXPERTS",):
+        del cfg["env"][k]
+cfg["env"].update(env_sets)
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
