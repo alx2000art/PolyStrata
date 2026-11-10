@@ -884,7 +884,7 @@ int serve(Session& ss) {
                     "pool_misses=%lld\n",
                     (long long) r.produced, n, r.prompt_ms, r.decode_ms, r.finish, (long long) r.guessed_right,
                     (long long) r.guessed, (long long) r.resume, hits, hits + misses, (long long) r.read,
-                    engine.pool_hits(), engine.pool_misses());
+                    (long long) engine.pool_hits(), (long long) engine.pool_misses());
         std::fflush(stdout);
         if (admit >= 0) {
             Slot& sl = slots[(size_t) admit];

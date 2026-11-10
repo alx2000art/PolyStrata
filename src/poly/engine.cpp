@@ -381,9 +381,6 @@ Engine::~Engine() {
         std::fclose((std::FILE*) route_dump_);
         route_dump_ = nullptr;
     }
-
-Engine::~Engine() {
-    next_.reset();
     OnCard here(device_, split_);
     map_quit_.store(true);
     if (mapper_.joinable()) mapper_.join();
