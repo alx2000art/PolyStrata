@@ -375,6 +375,15 @@ Engine::Engine() = default;
 
 Engine::~Engine() {
     next_.reset();
+    if (route_dump_) {
+        if (!route_buf_.empty())
+            std::fwrite(route_buf_.data(), 2, route_buf_.size(), (std::FILE*) route_dump_);
+        std::fclose((std::FILE*) route_dump_);
+        route_dump_ = nullptr;
+    }
+
+Engine::~Engine() {
+    next_.reset();
     OnCard here(device_, split_);
     map_quit_.store(true);
     if (mapper_.joinable()) mapper_.join();
@@ -1748,17 +1757,23 @@ void Engine::follow_loop() {
                 const bool pool_here = ram_pool_ && g_pool_swap_;
                 if (pool_here && ram_pool_->copy_out(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu,
                                                      L.d_bytes)) {
-                    // promoted out of the pool
+                    pool_hits_.fetch_add(1, std::memory_order_relaxed);
                 } else if (opt_.file_reads) {
                     L.gu_file->read(L.gu_at + e * L.gu_stride, s->pinned, gu);
                     L.up_file->read(L.up_at + e * L.gu_stride, s->pinned + gu, gu);
                     L.d_file->read(L.d_at + e * L.d_bytes, s->pinned + 2 * gu, L.d_bytes);
-                    if (pool_here) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
+                    if (pool_here) {
+                        ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
+                        pool_misses_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 } else {
                     std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
                     std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
                     std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
-                    if (pool_here) ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
+                    if (pool_here) {
+                        ram_pool_->fill(s->il, (int) e, s->pinned, s->pinned + 2 * gu, 2 * gu, L.d_bytes);
+                        pool_misses_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             } catch (const std::runtime_error& read_err) {
                 lk.lock();
@@ -1774,6 +1789,15 @@ void Engine::follow_loop() {
             return;
         }
         s->at.store(Swap::kSent);
+    }
+}
+
+// STRATA_POLY_ROUTE_DUMP: one uint16 code per routed expert, flushed in chunks of a million.
+void Engine::route_dump_put(int il, int e) {
+    route_buf_.push_back((uint16_t) ((size_t) il * (size_t) n_expert_ + (size_t) e));
+    if (route_buf_.size() >= (size_t) 1 << 20) {
+        std::fwrite(route_buf_.data(), 2, route_buf_.size(), (std::FILE*) route_dump_);
+        route_buf_.clear();
     }
 }
 
@@ -1955,6 +1979,19 @@ void Engine::load(const Options& o) {
         std::fprintf(stderr, "strata-poly: the experts' split is frozen for the engine's whole run "
                              "(STRATA_FREEZE_EXPERTS): greedy answers are a function of the request alone, "
                              "and the only cache change after load is the serve VRAM resize\n");
+    // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
+    // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.
+    if (const char* p = std::getenv("STRATA_POLY_ROUTE_DUMP"); p && *p) {
+        if (std::FILE* f = std::fopen(p, "wb")) {
+            route_dump_ = f;
+            std::fwrite("PRTD", 1, 4, f);
+            const uint16_t dims[2] = {(uint16_t) layers_.size(), (uint16_t) n_expert_};
+            std::fwrite(dims, 2, 2, f);
+            std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: moe()'s routing goes to %s\n", p);
+        } else {
+            std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: cannot open %s\n", p);
+        }
+    }
     cudaStream_t st = nullptr;
     ck(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking), "cudaStreamCreate");
     st_ = st;
@@ -2596,6 +2633,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             for (int k = 0; k < n_used_; ++k) {
                 if (ids[k] < 0) continue;   // --resident-topk dropped this place of the token
                 host_rel[n_host] = w_all > 0.f ? w[k] / w_all : 1.f;
+                if (route_dump_) route_dump_put(il, ids[k]);
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];
                 if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
