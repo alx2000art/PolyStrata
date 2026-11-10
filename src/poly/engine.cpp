@@ -1789,10 +1789,11 @@ void Engine::follow_loop() {
     }
 }
 
-// STRATA_POLY_ROUTE_DUMP: one uint16 code per routed expert, flushed in chunks of a million.
+// STRATA_POLY_ROUTE_DUMP: one uint16 code per routed expert, flushed in chunks of 256k (512 KB on disk), so a
+// hard stop loses at most the last chunk.
 void Engine::route_dump_put(int il, int e) {
     route_buf_.push_back((uint16_t) ((size_t) il * (size_t) n_expert_ + (size_t) e));
-    if (route_buf_.size() >= (size_t) 1 << 20) {
+    if (route_buf_.size() >= (size_t) 1 << 18) {
         std::fwrite(route_buf_.data(), 2, route_buf_.size(), (std::FILE*) route_dump_);
         std::fflush((std::FILE*) route_dump_);
         route_buf_.clear();
@@ -1977,20 +1978,6 @@ void Engine::load(const Options& o) {
         std::fprintf(stderr, "strata-poly: the experts' split is frozen for the engine's whole run "
                              "(STRATA_FREEZE_EXPERTS): greedy answers are a function of the request alone, "
                              "and the only cache change after load is the serve VRAM resize\n");
-    // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
-    // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.
-    if (const char* p = std::getenv("STRATA_POLY_ROUTE_DUMP"); p && *p) {
-        if (std::FILE* f = std::fopen(p, "wb")) {
-            route_dump_ = f;
-            std::fwrite("PRTD", 1, 4, f);
-            const uint16_t dims[2] = {(uint16_t) layers_.size(), (uint16_t) n_expert_};
-            std::fwrite(dims, 2, 2, f);
-            std::fflush(f);   // a hard stop must still leave a readable (chunk-truncated) dump
-            std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: moe()'s routing goes to %s\n", p);
-        } else {
-            std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: cannot open %s\n", p);
-        }
-    }
     cudaStream_t st = nullptr;
     ck(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking), "cudaStreamCreate");
     st_ = st;
@@ -2392,6 +2379,21 @@ void Engine::alloc() {
     }
     use_.assign(layers_.size() * n_expert_, 0);
     heat_.assign(layers_.size() * n_expert_, 0);
+    // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
+    // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.  Here,
+    // where layers_ and n_expert_ are final (alloc() runs after load_geometry()).
+    if (const char* p = std::getenv("STRATA_POLY_ROUTE_DUMP"); p && *p) {
+        if (std::FILE* f = std::fopen(p, "wb")) {
+            route_dump_ = f;
+            std::fwrite("PRTD", 1, 4, f);
+            const uint16_t dims[2] = {(uint16_t) layers_.size(), (uint16_t) n_expert_};
+            std::fwrite(dims, 2, 2, f);
+            std::fflush(f);   // a hard stop must still leave a readable (chunk-truncated) dump
+            std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: moe()'s routing goes to %s\n", p);
+        } else {
+            std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: cannot open %s\n", p);
+        }
+    }
 }
 
 void Engine::save_profile() const {
