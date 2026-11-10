@@ -5,9 +5,13 @@
 # Методика:
 #   1. ЭТАЛОН (00-all-off): конфиг со ВСЕМИ фичами форка выключенными.
 #      Прогоняется дважды (01-all-off-b) — разница прогонов = пол шума.
-#   2. ВСЁ ВКЛЮЧЕНО (10-all-on): все фичи форка включены (ваши рабочие
-#      настройки) — суммарный эффект набора.
-#   3. Для каждой фичи (20+): эталон + включена ТОЛЬКО эта фича.
+#   2. ВСЁ ВКЛЮЧЕНО (10-all-on): рабочий конфиг 2026-11-02 (WORKING_SPEC:
+#      read-heat/file-reads/attend-batch выключены по вердикту живой
+#      нагрузки, stage2 512 включён) — суммарный эффект набора.
+#   3. Для каждой фичи (20+): эталон + включена ТОЛЬКО эта фича.  Это
+#      изоляция механизма против all-off — её вердикты НЕ равны «внедрять в
+#      прод» (read-heat/file-reads выиграли на синтетике и проиграли в
+#      живую); решение по фиче — дельта против РАБОЧЕГО конфига.
 #
 # Для каждого варианта скрипт сам переписывает "args" конфига, перезапускает
 # сервер, ждёт загрузки модели (/health -> loaded:true) и снимает промпт-сьют
@@ -45,6 +49,7 @@ AB="${AB:-$STRATA_DIR/ab_patches.py}"                         # где лежи�
 OUT_DIR="${OUT_DIR:-$STRATA_DIR/bench_sweep}"
 API_KEY="${API_KEY:-}"              # ключ: из окружения или поля api_key конфига (блок проверок ниже)
 SUITE="${SUITE:-poly}"              # poly = long + doc-30k: большой вход даёт чистый prefill-сигнал
+SUITE_WARM="${SUITE_WARM:-long}"    # сьют прогрева: long хватало, doc-30k на прогрев не нужен
 REPEAT="${REPEAT:-2}"               # 2 повтора: prefill в сводке берётся из повтора 0 (холодного),
                                     # decode — максимум по повторам (защита от «лотереи драфта»)
 WARMUP="${WARMUP:-3}"
@@ -76,6 +81,15 @@ FEATURES=(
   "lookup|--lookup|8|0"
   "stage2|--stage2-mib|512|0"
 )
+
+# Рабочий конфиг 2026-11-02 — эталон для «поверх всего набора» (10-all-on и
+# крутки-on).  Отличия от таблицы выше: read-heat и file-reads на живой
+# нагрузке ЗАМЕДЛЯЮТ (вердикт свипа 11-01 на синтетике не перенёсся) — в
+# проде 0; attend-batch в проде 0; stage2 512 включён.  only-ячейки остались
+# против all-off: это изоляция механизма, не рекомендация.
+WORKING_SPEC="--read-overlap 1 --file-reads 0 --read-heat 0 --attend-batch 0
+--group-heads 16 --q8-dequant 1 --attend-chunks 1 --idx-mma 1 --cpu-tiled 1
+--lookup 0 --stage2-mib 512"
 
 split_feat() {  # "имя|--ключ|ВКЛ|ВЫКЛ" -> FEAT_NAME/FEAT_KEY/FEAT_ON/FEAT_OFF.
   # Разбор чистыми подстановками параметров: без read/IFS/herestring — на боксе
@@ -120,7 +134,7 @@ only_on_spec() {  # $1 = имя фичи: эталон + включена тол
 VARIANTS=()
 VARIANTS+=("00-all-off|$(all_off_spec)")     # ЭТАЛОН: всё выключено
 VARIANTS+=("01-all-off-b|$(all_off_spec)")   # эталон ещё раз — пол шума
-VARIANTS+=("10-all-on|$(all_on_spec)")       # всё включено (ваш конфиг)
+VARIANTS+=("10-all-on|$WORKING_SPEC")       # рабочий конфиг 2026-11-02 (эталон набора)
 i=20
 for e in "${FEATURES[@]}"; do
   split_feat "$e"
@@ -140,16 +154,20 @@ VARIANTS+=("15-all-off-m|$(all_off_spec)")   # контроль дрейфа в 
 # границы раундов → другой float-порядок) — контроль показал тот же дрейф при
 # --stage2-mib 0; семантическая валидация 6/6 чисто на обоих режимах. База
 # флага в FEATURES (эталоны гасят его явно), крутки перекрывают на месте.
-VARIANTS+=("50-on-stage2-512|$(all_on_spec)")                     # один в один 10-all-on — мера шума
-VARIANTS+=("51-on-stage2-256|$(all_on_spec) --stage2-mib 256")    # меньше отъёма кэша
+VARIANTS+=("50-on-stage2-512|$WORKING_SPEC")                     # один в один 10-all-on — мера шума
+VARIANTS+=("51-on-stage2-256|$WORKING_SPEC --stage2-mib 256")    # меньше отъёма кэша
 VARIANTS+=("52-eta-stage2-512|$(all_off_spec) --stage2-mib 512")  # механизм в чистоте
 # --- доля CPU-пула (поверх ВСЕГО НАБОРА: «фикс против auto» на проде).
 # ВАЖНО: --cpu-tiled сам по себе булев (0/1) — "0.7" через atoi() = тихое
 # ВЫКЛЮЧЕНИЕ tiled; долей работ рулит --cpu-share (auto = движок балансирует
 # сам по таймингам). В проде ключа нет = auto, так что утечки в другие ячейки нет.
-VARIANTS+=("55-on-share50|$(all_on_spec) --cpu-share 0.5")
-VARIANTS+=("56-on-share70|$(all_on_spec) --cpu-share 0.7")
-VARIANTS+=("57-on-share100|$(all_on_spec) --cpu-share 1.0")
+# --- собственное mma-ядро Q3_K продуктов (--expert-mma, ветка feat/expert-mma).  На бинарнике без
+# флага сервер не поднимется и вариант будет пропущен с записью в лог.
+VARIANTS+=("58-eta-expertmma|$(all_off_spec) --expert-mma 1")   # механизм в чистоте против эталона
+VARIANTS+=("59-on-expertmma|$WORKING_SPEC --expert-mma 1")     # поверх всего набора
+VARIANTS+=("55-on-share50|$WORKING_SPEC --cpu-share 0.5")
+VARIANTS+=("56-on-share70|$WORKING_SPEC --cpu-share 0.7")
+VARIANTS+=("57-on-share100|$WORKING_SPEC --cpu-share 1.0")
 # поверх ЭТАЛОНА — прочие крутки (раскомментируйте нужное):
 # VARIANTS+=("40-eta-pb2048|$(all_off_spec) --prompt-batch 2048")
 # VARIANTS+=("41-eta-tailskip0|$(all_off_spec) --tail-skip 0")
@@ -214,6 +232,36 @@ HEALTH_URL="${BASE_URL%/v1}/health"
 BACKUP="$CONFIG.bench-backup-$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+# Маркер run-id.txt хранит сьют того, что лежит в папке: чужой забег или завершённый целиком — свежая
+# папка с меткой времени, свой недоигранный — добирается на месте.
+run_id="$SUITE"
+id_file="$OUT_DIR/run-id.txt"
+old_id="$(cat "$id_file" 2>/dev/null || echo '')"
+has_json="$(ls "$OUT_DIR"/*.json 2>/dev/null | head -1)"
+if [[ -n "$has_json" && "$old_id" != "$run_id" ]]; then
+  new_dir="$OUT_DIR-$(date +%Y%m%d-%H%M%S)"
+  log "в $OUT_DIR лежит забег '$old_id' — свежий ('$run_id') пишется в $new_dir"
+  OUT_DIR="$new_dir"
+  id_file="$OUT_DIR/run-id.txt"
+  mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+fi
+printf '%s
+' "$run_id" > "$id_file"
+complete=0
+if [[ -f "$OUT_DIR/summary.md" ]]; then
+  complete=1
+  for entry in "${VARIANTS[@]}"; do
+    [[ -f "$OUT_DIR/${entry%%|*}.json" ]] || { complete=0; break; }
+  done
+fi
+if (( complete )) && ((${#VARIANTS[@]} > 0)); then
+  new_dir="$OUT_DIR-$(date +%Y%m%d-%H%M%S)"
+  log "предыдущий прогон в $OUT_DIR завершён целиком — свежий пишется в $new_dir"
+  OUT_DIR="$new_dir"
+  mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+  printf '%s
+' "$run_id" > "$OUT_DIR/run-id.txt"
+fi
 exec > >(tee -a "$OUT_DIR/sweep.log") 2>&1
 
 log "=============================================================="
@@ -221,7 +269,7 @@ log "PolyStrata bench sweep (эталон: все фичи выключены)"
 log "  конфиг:     $CONFIG  (порт $PORT, модель $MODEL)"
 log "  версия:     $SWEEP_VERSION  (суффикс -dirty = файл правлен руками!)"
 log "  base URL:   $BASE_URL"
-log "  сьют:       $SUITE, repeat $REPEAT, warmup $WARMUP, thinking $THINKING"
+log "  сьют:       $SUITE (прогрев: $SUITE_WARM), repeat $REPEAT, warmup $WARMUP, thinking $THINKING"
   log "  фич:        ${#FEATURES[@]}, вариантов: ${#VARIANTS[@]} (примерно 12-25 мин на вариант при suite poly)"
 log "  результаты: $OUT_DIR"
 log "=============================================================="
@@ -325,23 +373,23 @@ wait_ready() {
   return 1
 }
 
-run_capture() {  # $1 = имя варианта
-  local name="$1" extra=()
+run_capture() {  # $1 = имя варианта, $2 = сьют (не задан: $SUITE)
+  local name="$1" suite="${2:-$SUITE}" extra=()
   [[ "$THINKING" == "off" ]] && extra+=(--no-thinking)
   python3 "$AB" capture \
     --out "$OUT_DIR/$name.json" \
     --base-url "$BASE_URL" \
     --api-key "$API_KEY" \
     --model "$MODEL" \
-    --suite "$SUITE" --repeat "$REPEAT" --warmup "$WARMUP" \
+    --suite "$suite" --repeat "$REPEAT" --warmup "$WARMUP" \
     --temperature "$TEMPERATURE" --seed "$SEED" \
     --timeout "$TIMEOUT_S" ${extra[@]+"${extra[@]}"}
 }
 
-variant_done() {  # $1 = имя: уже есть валидный захват?
+variant_done() {  # $1 = имя: уже есть валидный захват СВОЕГО сьюта?
   local f="$OUT_DIR/$1.json"
   [[ -f "$f" ]] || return 1
-  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") else 1)' "$f" 2>/dev/null
+  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") and d.get("meta",{}).get("suite")==sys.argv[2] else 1)' "$f" "$SUITE" 2>/dev/null
 }
 
 # ------------------------- главный цикл -------------------------------------
@@ -380,8 +428,8 @@ for entry in "${VARIANTS[@]}"; do
   fi
   if (( WARM_PASSES > 0 )) && [[ ! -f "$OUT_DIR/.warmed" ]]; then
     for w in $(seq 1 "$WARM_PASSES"); do
-      log "  прогрев $w/$WARM_PASSES: полный проход сьюта без записи результатов ..."
-      run_capture ".warm-$w" >> "$OUT_DIR/warm.log" 2>&1 || log "  (прогрев не удался — продолжаю)"
+      log "  прогрев $w/$WARM_PASSES: проход сьюта $SUITE_WARM без записи результатов ..."
+      run_capture ".warm-$w" "$SUITE_WARM" >> "$OUT_DIR/warm.log" 2>&1 || log "  (прогрев не удался — продолжаю)"
       rm -f "$OUT_DIR/.warm-$w.json"
     done
     touch "$OUT_DIR/.warmed"

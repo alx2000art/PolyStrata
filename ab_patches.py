@@ -981,7 +981,7 @@ def main() -> int:
 
     capture = sub.add_parser("capture", help="run the prompt suite, save JSON")
     capture.add_argument("--out", required=True)
-    capture.add_argument("--suite", choices=("quick", "long", "poly"), default="poly")
+    capture.add_argument("--suite", choices=("quick", "decode", "long", "poly"), default="poly")
     capture.add_argument("--repeat", type=int, default=2)
     capture.add_argument("--warmup", type=int, default=1,
                          help="thrown-away requests before the suite (0 for a truly cold engine)")

@@ -52,36 +52,81 @@ STOP_WAIT="${STOP_WAIT:-90}"
 WARM_PASSES="${WARM_PASSES:-1}"     # один полный проход сьюта греет файловый кэш GGUF
 FORCE="${FORCE:-0}"
 
-# ------------------------- эталон (прод-набор) -------------------------------
+# ------------------------- эталон (рабочий конфиг, 2026-11-02) ---------------
 # Все ключи, которыми свип управляет, перечислены здесь явно — вариант
 # определяется ТОЛЬКО своей спекой, наследования между вариантами нет.
 # Формат спеки: пары "--ключ значение"; "__FLAG__" после ключа = голый флаг.
+# Эталон = рабочий конфиг продакшена: read-heat/file-reads 0 (на живой
+# нагрузке замедляют, вопреки свипу 11-01 на синтетике), attend-batch 0,
+# stage2 512 включён.  --prompt-cache гасится для чистоты замера (продовое
+# значение 6 вернёт финальный restore); threads/draft-vocab/no-graphs не
+# заданы = дефолты движка.
 MANAGED_KEYS="--read-overlap --file-reads --read-heat --attend-batch --attend-chunks
 --group-heads --q8-dequant --idx-mma --cpu-tiled --lookup --stage2-mib --stage-mib
---prompt-cache --window --expert-swaps --kv-whole"
+--prompt-cache --window --expert-swaps --kv-whole
+--tail-skip --stage-ahead --prompt-batch --stage-read-mib --threads --draft-vocab --no-graphs
+--ram-experts-mib --conversation-cache-mib --prefetch-k --resident-topk
+--vram-pool"
 
-BASELINE_SPEC="--read-overlap 1 --file-reads 1 --read-heat 1 --attend-batch 1
+BASELINE_SPEC="--read-overlap 1 --file-reads 0 --read-heat 0 --attend-batch 0
 --attend-chunks 1 --group-heads 16 --q8-dequant 1 --idx-mma 1 --cpu-tiled 1
---lookup 0 --stage2-mib 0 --stage-mib 512 --prompt-cache 0 --window 8
+--lookup 0 --stage2-mib 512 --stage-mib 512 --tail-skip 4 --stage-ahead 1024
+--prompt-batch 2048 --stage-read-mib 2048 --prompt-cache 0 --window 8
 --expert-swaps 64"
-# (без --kv-whole: стрип в apply_variant гарантирует, что флага нет)
+# (без --kv-whole и --no-graphs: стрип в apply_variant гарантирует, что флагов нет)
 
-# ------------------------- decode-ручки --------------------------------------
+# ------------------------- ручки ---------------------------------------------
 # Формат: "имя|дельта-спеки" — поверх эталона меняется одна ручка.
-KNOBS=(
+# Набор выбирается KNOBS_PRESET: decode (дефолт, SUITE=decode) или prefill
+# (SUITE=long: короткий прогрев и префилловые ручки).
+KNOBS_DECODE=(
   "window-4|--window 4"
   "window-12|--window 12"
-  "window-16|--window 16"
   "swaps-24|--expert-swaps 24"
   "swaps-128|--expert-swaps 128"
-  "swaps-0|--expert-swaps 0"
   "lookup-3|--lookup 3"
   "lookup-8|--lookup 8"
+  "draft-vocab-32768|--draft-vocab 32768"
+  "draft-vocab-65536|--draft-vocab 65536"
   "kv-whole|--kv-whole __FLAG__"
   "stage-mib-1024|--stage-mib 1024"
   "stage-mib-2048|--stage-mib 2048"
   "prompt-cache-6|--prompt-cache 6"
+  "pool-only|--ram-experts-mib 2048"                  # пул без префетча — база для pool-pf*
+  "pool-pf4|--ram-experts-mib 2048 --prefetch-k 4"    # read-ahead догадок в RAM-пул (decode-окна)
+  "pool-pf8|--ram-experts-mib 2048 --prefetch-k 8"
 )
+# (клеток --resident-topk больше нет: живая статистика показала, что топ-3 экспертов DSv4 несут лишь ~65%
+# веса маршрутизированных — кап оглупляет; ключ остался в MANAGED_KEYS, чтобы свип погасил его, если он
+# затесался в конфиг)
+KNOBS_PREFILL=(
+  "tail-skip-2|--tail-skip 2"
+  "tail-skip-6|--tail-skip 6"
+  "tail-skip-8|--tail-skip 8"
+  "read-heat-1|--read-heat 1"        # перепроверка на синтетике вердикта живой нагрузки
+  "file-reads-1|--file-reads 1"
+  "stage-ahead-0|--stage-ahead 0"
+  "stage-ahead-2048|--stage-ahead 2048"
+  "prompt-batch-1024|--prompt-batch 1024"
+  "prompt-batch-4096|--prompt-batch 4096"
+  "prompt-batch-8192|--prompt-batch 8192"   # у Maya 8192/16384 там, где RAM держит экспертов: +29..47% prefill
+  "stage-read-mib-0|--stage-read-mib 0"
+  "stage-read-mib-4096|--stage-read-mib 4096"
+  "threads-16|--threads 16"
+  "no-graphs|--no-graphs __FLAG__"
+  "stage2-off|--stage2-mib 0"
+  "ram-pool-2048|--ram-experts-mib 2048"   # свой RAM-пул горячих экспертов (ram_pool.hpp)
+  "ram-pool-6144|--ram-experts-mib 6144"
+  "staged-tiles|@STRATA_POLY_STAGED_TILES 8,16,32"   # размерные классы staged-экспертов (апстрим PR 149)
+  "convcache-0|--conversation-cache-mib 0"     # освободить RAM под страницы экспертов
+  "convcache-1024|--conversation-cache-mib 1024"
+)
+KNOBS_PRESET="${KNOBS_PRESET:-decode}"
+case "$KNOBS_PRESET" in
+  decode)  KNOBS=("${KNOBS_DECODE[@]}")  ;;
+  prefill) KNOBS=("${KNOBS_PREFILL[@]}") ;;
+  *) echo "KNOBS_PRESET: decode | prefill" >&2; exit 1 ;;
+esac
 
 # ------------------------- варианты -----------------------------------------
 VARIANTS=()
@@ -148,6 +193,39 @@ HEALTH_URL="${BASE_URL%/v1}/health"
 BACKUP="$CONFIG.bench-backup-$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+# Прошлый забег подмешиваться не даёт, если он другого рода (другой сьют/пресет) или дошёл до конца:
+# маркер run-id.txt хранит сьют и пресет того, что лежит в папке.  Свой маркер и недоигранный забег —
+# добирается на месте (готовые ячейки пропускаются); чужой или завершённый целиком — свежая папка
+# с меткой времени.
+run_id="$SUITE/$KNOBS_PRESET"
+id_file="$OUT_DIR/run-id.txt"
+old_id="$(cat "$id_file" 2>/dev/null || echo '')"
+has_json="$(ls "$OUT_DIR"/*.json 2>/dev/null | head -1)"
+if [[ -n "$has_json" && "$old_id" != "$run_id" ]]; then
+  new_dir="$OUT_DIR-$(date +%Y%m%d-%H%M%S)"
+  log "в $OUT_DIR лежит забег '$old_id' — свежий ('$run_id') пишется в $new_dir"
+  OUT_DIR="$new_dir"
+  id_file="$OUT_DIR/run-id.txt"
+  mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+fi
+printf '%s
+' "$run_id" > "$id_file"
+# завершённый целиком забег своего рода тоже не подмешивается: полный → новая папка
+complete=0
+if [[ -f "$OUT_DIR/summary.md" ]]; then
+  complete=1
+  for entry in "${VARIANTS[@]}"; do
+    [[ -f "$OUT_DIR/${entry%%|*}.json" ]] || { complete=0; break; }
+  done
+fi
+if (( complete )) && ((${#VARIANTS[@]} > 0)); then
+  new_dir="$OUT_DIR-$(date +%Y%m%d-%H%M%S)"
+  log "предыдущий прогон в $OUT_DIR завершён целиком — свежий пишется в $new_dir"
+  OUT_DIR="$new_dir"
+  mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
+  printf '%s
+' "$run_id" > "$OUT_DIR/run-id.txt"
+fi
 exec > >(tee -a "$OUT_DIR/sweep.log") 2>&1
 
 log "=============================================================="
@@ -184,8 +262,14 @@ while i < len(args):
     i += 1
 toks = spec.split()
 i = 0
+env_sets = {}
 while i < len(toks):
     k = toks[i]
+    if k.startswith("@"):          # "@VAR value" - переменная окружения двигателя (cfg["env"])
+        v = toks[i + 1] if i + 1 < len(toks) else ""
+        env_sets[k[1:]] = v
+        i += 2 if i + 1 < len(toks) else 1
+        continue
     if i + 1 < len(toks) and toks[i + 1] == "__FLAG__":
         kept.append(k)          # голый флаг без значения (--kv-whole)
         i += 2
@@ -220,6 +304,13 @@ while i < len(kept):
         final.append(a)
         i += 1
 cfg["args"] = final
+# env-ячейки: спека задаёт значения, а управляемые env-переменные вне спеки сносятся
+cfg.setdefault("env", {})
+env_managed = [k[1:] for k in spec.split() if k.startswith("@")]
+for k in list(cfg["env"]):
+    if k.startswith("STRATA_POLY_") and k not in env_sets and k not in ("STRATA_POLY_PIN_EXPERTS",):
+        del cfg["env"][k]
+cfg["env"].update(env_sets)
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
@@ -301,10 +392,10 @@ run_capture() {  # $1 = имя варианта
     --timeout "$TIMEOUT_S" ${extra[@]+"${extra[@]}"}
 }
 
-variant_done() {  # $1 = имя: уже есть валидный захват?
+variant_done() {  # $1 = имя: уже есть валидный захват СВОЕГО сьюта?
   local f="$OUT_DIR/$1.json"
   [[ -f "$f" ]] || return 1
-  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") else 1)' "$f" 2>/dev/null
+  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") and d.get("meta",{}).get("suite")==sys.argv[2] else 1)' "$f" "$SUITE" 2>/dev/null
 }
 
 # ------------------------- главный цикл -------------------------------------

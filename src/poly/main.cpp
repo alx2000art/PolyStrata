@@ -1031,6 +1031,10 @@ void usage() {
                  "                         thirty-second of the card, 256 to 768, or a sixteenth, 512 to 1024,\n"
                  "                         when the PC's free RAM is within 4 GiB of the model's files, and then\n"
                  "                         kept whole; else half of it after the first request)\n"
+                 "  --vram-pool            claim the card's VRAM once at load (what is free but for the reserve above,\n"
+                 "                         which is then the margin left outside), keep it for the whole run and move\n"
+                 "                         it between the expert cache and the attention caches as the context grows\n"
+                 "                         and shrinks, in 2 MiB pieces; nothing is given back to the card (needs VMM)\n"
                  "  --layer-split S        the model's layers across the CUDA devices this process sees, in their\n"
                  "                         order: S is auto (by each card's free VRAM) or the first layer of each\n"
                  "                         later card, as 20 or 20,30 (default: the first card alone)\n"
@@ -1092,6 +1096,22 @@ void usage() {
                  "                         (default 1; 0 = one launch, which that many rows fail)\n"
                  "  --idx-mma N            1: the indexer's scores on the tensor cores where the card has them\n"
                  "                         (default 1; 0 = the scalar kernel)\n"
+                 "  --expert-mma N         1: the experts' Q3_K products on this fork's own tensor-core kernel\n"
+                 "                         (prefill; the rows to a plain per-32 int8, the codes in f16 mma\n"
+                 "                         fragments); 0 = llama.cpp's generic mmq (default 0).  Needs sm_80+\n"
+                 "  --ram-experts-mib N    a RAM pool of this many MiB keeping the most used experts outside\n"
+                 "                         VRAM whole in the process's own memory: their reads stop touching\n"
+                 "                         the page cache, which holds the model's files only while nothing\n"
+                 "                         else wants the RAM (default 0 = through the page cache, as before)\n"
+                 "  --prefetch-k N         read ahead N of each token's likeliest experts of the next MoE layer,\n"
+                 "                         guessed on this layer's input while the card takes the next one's\n"
+                 "                         attention; the misses go into --ram-experts-mib's pool.  Decode and\n"
+                 "                         verify windows only (16 tokens at most); needs --ram-experts-mib\n"
+                 "                         (default 0 = never)\n"
+                 "  --resident-topk N      a decode window computes only the N heaviest of each token's routed\n"
+                 "                         experts, wherever they live, the top-1 always kept and the kept\n"
+                 "                         weights renormalised the model's way; prefill stays exact.  Changes\n"
+                 "                         the answers (Maya's Turbo's cap; DSv4 routes 6) (default 0 = all)\n"
                  "  --cpu-tiled N          1: the CPU experts' gate/up through the tiled K-quant kernels\n"                 "                         (default 1; 0 = the per-row vec_dot path)\n"                 "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -1168,6 +1188,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-context") o.max_context = std::atoi(val());
         else if (a == "--threads") o.threads = std::atoi(val());
         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
+        else if (a == "--vram-pool") o.vram_pool = true;
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
         else if (a == "--any-node") o.stay_near = false;
@@ -1206,6 +1227,10 @@ int main(int argc, char** argv) {
         else if (a == "--q8-dequant") o.q8_dequant = std::atoi(val());
         else if (a == "--attend-chunks") o.attend_chunks = std::atoi(val());
         else if (a == "--idx-mma") o.idx_mma = std::atoi(val());
+        else if (a == "--expert-mma") o.expert_mma = std::atoi(val());
+        else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoi(val());
+        else if (a == "--prefetch-k") o.prefetch_k = std::atoi(val());
+        else if (a == "--resident-topk") o.resident_topk = std::atoi(val());
         else if (a == "--cpu-tiled") o.cpu_tiled = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());

@@ -45,6 +45,9 @@ struct Options {
     int max_context = 8192;
     int threads = 0;              ///< 0: the CPUs this process may use
     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
+    bool vram_pool = false;       ///< one pool of VRAM claimed at load, kept for the whole run: the expert cache and the
+                                  ///< attention caches trade pieces of it and nothing is given back to the card; the
+                                  ///< reserve above is then the margin left outside it (needs VMM)
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
     bool gpu_experts = true;
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
@@ -87,6 +90,20 @@ struct Options {
                                   ///< launch, as before, which that many rows fail
     int idx_mma = 1;              ///< the indexer's scores on the tensor cores where the card has them; 0: the
                                   ///< scalar kernel
+    int expert_mma = 0;           ///< the experts' Q3_K products on the tensor cores through this fork's own
+                                  ///< kernel (expert_mma.hpp), and not llama.cpp's generic mmq; 0: the generic
+    int resident_topk = 0;        ///< a decode window computes only this many of each token's routed experts -
+                                  ///< the K heaviest, wherever they live, the top-1 always kept, the kept
+                                  ///< weights renormalised the model's way; prefill stays exact.  Changes the
+                                  ///< answers (Maya's Turbo's cap); 0 = every routed expert computes
+    int prefetch_k = 0;           ///< read ahead this many of each token's likeliest experts of the next MoE
+                                  ///< layer, guessed on this layer's input while the card takes the next one's
+                                  ///< attention; the misses go into the RAM pool (needs --ram-experts-mib);
+                                  ///< 0: never.  Decode and verify windows only (16 tokens at most)
+    int ram_experts_mib = 0;      ///< a RAM pool of this many MiB keeping the most used experts outside VRAM
+                                  ///< whole in the process's own memory (ram_pool.hpp): their reads stop
+                                  ///< touching the page cache, which holds the model's files only while
+                                  ///< nothing else wants the RAM; 0 = read through the page cache as before
     int cpu_tiled = 1;            ///< the CPU experts' gate/up through the vendored llama.cpp tiled K-quant
                                   ///< kernels (AVX512VNNI); 0: the per-row vec_dot path
     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
@@ -184,6 +201,8 @@ struct Stats {
 int most_likely(const float* logits, int n);
 
 class Mmq;
+class ExpertMma;
+class RamPool;
 
 /// A picture in a sequence: n rows that stand where n tokens would, each the vision encoder's output for a patch,
 /// as wide as a token's embedding.  The patches come line after line, nx to a line.
@@ -506,6 +525,7 @@ protected:
     void moe_rows(Layer& L, int il, int n);
     void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false,
                uint8_t* buf = nullptr);
+    void pf_read();                                         ///< the guess-reader's loop
     void mind_memory();
     void follow(int written);
     void follow_loop();
@@ -543,6 +563,11 @@ protected:
     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
     void vmm_unmap(Mapped& m, size_t bytes);
     void vmm_free(Mapped& m);
+    /// The pool (Options::vram_pool): handles of pg_ bytes, claimed once, that the maps take from and the unmaps give to.
+    void vpool_claim(size_t bytes);
+    bool vpool_claim_to_budget(size_t margin, size_t limit, size_t& claimed);
+    size_t vpool_bytes() const { return vpool_.size() * pg_; }
+    size_t kv_step_bytes() const;
     void shrink_cache(size_t bytes);
     int grow_cache(size_t bytes);
     void widen_stage();
@@ -603,6 +628,8 @@ protected:
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
+    mutable int route_used_ = 0;  ///< the experts a route() call picks: n_used_, or --resident-topk's K in a
+                                  ///< decode window (set by moe_rows, which knows the call's size)
     int rows_ = 1;            ///< tokens the scratch is sized for
     int read_rows_ = 1;       ///< the most tokens read() takes
     // read()'s calls between two layers: r_ holds two calls' rows, and with more calls than that the others'
@@ -638,6 +665,10 @@ protected:
     size_t exp_at_ = 0;
     Mapped arena_;               ///< its VRAM, when the card maps VRAM a piece at a time
     bool vmm_ = false;           ///< it does; without that every cache is as large as it can get from the start
+    bool pool_on_ = false;       ///< Options::vram_pool, with VMM
+    bool pool_claimed_ = false;  ///< fill_expert_cache() has claimed the pool
+    size_t pg_ = 0;              ///< the pool's handle size
+    std::vector<unsigned long long> vpool_;   ///< the pool's handles that are not mapped
     int device_ = 0;
     size_t grain_ = 0;           ///< what the card maps VRAM in
     std::vector<Kv> kv_;         ///< the attention caches that grow with the sequence
@@ -722,6 +753,14 @@ protected:
     std::unique_ptr<Mmq> mmq_;   ///< null when the card has no MMQ tile for the experts' types
     float *gu_ = nullptr, *hx_ = nullptr, *dx_ = nullptr;   ///< the rows' gate|up, hidden and down values
     void *mq_ = nullptr, *mq2_ = nullptr;                   ///< the rows quantized for the two products
+    void *mqm_ = nullptr, *mqm2_ = nullptr;                 ///< the same rows in expert_mma's own per-32 format
+    std::unique_ptr<RamPool> ram_pool_;                     ///< the kept experts outside VRAM, when it is on
+    std::thread pf_thread_;                                 ///< the guess-reader of the next MoE layer
+    std::mutex pf_m_;
+    std::condition_variable pf_cv_;
+    bool pf_req_ = false, pf_quit_ = false, pf_busy_ = false;
+    int pf_j_ = -1, pf_n_ = 0;                              ///< the layer the guess names, and its tokens
+    void *d_pf_ = nullptr, *h_pf_ = nullptr, *ev_pf_ = nullptr, *pf_scratch_ = nullptr;
     void* mqx_ = nullptr;                                   ///< lin()'s tokens quantized for a product
     int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
     int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...
@@ -756,7 +795,8 @@ protected:
     bool stage_lent_ = false;                     ///< the expert cache has lent the buffer VRAM (widen_stage())
     size_t stage_cut_ = 0;                        ///< what the cache gave up for it, which it takes back
     int stage_turn_ = 0;
-    std::vector<int32_t> ids_, count_, first_, group_, round_;
+    std::vector<int32_t> ids_, count_, first_, group_, round_, round_row_;
+    std::vector<int> staged_tiles_;   ///< STRATA_POLY_STAGED_TILES: the rows that end a size class of staged experts
     std::vector<float> route_tmp_;   ///< route()'s scratch, a share for each host thread
     struct Run {
         int c, j, m, most;   ///< the rows' class, its first cached expert and how many, the most rows one has

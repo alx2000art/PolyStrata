@@ -8,12 +8,22 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
 namespace strata::poly {
 namespace {
+
+// STRATA_POLY_TOPK_STATS=1: under --resident-topk, route() accumulates how much of a token's routed weight
+// the kept prefixes carry and prints the running shares every 2,048 capped tokens.
+const bool g_topk_stats = std::getenv("STRATA_POLY_TOPK_STATS") != nullptr;
+std::atomic<uint64_t> g_topk_tokens{0};
+std::atomic<double> g_topk_share[16] = {};
 
 constexpr int kHc = 4;   // what kernels.cu is written for; checked at load
 constexpr size_t kScoreBytes = size_t(128) << 20;   // a prompt batch's indexer scores at most
@@ -443,6 +453,9 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
         const float x = logits[e];
         probs[e] = std::sqrt(x > 20.0f ? x : std::log(1.0f + std::exp(x)));
     }
+    // --resident-topk: the window computes route_used_ experts (its K heaviest, the top-1 among them); the
+    // tail of the row is dropped (-1, weight 0) and the model's own normalisation renormalises the kept ones.
+    const int used = std::min(route_used_, n_used_);
     float sum = 0.f;
     if (!B.by_token.empty() && token >= 0 && token < n_vocab_) {
         for (int k = 0; k < n_used_; ++k) {
@@ -463,6 +476,27 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
             sum += w[k];
         }
     }
+    // the cap trims the full pick: the kept ones' sum feeds the model's normalisation, and under
+    // STRATA_POLY_TOPK_STATS the run accumulates how much of the routed weight the kept prefixes carry
+    if (used < n_used_) {
+        float full = 0.f, kept = 0.f;
+        for (int k = 0; k < n_used_; ++k) full += w[k];
+        for (int k = 0; k < used; ++k) kept += w[k];
+        if (g_topk_stats && full > 0.f) {
+            const uint64_t t = g_topk_tokens.fetch_add(1) + 1;
+            float pre = 0.f;
+            for (int k = 0; k < used; ++k) g_topk_share[(size_t) k].fetch_add((pre += w[k]) / full);
+            if (t % 2048 == 0) {
+                std::fprintf(stderr, "strata-poly: topk kept %d of %d over %llu tokens, weight share:",
+                             used, n_used_, (unsigned long long) t);
+                for (int k = 0; k < used; ++k)
+                    std::fprintf(stderr, " %d: %.1f%%", k + 1, 100.0 * g_topk_share[(size_t) k].load() / (double) t);
+                std::fprintf(stderr, "\n");
+            }
+        }
+        for (int k = used; k < n_used_; ++k) ids[k] = -1, w[k] = 0.f;
+        sum = kept;
+    }
     const float denom = w_norm_ ? std::max(sum, kMinWeightSum) : 1.f;
     for (int k = 0; k < n_used_; ++k) {
         w[k] /= denom;
@@ -473,6 +507,7 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
 bool DeepSeek4::route_card(int il, int n, int32_t* ids, float* w) {
     const Block& B = blocks_[(size_t) il];
     if (!B.by_token.empty()) return false;
+    if (route_used_ < n_used_) return false;   // the cap lives in route(); the card's rows know one width
     route_rows(rl_, n_expert_, n_used_, n, 2, 1.f, fp(B.probs_b_dev), nullptr, w_norm_, w_scale_, ids, w, st_);
     return true;
 }
