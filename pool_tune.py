@@ -52,7 +52,7 @@ def windows(codes, ne):
 
 class Ladder:
     def __init__(self, n_experts, vram_experts, pool_slots, n_swap, window_tokens, hit_windows,
-                 miss_windows, demote, warmup):
+                 miss_windows, demote, warmup, pin_layers=0, n_layers=1):
         self.n = n_experts
         self.cached = np.zeros(n_experts, dtype=bool)
         self.coming = np.zeros(n_experts, dtype=bool)
@@ -65,10 +65,25 @@ class Ladder:
         self.keep = np.float32(2.0 ** (-window_tokens / 128.0))   # kSwapHalf
         self.hit_windows, self.miss_windows = hit_windows, miss_windows
         self.demote, self.warmup = demote, warmup
+        self.pin_layers, self.n_layers = pin_layers, max(1, n_layers)   # pinned layers read their experts
+        self.ne = n_experts // self.n_layers                            # from registered RAM: the fast lane
+        self.settled = False
         self.window = 0
         self.vram_hits = self.misses = self.pool_hits = self.pool_misses = 0
         self.swaps = self.demotes = 0
         self.events = 0
+
+    def _settle(self):
+        """After the warmup the ladder takes the shape a server's own takes between its runs: the cache holds
+        the warmup's most used, the pool the next ones (the engine had past requests behind it)."""
+        top = np.argsort(self.recent)[::-1]
+        self.cached[:] = False
+        self.cached[top[: self.vram]] = True
+        self.coming[:] = False
+        self.swap_busy.clear()
+        if self.pool > 0:
+            self.pool_set = set(int(c) for c in top[self.vram: self.vram + self.pool])
+            self.pool_lru = list(self.pool_set)
 
     def _pool_touch(self, code):
         """The pool's LRU; returns 1 when the code was already in it."""
@@ -99,7 +114,9 @@ class Ladder:
                 self._pool_touch(best_out)
                 self.demotes += 1
             self.cached[best_out] = False
-            if self._pool_touch(best_in):
+            if best_in < self.pin_layers * self.ne:
+                arrive = self.hit_windows       # a pinned layer's expert reads from registered RAM: the fast
+            elif self._pool_touch(best_in):     # lane either way, the pool's counts are not its business
                 self.pool_hits += 1
                 arrive = self.hit_windows
             else:
@@ -121,6 +138,9 @@ class Ladder:
         self.swap_busy = still
         self.events += len(codes)
         late = self.events > self.warmup
+        if late and not self.settled:
+            self._settle()               # the warmup's own shape is not the server's between its runs
+            self.settled = True
         cs = np.fromiter(codes, dtype=np.int64, count=len(codes))
         self.recent[cs] += 1.0
         if late:
@@ -139,7 +159,7 @@ class Ladder:
 
 def replay(nl, ne, codes, args, pool_slots, demote):
     sim = Ladder(nl * ne, args.vram_experts, pool_slots, args.expert_swaps, args.window_tokens,
-                 args.hit_windows, args.miss_windows, demote, args.warmup)
+                 args.hit_windows, args.miss_windows, demote, args.warmup, args.pin_layers, nl)
     wins = windows(codes, ne)
     misses = 0
     for w in wins:
@@ -161,6 +181,9 @@ def main():
     ap.add_argument("--window-tokens", type=int, default=1, help="tokens a decode window writes (recent decay)")
     ap.add_argument("--hit-windows", type=int, default=1, help="windows an upload takes from a pool hit")
     ap.add_argument("--miss-windows", type=int, default=3, help="windows an upload takes from the file")
+    ap.add_argument("--pin-layers", type=int, default=0,
+                    help="the first N layers' experts live in registered RAM (STRATA_POLY_PIN_EXPERTS): their "
+                         "uploads take the fast lane whatever the pool does")
     ap.add_argument("--demote", action="store_true", help="also replay the demotion of evictions")
     ap.add_argument("--warmup", type=int, default=None,
                     help="events before the metrics start counting (default: the first 10%% of the stream)")
