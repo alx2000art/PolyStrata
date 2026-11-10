@@ -6,6 +6,8 @@
 #include "mmq.cuh"
 #include "quantize.cuh"
 
+#include <cstdio>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -22,6 +24,41 @@ int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 void ck(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
+}
+
+// STRATA_POLY_MMQ_DEBUG=1: the first expert-shaped mul of each distinct max_rows prints llama.cpp's per-J
+// config table for Q3_K on this card plus what their own mul_mat_q_switch_J would pick (the J whose tile count
+// of ncols_opt first beats every smaller J, stopped once one tile covers the whole call).  Where our expert
+// shapes stand in their table decides whether a custom kernel has room at all.
+void mmq_debug(int type, int64_t w_rows, int64_t max_rows) {
+    static std::set<int64_t> seen;
+    if (!std::getenv("STRATA_POLY_MMQ_DEBUG")) return;
+    if (seen.count(max_rows)) return;
+    seen.insert(max_rows);
+    const ggml_type t = (ggml_type) type;
+    const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
+    const bool fallback = w_rows % 128 != 0;
+    std::fprintf(stderr, "[mmq-debug] cc=%d smpbo=%ld type=%d w_rows=%ld fallback=%d ncols_opt=%ld\n", dev.cc,
+                 (long) dev.smpbo, type, (long) w_rows, (int) fallback, (long) max_rows);
+    int64_t ntiles_best = (max_rows + 127) / 128;
+    int J_best = 128;
+    for (int J = 8; J <= 128; J += 8) {
+        const ggml_cuda_mmq_config c = ggml_cuda_mmq_get_config(t, J, fallback, dev.cc);
+        if (c.type == GGML_TYPE_COUNT) {
+            std::fprintf(stderr, "[mmq-debug] J=%3d: (no config)\n", J);
+            continue;
+        }
+        const int nb = (int) mmq_get_nbytes_shared(c, dev.cc);
+        std::fprintf(stderr, "[mmq-debug] J=%3d: I=%d thr=%d smem=%5d stream_k=%d%s\n", J, c.I, c.nthreads, nb,
+                     (int) c.stream_k, nb <= dev.smpbo ? "" : "  (smem too big)");
+        if (nb <= dev.smpbo) {
+            const int64_t nt = (max_rows + J - 1) / J;
+            if (nt < ntiles_best) ntiles_best = nt, J_best = J;
+            if (J_best != 128 && ntiles_best <= 1) break;
+        }
+    }
+    const ggml_cuda_mmq_config c = ggml_cuda_mmq_get_config(t, J_best, fallback, dev.cc);
+    std::fprintf(stderr, "[mmq-debug] their pick: J=%d stream_k=%d\n", J_best, (int) c.stream_k);
 }
 
 }  // namespace
@@ -97,6 +134,7 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
               const int32_t* bounds, const int32_t* ids, int64_t total_rows, int64_t max_rows, float* dst,
               int64_t ld_dst, void* stream) {
     if (n <= 0 || max_rows <= 0) return;
+    mmq_debug(type, w_rows, max_rows);
     const ggml_type t = (ggml_type) type;
     // the matrices are the channels of x; the tokens' rows are the columns of y and of dst
     mmq_args a = {};
