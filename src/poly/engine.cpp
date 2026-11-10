@@ -2274,6 +2274,12 @@ void Engine::alloc() {
     } else if (opt_.prefetch_k > 0) {
         std::fprintf(stderr, "strata-poly: --prefetch-k needs --ram-experts-mib; the read-ahead stays off\n");
     }
+    if (opt_.expert_mma) {
+        const bool gu_ok = ExpertMma::fits(11, n_embd_), down_ok = ExpertMma::fits(11, n_ff_exp_);
+        std::fprintf(stderr, "strata-poly: --expert-mma on (the card's tensor cores take the Q3_K products: "
+                             "gate/up %s, down %s)\n",
+                     gu_ok ? "yes" : "no", down_ok ? "yes" : "no");
+    }
     route_used_ = n_used_;
     if (mmq_) {
         const size_t rr = n * n_used_,
