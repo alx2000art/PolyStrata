@@ -1794,6 +1794,7 @@ void Engine::route_dump_put(int il, int e) {
     route_buf_.push_back((uint16_t) ((size_t) il * (size_t) n_expert_ + (size_t) e));
     if (route_buf_.size() >= (size_t) 1 << 20) {
         std::fwrite(route_buf_.data(), 2, route_buf_.size(), (std::FILE*) route_dump_);
+        std::fflush((std::FILE*) route_dump_);
         route_buf_.clear();
     }
 }
@@ -1984,6 +1985,7 @@ void Engine::load(const Options& o) {
             std::fwrite("PRTD", 1, 4, f);
             const uint16_t dims[2] = {(uint16_t) layers_.size(), (uint16_t) n_expert_};
             std::fwrite(dims, 2, 2, f);
+            std::fflush(f);   // a hard stop must still leave a readable (chunk-truncated) dump
             std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: moe()'s routing goes to %s\n", p);
         } else {
             std::fprintf(stderr, "strata-poly: STRATA_POLY_ROUTE_DUMP: cannot open %s\n", p);
