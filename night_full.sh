@@ -36,11 +36,36 @@ if [[ -z "${API_KEY:-}" ]]; then
   exit 1
 fi
 
+# sweep_complete БАЗА ПРЕФИКС-RUN-ID: найден ли уже ЗАВЕРШЁННЫЙ забег этого рода
+# (папка с run-id.txt, начинающимся на префикс, и summary.md) — тогда шаг пропускается.
+sweep_complete() {
+  local d
+  for d in "$STRATA_DIR/$1" "$STRATA_DIR/$1"-*; do
+    [[ -d "$d" ]] || continue
+    [[ "$(cat "$d/run-id.txt" 2>/dev/null)" == "$2"* && -f "$d/summary.md" ]] && return 0
+  done
+  return 1
+}
+
 echo "=== ночная полная очередь: $(date) ===" | tee "$LOG"
 
-step decode  API_KEY="$API_KEY" ./bench_sweep_decode.sh
-step prefill API_KEY="$API_KEY" KNOBS_PRESET=prefill SUITE=long ./bench_sweep_decode.sh
-step poly    API_KEY="$API_KEY" ./bench_sweep.sh
+if sweep_complete bench_sweep_decode "decode/"; then
+  echo "=== [decode] уже снят полностью (забег с run-id decode/* и summary есть) — пропуск ===" | tee -a "$LOG"
+else
+  step decode API_KEY="$API_KEY" ./bench_sweep_decode.sh
+fi
+
+if sweep_complete bench_sweep_decode "long/prefill"; then
+  echo "=== [prefill] уже снят полностью — пропуск ===" | tee -a "$LOG"
+else
+  step prefill API_KEY="$API_KEY" KNOBS_PRESET=prefill SUITE=long ./bench_sweep_decode.sh
+fi
+
+if sweep_complete bench_sweep "poly"; then
+  echo "=== [poly] уже снят полностью — пропуск ===" | tee -a "$LOG"
+else
+  step poly API_KEY="$API_KEY" ./bench_sweep.sh
+fi
 
 echo "" | tee -a "$LOG"
 echo "=== ночь завершена: $(date) ===" | tee -a "$LOG"
