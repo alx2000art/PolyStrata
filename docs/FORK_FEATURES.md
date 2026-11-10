@@ -80,6 +80,7 @@ The chain adds these command-line switches to the engine:
 | `--attend-chunks N` | 1: a batch above 65535 rows is attended in launches of that many; 0: one launch | 1 |
 | `--idx-mma N` | 1: the indexer's scores on the tensor cores where the card has them; 0: the scalar kernel | 1 |
 | `--ram-experts-mib N` | a RAM pool of this many MiB keeping the most used experts outside VRAM whole in the process's own memory (an LRU of whole experts; the reads of a kept expert stop touching the page cache; the decode swaps read through it too - a miss settles into the pool and the next ask promotes out of RAM at memcpy speed, which holds the model's files only while nothing else wants the RAM). 0 = through the page cache, as before | 0 (off) |
+| `--vram-pool` | claim the card's VRAM once at load (all that is free but for the reserve) and hand it to the growing maps from a pool of handles, so the expert cache's and attention caches' stages stop asking the driver each time. Needs VMM, growing attention caches and one card | off |
 | `--resident-topk N` | a decode window computes only the N heaviest of each token's routed experts, wherever they live (the VRAM cache's included), the top-1 always kept, the kept weights renormalised the model's way; prefill stays exact. Changes the answers (Maya's Turbo's cap; DSv4 routes 6) | 0 (off) |
 | `--prefetch-k N` | read ahead N of each token's likeliest experts of the next MoE layer, guessed on this layer's input while the card takes the next one's attention; the misses go into --ram-experts-mib's pool. Decode and verify windows only (16 tokens at most); needs --ram-experts-mib | 0 (off) |
 | `--expert-mma N` | 1: the experts' Q3_K gate/up (and down, when it is Q3_K too) on this fork's own tensor-core kernel: the rows to a plain per-32 int8, the codes in f16 mma fragments; 0: llama.cpp's generic mmq. Needs sm_80+; other types stay on the generic mmq | 0 (off) |
@@ -88,6 +89,27 @@ The chain adds these command-line switches to the engine:
 
 The q8_0 KV cache is turned on per model with the engine's existing `--kv q8_0` flag, which this
 fork extends to DeepSeek V4 (it was qwen35moe-only before).
+
+## Verdicts of the live checks (DeepSeek V4 Flash 0731, one RTX 4080 SUPER, November 2026)
+
+- **`--ram-experts-mib 6144` — kept.** Quality-neutral (a ten-prompt battery at temperature 0
+  answers identically to the plain run; the pool's self-check passes 387/0, no torn slots), the
+  decode sweep puts 6144 ahead of 2048, the long talks hit rate at 64.6 percent.
+- **`--vram-pool` — kept.** Clean, the whole new configuration together runs at 350 to 640
+  prefill tokens a second at 25k context and 27.8 decode tokens a second — the best of the
+  readings so far.
+- **`--expert-mma` — rejected.** The first kernel loses to the generic mmq at prefill (180 to
+  280 tokens a second against 350 to 640 with it off) and its rounding on CUDA's stream-k
+  changes the answers over a long generation (echo loops, a switch of language, lost context).
+  The kernel stays in the tree as research, with its parity tests; a live return is only
+  thinkable alongside a bit-exact mode.
+- **`--resident-topk` — rejected on DSv4.** The router's weights are flat (the top-3 hold only
+  65 to 67 percent of the token's expert weight), the cap dulls the model. The cells are out of
+  the sweep.
+- **STRATA_POLY_STAGED_TILES (env)** — off for live use: the measured decode gain of 9.3
+  percent exists, but the same stream-k rounding class as --expert-mma.
+- **`--prefetch-k`** — not ported: the upstream series rides on foreign refactors; the native
+  `--ram-experts-mib` pool took over its part.
 
 ## How to use it
 
