@@ -162,7 +162,8 @@ def main():
     ap.add_argument("--hit-windows", type=int, default=1, help="windows an upload takes from a pool hit")
     ap.add_argument("--miss-windows", type=int, default=3, help="windows an upload takes from the file")
     ap.add_argument("--demote", action="store_true", help="also replay the demotion of evictions")
-    ap.add_argument("--warmup", type=int, default=1_000_000, help="events before the metrics start counting")
+    ap.add_argument("--warmup", type=int, default=None,
+                    help="events before the metrics start counting (default: the first 10%% of the stream)")
     ap.add_argument("--limit-events", type=int, default=0, help="only the first N events (0: all)")
     ap.add_argument("--fact-vram", type=float, default=None, help="the done line's expert-cache hit %%")
     ap.add_argument("--own-mib", type=int, default=None, help="this run's own pool, for the facts' check")
@@ -180,6 +181,9 @@ def main():
         all_codes.extend(s)
     if args.limit_events:
         all_codes = all_codes[: args.limit_events]
+    if args.warmup is None:
+        args.warmup = max(1, len(all_codes) // 10)   # the stream's own start warms the ladder
+    print(f"replay: {len(all_codes):,} events, warmup {args.warmup:,}")
 
     rows = []
     for mib in args.pool_mib:
