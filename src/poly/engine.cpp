@@ -369,6 +369,8 @@ struct Engine::Swap {
     uint8_t* slot = nullptr;       // where it goes in VRAM: the slot of the expert it replaces
     uint8_t* pinned = nullptr;
     cudaEvent_t done = nullptr;    // marks its upload
+    int d_il = -1, d_e = 0, d_b = -1;   // STRATA_POLY_EXPERT_DEMOTE: the slot's evicted expert and its
+                                        // landing buffer; the follower downloads it before the upload writes
 };
 
 Engine::Engine() = default;
@@ -385,6 +387,14 @@ Engine::~Engine() {
         }
         swap_cv_.notify_all();
         follower_.join();
+    }
+    if (demoter_.joinable()) {
+        {
+            std::lock_guard<std::mutex> l(demote_m_);
+            demote_quit_ = true;
+        }
+        demote_cv_.notify_all();
+        demoter_.join();
     }
     if (pf_thread_.joinable()) {
         {
@@ -1459,6 +1469,7 @@ void Engine::start_swaps() {
     }
     recent_.assign(use_.size(), 0.f);
     coming_.assign(use_.size(), 0);
+    start_demote();
     follower_ = std::thread([this] { follow_loop(); });
 }
 
@@ -1723,6 +1734,33 @@ void Engine::follow_loop() {
         const size_t e = (size_t) s->e, gu = L.gu_bytes;
         const cudaStream_t ss = cs(swap_st_);
         cudaError_t err = cudaSuccess;
+        // STRATA_POLY_EXPERT_DEMOTE: the slot this upload takes still holds the expert it evicted; the download
+        // of those weights lands ahead of the upload's write on this very stream, and the demoter's pool fill
+        // settles the landing once the copy is done.  This stream's order keeps the reading before the writing.
+        if (s->d_b >= 0) {
+            const Layer& Ld = layers_[(size_t) s->d_il];
+            const int b = s->d_b;
+            const int64_t bytes = (int64_t) 2 * Ld.gu_bytes + Ld.d_bytes;
+            err = cudaMemcpyAsync(demote_pin_[(size_t) b], s->slot, (size_t) bytes, cudaMemcpyDeviceToHost, ss);
+            if (err == cudaSuccess) {
+                err = cudaEventRecord((cudaEvent_t) demote_ev_[(size_t) b], ss);
+                if (err == cudaSuccess) {
+                    {
+                        std::lock_guard<std::mutex> l(demote_m_);
+                        demote_q_.push_back({s->d_il, s->d_e, b});
+                    }
+                    demote_cv_.notify_one();
+                } else {
+                    cudaGetLastError();
+                    demote_free_[(size_t) b] = 1;
+                    err = cudaSuccess;   // the demotion is lost, the trade keeps its own path
+                }
+            } else {
+                cudaGetLastError();
+                demote_free_[(size_t) b] = 1;
+                err = cudaSuccess;
+            }
+        }
         if ((size_t) s->il < pinned_layer_.size() && pinned_layer_[(size_t) s->il]) {
             // straight from the registered file view: the expert crosses RAM once, not three times (read, written to
             // the pinned buffer, read again), which the CPU's experts beside it feel (GLM 5.3 Flash: ~4 swaps a token)
@@ -1775,6 +1813,46 @@ void Engine::follow_loop() {
         }
         s->at.store(Swap::kSent);
     }
+}
+
+// The demotion: fills --ram-experts-mib's pool from the landing buffers of evicted cache experts (follow_loop()'s
+// downloads ahead of the uploads that replaced them).  A fill takes the pool's LRU slot as usual.
+void Engine::demote_loop() {
+    cudaSetDevice(device_);
+    std::unique_lock<std::mutex> lk(demote_m_);
+    for (;;) {
+        demote_cv_.wait(lk, [&] { return demote_quit_ || !demote_q_.empty(); });
+        if (demote_quit_ && demote_q_.empty()) return;   // still-open demotions land before the exit
+        const Demote d = demote_q_.back();
+        demote_q_.pop_back();
+        lk.unlock();
+        const cudaError_t wait = cudaEventSynchronize((cudaEvent_t) demote_ev_[(size_t) d.b]);
+        if (wait == cudaSuccess && ram_pool_) {
+            const Layer& L = layers_[(size_t) d.il];
+            ram_pool_->fill(d.il, d.e, demote_pin_[(size_t) d.b], demote_pin_[(size_t) d.b] + 2 * L.gu_bytes,
+                            2 * L.gu_bytes, L.d_bytes);
+            demoted_.fetch_add(1, std::memory_order_relaxed);
+        }
+        lk.lock();
+        demote_free_[(size_t) d.b] = 1;
+    }
+}
+
+// The landing buffers and the demoter's thread.  The filters: the pool has to be, then the setting is by env
+// (STRATA_POLY_EXPERT_DEMOTE=1).
+void Engine::start_demote() {
+    if (demote_on_ || !ram_pool_ || !std::getenv("STRATA_POLY_EXPERT_DEMOTE")) return;
+    demote_on_ = true;
+    for (int b = 0; b < kDemote; ++b) {
+        demote_pin_[b] = (uint8_t*) hmalloc(slot_max_, "the expert-demotion buffer");
+        cudaEvent_t ev = nullptr;
+        ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+        demote_ev_[(size_t) b] = ev;
+        demote_free_[b] = 1;
+    }
+    demoter_ = std::thread([this] { demote_loop(); });
+    std::fprintf(stderr, "strata-poly: STRATA_POLY_EXPERT_DEMOTE: evicted cache experts settle into the RAM pool "
+                         "(%d landing buffer(s) of %zu bytes)\n", kDemote, slot_max_);
 }
 
 // The cache follows what is written.  Called at the start of an eval, where nothing queued reads the cache, with
@@ -1878,6 +1956,19 @@ void Engine::follow(int written) {
         s->e = in.e;
         s->slot = given;
         given = nullptr;
+        // STRATA_POLY_EXPERT_DEMOTE: this upload evicts out's expert, whose weights still lie in the slot; a
+        // free landing buffer takes them before the follower's stream lets the upload overwrite it, and the
+        // demoter settles them into the pool.  With no buffer free (all the fills still open) the trade keeps
+        // its old path: the return reads the file.
+        s->d_il = -1, s->d_b = -1;
+        if (demote_on_) {
+            for (int b = 0; b < kDemote; ++b)
+                if (demote_free_[(size_t) b]) {
+                    demote_free_[(size_t) b] = 0;
+                    s->d_il = out.il, s->d_e = out.e, s->d_b = b;
+                    break;
+                }
+        }
         staged_il_ = -1;
         coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
         s->at.store(Swap::kAsked);

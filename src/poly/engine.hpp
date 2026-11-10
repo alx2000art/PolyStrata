@@ -529,6 +529,8 @@ protected:
     void mind_memory();
     void follow(int written);
     void follow_loop();
+    void start_demote();
+    void demote_loop();
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
@@ -834,6 +836,25 @@ protected:
     std::vector<uint8_t> coming_;    ///< per (layer, expert): on its way into the cache
     std::vector<Pick> in_, out_;     ///< per trade number: the experts to bring in, and the ones to give up
     std::vector<size_t> trade_at_;   ///< per trade number: how many of its pairs follow() has taken
+
+    // STRATA_POLY_EXPERT_DEMOTE=1: an upload replaces a slot whose expert is evicted from the cache; instead of
+    // sending it back to the file, the follower downloads the slot into one of the landing buffers and the
+    // demoter settles it into --ram-experts-mib's pool: the ladder's middle rung keeps the experts the cache saw
+    // lately, and a return stops reading the file.
+    struct Demote {
+        int il, e, b;   ///< the evicted expert, and its landing buffer's number
+    };
+    static constexpr int kDemote = 4;
+    bool demote_on_ = false;
+    uint8_t* demote_pin_[kDemote] = {};      ///< landing buffers, one a demotion at a time
+    void* demote_ev_[kDemote] = {};          ///< its landing's download (a cudaEvent_t)
+    int demote_free_[kDemote] = {};          ///< the buffer is back once the pool has taken its bytes
+    std::vector<Demote> demote_q_;           ///< the pool's fills still open
+    std::thread demoter_;
+    std::mutex demote_m_;
+    std::condition_variable demote_cv_;
+    bool demote_quit_ = false;
+    std::atomic<int64_t> demoted_{0};        ///< the cache's evictions that reached the pool
 
     int64_t pos_ = 0;
     const int32_t* tok_ = nullptr;       ///< the tokens of the call under way, a row each as h_rl_ has them (route())
