@@ -2982,16 +2982,22 @@ void Engine::start_spec() {
                          "pool while the card takes its batches\n", spec_m_);
 }
 
-// The hand-off: this layer's routed experts, the most used first, minus the cache's - the thread drops the
-// ones the pool already holds, so a re-read costs a pass over the list.
+// The hand-off: the NEXT MoE layer's whole non-cached set, settled under that layer's own keys while the card
+// takes the current one's batches - the pool holds two layers at once, so the next staging reads its experts
+// out of RAM at memcpy speed instead of faulting them in.  (The first cut filled this layer's keys, which the
+// staging had already settled reactively: settled 0 of 220 said it clearly.)  A cap below the layer's expert
+// count keeps only the current routing's most used - the neighbours' experts correlate.
 void Engine::stage_spec(int il) {
     if (!spec_on_) return;
-    const Layer& L = layers_[(size_t) il];
+    int next = il + 1;
+    while (next < (int) layers_.size() && !layers_[(size_t) next].moe) ++next;
+    if (next >= (int) layers_.size()) return;   // nothing follows
     if (all_cached()) return;
-    if (pinned_layer_.size() == layers_.size() && pinned_layer_[(size_t) il]) return;   // registered RAM: the
-    spec_cand_.clear();                                                                 // staging takes no pool
+    if (pinned_layer_.size() == layers_.size() && pinned_layer_[(size_t) next]) return;   // registered RAM: the
+    const Layer& Ln = layers_[(size_t) next];                                            // staging takes no pool
+    spec_cand_.clear();
     for (int e = 0; e < n_expert_; ++e)
-        if (count_[(size_t) e] > 0 && !L.slot[(size_t) e]) spec_cand_.push_back(e);
+        if (!Ln.slot[(size_t) e]) spec_cand_.push_back(e);
     std::stable_sort(spec_cand_.begin(), spec_cand_.end(), [&](int32_t a, int32_t b) {
         return count_[(size_t) a] > count_[(size_t) b];
     });
@@ -2999,7 +3005,7 @@ void Engine::stage_spec(int il) {
     if (spec_cand_.empty()) return;
     {
         std::lock_guard<std::mutex> l(spec_mx_);
-        spec_il_ = il;
+        spec_il_ = next;
         spec_experts_ = spec_cand_;
         spec_req_ = true;
     }
