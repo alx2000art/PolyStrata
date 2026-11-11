@@ -3165,6 +3165,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             route(il, h_rl_ + (size_t) t * n_expert_, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * n_used_,
                   w + (size_t) t * n_used_, tmp);
     });
+    const Clock::time_point t_route_end = Clock::now();
     count_.assign((size_t) n_expert_, 0);
     for (int i = 0; i < rr; ++i) {
         ++count_[(size_t) ids_[(size_t) i]];
@@ -3464,8 +3465,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
         if (s2_debug_) {
             const double card_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_card).count();
-            std::fprintf(stderr, "[moe] il=%d card %.0f ms, copies %.0f ms, rounds %d, cpu_rows %d\n",
-                         il, card_ms, copies, n_round, n_cpu);
+            const double route_ms = std::chrono::duration<double, std::milli>(t_route_end - t0).count();
+            std::fprintf(stderr, "[moe] il=%d route %.0f ms, card %.0f ms, copies %.0f ms, rounds %d, "
+                                 "cpu_rows %d\n", il, route_ms, card_ms, copies, n_round, n_cpu);
         }
     };
     if (n_cpu == 0) {
