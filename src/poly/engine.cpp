@@ -3030,9 +3030,12 @@ void Engine::spec_loop() {
         const Layer& L = layers_[(size_t) il];
         const size_t gu2 = 2 * L.gu_bytes;
         const bool by_file = L.gu_file != nullptr;   // positioned reads, ~10x the mapping's fault rate: the
-        int64_t filled = 0;                          // guess's bytes must land before the next layer stages
+        int64_t filled = 0, held = 0;                // guess's bytes must land before the next layer stages
         for (int32_t e : list) {
-            if (L.slot[(size_t) e] || ram_pool_->holds(il, e)) continue;
+            if (L.slot[(size_t) e] || ram_pool_->holds(il, e)) {
+                ++held;
+                continue;
+            }
             uint8_t* gu = (uint8_t*) spec_scratch_, * down = gu + gu2;
             try {
                 if (by_file) {
@@ -3052,8 +3055,8 @@ void Engine::spec_loop() {
         }
         spec_filled_.fetch_add(filled, std::memory_order_relaxed);
         if (debug)
-            std::fprintf(stderr, "[stage-spec] layer %d: settled %lld of %d candidates\n", il,
-                         (long long) filled, asked);
+            std::fprintf(stderr, "[stage-spec] layer %d: settled %lld of %d candidates (held %lld)\n", il,
+                         (long long) filled, asked, (long long) held);
         lk.lock();
     }
 }
