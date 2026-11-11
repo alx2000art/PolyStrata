@@ -97,13 +97,14 @@ def fill(make, r, title):
 
 def main():
     dest = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/prompts")
+    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1234   # a new seed: fresh text for a cold test
     os.makedirs(dest, exist_ok=True)
     for name, maker, title in (
         ("story-30k", lambda r, i: chapter(r, i), "Рассказ: Регистр и медный компас"),
         ("doc-30k", lambda r, i: doc_section(r, i), "Техническое описание: буферы, пулы и их настройка"),
         ("code-30k", lambda r, i: code_block(r, i), "Рабочая тетрадь: примеры и пояснения"),
     ):
-        text = fill(maker, random.Random(1234 + hash(name) % 1000), title)
+        text = fill(maker, random.Random(seed + hash(name) % 1000), title)
         path = os.path.join(dest, name + ".txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
