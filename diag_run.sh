@@ -105,13 +105,21 @@ git -C "$STRATA_DIR" stash push -m "diag auto" >/dev/null 2>&1 || true
 git -C "$STRATA_DIR" pull --ff-only 2>&1 | tail -2
 
 if [[ "${REBUILD:-0}" == 1 ]]; then
-    log "=== 2/4: пересборка (setup.sh --rebuild-engine, 3-5 минут; лог: $OUT_DIR/build.log) ==="
+    log "=== 2/4: пересборка (setup.sh --rebuild-engine; лог: $OUT_DIR/build.log) ==="
+    log "    setup сам поднимет модель в конце - скрипт погасит его, как только обновление кончится"
     stop_server
-    ( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 </dev/null > "$OUT_DIR/build.log" 2>&1 )
-    rc=$?
+    ( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 </dev/null >> "$OUT_DIR/build.log" 2>&1 ) &
+    SETUP=$!
+    for _ in $(seq 1 90); do   # до 15 минут: обновление кончилось, или setup поднял модель
+        grep -q "PolyStrata is updated\|^ready:" "$OUT_DIR/build.log" 2>/dev/null && break
+        kill -0 "$SETUP" 2>/dev/null || break
+        sleep 10
+    done
+    sleep 3
+    pkill -P "$SETUP" 2>/dev/null || true
+    kill "$SETUP" 2>/dev/null || true
+    stop_server   # whatever setup raised goes down: the cold run wants it cold
     tail -5 "$OUT_DIR/build.log"
-    (( rc != 0 )) && die "сборка кончилась с ошибкой $rc — смотри $OUT_DIR/build.log"
-    stop_server   # setup starts the engine itself: the cold run wants it cold
 else
     log "=== 2/4: пересборка пропущена (REBUILD=1 чтобы собрать) ==="
 fi
