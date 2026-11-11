@@ -2837,7 +2837,10 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         return;
     }
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
-    const bool by_file = opt_.file_reads;
+    // positioned reads over the mapping: a steady channel the page cache's state does not bend - the
+    // mapping's copies ran at the fault rate, and a prompt's staging ran at the speed of the file cache's
+    // luck (the saw-tooth the dmon kept showing).  The spec-reader and the follow's uploads read the same way.
+    const bool by_file = L.gu_file != nullptr;
     // --ram-experts-mib: the pool serves the mapped path (a file read goes to the files whatever the pool
     // holds); a task takes an expert whole, so a hit's two copies and a miss's fill never race each other.
     // The misses memcpy plainly: the fill reads its own bytes back, which non-temporal stores would not
