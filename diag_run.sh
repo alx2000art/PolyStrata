@@ -98,9 +98,13 @@ log "=== 1/5: git pull ==="
 git -C "$STRATA_DIR" stash push -m "diag auto" >/dev/null 2>&1 || true
 git -C "$STRATA_DIR" pull --ff-only 2>&1 | tail -2
 
-log "=== 2/5: пересборка strata-poly (setup.sh --rebuild-engine) ==="
+log "=== 2/5: пересборка strata-poly (setup.sh --rebuild-engine, 3-5 минут) ==="
+log "    прогресс в другом окне: tail -f $OUT_DIR/build.log"
 stop_server
-( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 ) 2>&1 | tail -3
+( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 </dev/null > "$OUT_DIR/build.log" 2>&1 )
+rc=$?
+tail -5 "$OUT_DIR/build.log"
+(( rc != 0 )) && die "сборка кончилась с ошибкой $rc — смотри $OUT_DIR/build.log"
 stop_server   # setup starts the engine itself: the cold run wants it cold
 
 log "=== 3/5: рестарт на холодном пуле, чистый лог ==="
