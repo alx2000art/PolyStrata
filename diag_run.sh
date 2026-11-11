@@ -117,6 +117,7 @@ fi
 
 log "=== 3/4: рестарт на холодном пуле ==="
 stop_server
+if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.diag-$(date +%H%M%S)" || true; fi
 # the server spawns the engine with the config's env block, not the caller's: the [moe] lines need their
 # switch inside the config
 python3 - "$CONFIG" <<'PYEOF'
@@ -140,12 +141,13 @@ sleep 2
 a=$(sectors)
 kill "$DMON" 2>/dev/null; wait "$DMON" 2>/dev/null
 
+ELOG="$LOG"   # the engine-side lines ([moe], [stage-spec]) go to the engine's own log, not the server's
 log ""
 log "=== ОТЧЁТ ==="
 log "-- [moe] слоёв 20+ (route / card / copies):"
-grep "\[moe\]" "$OUT_DIR/server.log.last" 2>/dev/null | awk -F"il=" '{split($2,a,","); if (a[1]+0 >= 20) print}' | head -100 | sed 's/^/   /'
+grep "\[moe\]" "$ELOG" 2>/dev/null | awk -F"il=" '{split($2,a,","); if (a[1]+0 >= 20) print}' | head -100 | sed 's/^/   /'
 log "-- fault-копии:"
-grep "copy took" "$OUT_DIR/server.log.last" 2>/dev/null | head -20 | sed 's/^/   /'
+grep "copy took" "$ELOG" 2>/dev/null | head -20 | sed 's/^/   /'
 log "-- dmon занятость:"
 awk '$5>=50 {hot++} $5<5 {idle++} END{printf "   busy: %d s, idle: %d s\n", hot, idle}' "$OUT_DIR/gpu_diag.log"
 log "-- SSD за прогон: $(( (a - b) * 512 / 1024 / 1024 )) MiB"
