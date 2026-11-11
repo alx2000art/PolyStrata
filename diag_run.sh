@@ -45,6 +45,9 @@ HOST="$(python3 -c "
 import json,sys
 h=json.load(open(sys.argv[1], encoding='utf-8-sig')).get('host') or '127.0.0.1'
 print('127.0.0.1' if h in ('0.0.0.0','::') else h)" "$CONFIG")"
+LOG="$(python3 -c "
+import json,sys
+print(json.load(open(sys.argv[1], encoding='utf-8-sig')).get('log') or '')" "$CONFIG")"
 BASE_URL="http://$HOST:$PORT/v1"
 HEALTH_URL="${BASE_URL%/v1}/health"
 
