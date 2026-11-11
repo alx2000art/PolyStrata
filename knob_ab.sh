@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
 # ============================================================================
-# pool_ab.sh - does a bigger --ram-experts-mib cut the prompt reads' disk
-# traffic?  The SSD sectors read are counted around the same request twice:
-# once on the config's own pool and once on the bigger one, each after a warm
-# run of the same prompt (the page cache's state is levelled by the warm run).
+# knob_ab.sh - A/B of one numeric config flag, live: does the change help?
 #
-# For every variant the script rewrites "--ram-experts-mib" in the config,
-# restarts the server, runs the prompt once to warm, then once more with the
-# disk counter around it, and prints both variants' deltas and done lines.
+#   PROMPT_FILE=/path/to/prompt.txt ./knob_ab.sh --stage2-mib 512 256
+#   PROMPT_FILE=/path/to/fresh.txt ./knob_ab.sh --ram-experts-mib 6144 12288
 #
-# usage: PROMPT_FILE=/path/to/fresh-text.txt ./pool_ab.sh
-#   the prompt file: 25-30k tokens of text the model has NOT read yet (a new
-#   chapter, a codebase dump...) - fresh, so the first touch shows at all;
-#   PROMPT_OFFSET/PROMPT_LIMIT can point at a slice of it (lines).
-#   API_KEY comes from the config's api_key field, as everywhere.
+# For every value the script rewrites the flag in the config, restarts the
+# server, runs the prompt once to warm, then runs it again with the meters
+# around it: the nvme sectors read, the prompt reading's tail and average
+# tok/s (the last and the span of the "reading the prompt" lines), and the
+# server's done line.  The config restores and the server comes back on it.
+#
+# The prompt: the same file serves both values, so the comparison is honest.
+# A prompt the model has already read works too (prompt-cache returns its
+# prefix; the fresh tail's speeds are what the meters catch).
 # ============================================================================
 set -uo pipefail
 
 STRATA_DIR="${STRATA_DIR:-$HOME/PolyStrata}"
 CONFIG="${CONFIG:-$STRATA_DIR/strata-dsv4-ud-iq2_xxs.json}"
-OUT_DIR="${OUT_DIR:-$STRATA_DIR/pool_ab}"
-VARIANTS=(${VARIANTS:-6144 12288})
+OUT_DIR="${OUT_DIR:-$STRATA_DIR/knob_ab}"
 MAX_TOKENS="${MAX_TOKENS:-384}"
 PROMPT_FILE="${PROMPT_FILE:-}"
 PROMPT_OFFSET="${PROMPT_OFFSET:-1}"
@@ -31,8 +30,12 @@ STOP_WAIT="${STOP_WAIT:-90}"
 log() { printf '%s\n' "$*"; }
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 
+FLAG="${1:-}"
+shift || true
+VALUES=("$@")
+[[ -n "$FLAG" && ${#VALUES[@]} -ge 2 ]] || die "usage: PROMPT_FILE=... ./knob_ab.sh --флаг значение1 значение2 [значение3 ...]"
 [[ -f "$CONFIG" ]] || die "нет конфига $CONFIG"
-[[ -n "$PROMPT_FILE" && -f "$PROMPT_FILE" ]] || die "укажи PROMPT_FILE=/путь/к/свежему/тексту.txt (25-30k токенов)"
+[[ -n "$PROMPT_FILE" && -f "$PROMPT_FILE" ]] || die "укажи PROMPT_FILE=/путь/к/промпту.txt"
 if [[ -z "${API_KEY:-}" ]]; then
     API_KEY="$(python3 -c "
 import json,sys
@@ -55,12 +58,11 @@ print('127.0.0.1' if h in ('0.0.0.0','::') else h)" "$CONFIG")"
 BASE_URL="http://$HOST:$PORT/v1"
 HEALTH_URL="${BASE_URL%/v1}/health"
 
-# the prompt's text: the file's slice, as one string
 PROMPT="$(awk -v a="$PROMPT_OFFSET" -v b="$PROMPT_LIMIT" 'NR>=a && (b==0 || NR<a+b)' "$PROMPT_FILE")"
 [[ -n "$PROMPT" ]] || die "PROMPT_FILE пуст"
 PROMPT_CHARS="${#PROMPT}"
 
-BACKUP="$CONFIG.pool-ab-backup-$(date +%Y%m%d-%H%M%S)"
+BACKUP="$CONFIG.knob-ab-backup-$(date +%Y%m%d-%H%M%S)"
 cp "$CONFIG" "$BACKUP" || die "не забэкапить конфиг"
 restore_config() { cp "$BACKUP" "$CONFIG"; }
 on_interrupt() {
@@ -99,15 +101,15 @@ wait_ready() {
     return 1
 }
 
-# the pool size lives in the config's args list, right after "--ram-experts-mib"
-set_pool_mib() {
-    python3 - "$CONFIG" "$1" <<'PYEOF'
+# the flag's value lives in the config's args list, right after the flag itself
+set_flag() {
+    python3 - "$CONFIG" "$FLAG" "$1" <<'PYEOF'
 import json, os, sys
-path, mib = sys.argv[1], sys.argv[2]
+path, flag, val = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = json.load(open(path, encoding="utf-8-sig"))
 args = cfg["args"] if isinstance(cfg.get("args"), list) else cfg["args"].split()
-i = args.index("--ram-experts-mib")
-args[i + 1] = str(mib)
+i = args.index(flag)
+args[i + 1] = str(val)
 cfg["args"] = args
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
@@ -116,7 +118,6 @@ os.replace(tmp, path)
 PYEOF
 }
 
-# one request of the prompt; the reply lands in $1, the wall time is printed
 ask() {
     printf '%s' "$PROMPT" > "$1.prompt"
     python3 - "$BASE_URL" "$API_KEY" "$MODEL" "$1" "$MAX_TOKENS" <<'PYEOF'
@@ -139,50 +140,66 @@ print(f"  elapsed {el:.0f} s, prompt {u.get('prompt_tokens')} tok, completion {u
 PYEOF
 }
 
-# the whole disk's sectors read (all nvme namespaces)
 sectors() { awk '$3 ~ /^nvme[0-9]+n[0-9]+$/{s+=$6} END{print s+0}' /proc/diskstats; }
 
+# one "reading the prompt:" line -> (tokens, s, tok/s); the numbers carry commas
+reading_fields() {  # $1 = the line; prints "tokens s toks"
+    printf '%s' "$1" | sed 's/.*reading the prompt: //' | tr -d ',' | awk '{print $1, $5, $9}'
+}
+
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
-printf '%s' "$PROMPT" > "$OUT_DIR/last.prompt"
-log "=== pool A/B: промпт $PROMPT_CHARS символов из $PROMPT_FILE, max_tokens $MAX_TOKENS ==="
-log "    варианты: ${VARIANTS[*]} (каждый: прогрев-запрос, затем замеренный повтор)"
+log "=== knob A/B: $FLAG ${VALUES[*]} ==="
+log "    промпт: $PROMPT_CHARS символов из $PROMPT_FILE, max_tokens $MAX_TOKENS"
+log "    каждый вариант: прогрев-запрос, затем замеренный повтор (SSD, tok/s, done)"
 log ""
 
-declare -A DELTA DECLINE
-for V in "${VARIANTS[@]}"; do
-    log "=== пул $V MiB ==="
-    set_pool_mib "$V"
+declare -A R_TAIL R_AVG R_SSD R_DONE
+for V in "${VALUES[@]}"; do
+    log "=== $FLAG $V ==="
+    set_flag "$V"
     stop_server
     start_server
     if ! wait_ready; then
         log "  сервер не поднялся — пропуск"
-        DELTA[$V]="-1"; DECLINE[$V]="СЕРВЕР НЕ ПОДНЯЛСЯ"
+        R_SSD[$V]="?"; R_TAIL[$V]="?"; R_AVG[$V]="?"; R_DONE[$V]="СЕРВЕР НЕ ПОДНЯЛСЯ"
         continue
     fi
-    log "  прогрев (тот же промпт, ответ в $OUT_DIR/warm-$V.txt) ..."
+    log "  прогрев (ответ в $OUT_DIR/warm-$V.txt) ..."
     ask "$OUT_DIR/warm-$V.txt" || true
     sleep 3
-    local_b=$(sectors)
+    mark=$(( $(wc -l < "$OUT_DIR/server.log") + 1 ))
+    b=$(sectors)
     log "  замеренный прогон ..."
     ask "$OUT_DIR/run-$V.txt" || true
     sleep 2
-    local_a=$(sectors)
-    d=$(( (local_a - local_b) * 512 / 1024 / 1024 ))
-    DELTA[$V]=$d
-    DECLINE[$V]="$(grep '\[strata\] done:' "$OUT_DIR/server.log" | tail -1)"
-    log "  SSD за замеренный прогон: $d MiB"
-    log "  done: ${DECLINE[$V]}"
+    a=$(sectors)
+    tail -n "+$mark" "$OUT_DIR/server.log" > "$OUT_DIR/segment-$V.log"
+    first=$(grep '\[strata\] reading the prompt:' "$OUT_DIR/segment-$V.log" | head -1)
+    last=$(grep '\[strata\] reading the prompt:' "$OUT_DIR/segment-$V.log" | tail -1)
+    if [[ -n "$first" && -n "$last" ]]; then
+        read t1 s1 _ <<< "$(reading_fields "$first")"
+        read t2 s2 v2 <<< "$(reading_fields "$last")"
+        dt=$(( s2 > s1 ? s2 - s1 : 1 ))
+        R_AVG[$V]=$(( (t2 - t1) / dt ))
+        R_TAIL[$V]=$v2
+    else
+        R_AVG[$V]="?"; R_TAIL[$V]="?"
+    fi
+    R_SSD[$V]=$(( (a - b) * 512 / 1024 / 1024 ))
+    R_DONE[$V]="$(grep '\[strata\] done:' "$OUT_DIR/server.log" | tail -1)"
+    log "  хвост чтения ${R_TAIL[$V]} tok/s, средняя ${R_AVG[$V]} tok/s, SSD ${R_SSD[$V]} MiB"
     log ""
 done
 
 restore_config
-log "=== ИТОГ ==="
-for V in "${VARIANTS[@]}"; do
-    log "  пул $V MiB: SSD ${DELTA[$V]:-?} MiB   (${DECLINE[$V]:-})"
+log "=== ИТОГ: $FLAG ==="
+printf '%s\n' "  значение | хвост tok/s | средняя tok/s | SSD MiB | done"
+for V in "${VALUES[@]}"; do
+    printf '  %8s | %11s | %13s | %7s | %s\n' "$V" "${R_TAIL[$V]:-?}" "${R_AVG[$V]:-?}" "${R_SSD[$V]:-?}" "${R_DONE[$V]:-}"
 done
 log ""
-log "  вердикт: у большего пула SSD-дельта заметно ниже и хвостовая tok/s выше"
-log "  → поднять --ram-experts-mib; разница в шуме → сидеть на своём."
+log "  вердикт: сравни хвост/среднюю tok/s и SSD между значениями; decode смотри"
+log "  в done-строках (tok/s там — decode всей генерации)."
 log ""
 log "восстанавливаю конфиг и сервер на нём ..."
 stop_server
