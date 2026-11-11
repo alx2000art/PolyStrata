@@ -774,7 +774,7 @@ protected:
     std::vector<int32_t> spec_cand_, spec_experts_;
     int spec_il_ = 0;
     std::thread spec_thread_;
-    std::mutex spec_m_;
+    std::mutex spec_mx_;
     std::condition_variable spec_cv_;
     bool spec_req_ = false, spec_quit_ = false;
     std::atomic<int64_t> spec_filled_{0};

@@ -402,7 +402,7 @@ Engine::~Engine() {
     }
     if (spec_thread_.joinable()) {
         {
-            std::lock_guard<std::mutex> l(spec_m_);
+            std::lock_guard<std::mutex> l(spec_mx_);
             spec_quit_ = true;
         }
         spec_cv_.notify_all();
@@ -2998,7 +2998,7 @@ void Engine::stage_spec(int il) {
     if ((int) spec_cand_.size() > spec_m_) spec_cand_.resize((size_t) spec_m_);
     if (spec_cand_.empty()) return;
     {
-        std::lock_guard<std::mutex> l(spec_m_);
+        std::lock_guard<std::mutex> l(spec_mx_);
         spec_il_ = il;
         spec_experts_ = spec_cand_;
         spec_req_ = true;
@@ -3011,7 +3011,7 @@ void Engine::stage_spec(int il) {
 void Engine::spec_loop() {
     cudaSetDevice(device_);
     static const bool debug = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
-    std::unique_lock<std::mutex> lk(spec_m_);
+    std::unique_lock<std::mutex> lk(spec_mx_);
     for (;;) {
         spec_cv_.wait(lk, [&] { return spec_quit_ || spec_req_; });
         if (spec_quit_) return;
