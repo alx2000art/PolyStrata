@@ -427,7 +427,9 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
             if (at || (pos + t + c) / 4 > idx_top_k_)
                 dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys, score_,
                                score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, st_, at_t, sized,
-                               opt_.idx_mma);
+                               // the mma scorer wins at the decode windows' shapes (few tokens, a long history:
+                               // +17% decode) and loses at the prompt batches' (6500 tokens: -8% of the read):
+                               opt_.idx_mma && n <= 16);
             dsv4_select(score_, score_stride_, sel_ + (size_t) t * idx_top_k_, idx_top_k_, idx_top_k_, 4, pos + t, c,
                         st_, at_t);
         }
