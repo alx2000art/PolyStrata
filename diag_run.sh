@@ -107,7 +107,7 @@ git -C "$STRATA_DIR" pull --ff-only 2>&1 | tail -2
 if [[ "${REBUILD:-0}" == 1 ]]; then
     log "=== 2/4: пересборка (setup.sh --rebuild-engine --no-start; лог: $OUT_DIR/build.log) ==="
     stop_server
-    ( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 --no-start --yes </dev/null >> "$OUT_DIR/build.log" 2>&1 )
+    ( cd "$STRATA_DIR" && ./setup.sh --update --rebuild-engine --cuda 13 --no-start --yes </dev/null >> "$OUT_DIR/build.log" 2>&1 )
     rc=$?
     tail -5 "$OUT_DIR/build.log"
     (( rc != 0 )) && die "сборка кончилась с ошибкой $rc — смотри $OUT_DIR/build.log"
