@@ -63,7 +63,7 @@ stop_server() {
 }
 start_server() {
     : > "$OUT_DIR/server.log.last"
-    ( cd "$STRATA_DIR" && nohup "$STRATA_DIR/.venv/bin/python" "$STRATA_DIR/serve/server.py" \
+    ( cd "$STRATA_DIR" && STRATA_POLY_STAGE2_DEBUG=1 nohup "$STRATA_DIR/.venv/bin/python" "$STRATA_DIR/serve/server.py" \
         --engine strata --config "$CONFIG" --port "$PORT" \
         >> "$OUT_DIR/server.log.last" 2>&1 & echo $! > "$OUT_DIR/server.pid" )
     log "  сервер запущен (pid $(cat "$OUT_DIR/server.pid")), лог: $OUT_DIR/server.log.last"
