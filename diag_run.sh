@@ -101,6 +101,7 @@ git -C "$STRATA_DIR" pull --ff-only 2>&1 | tail -2
 log "=== 2/5: пересборка strata-poly (setup.sh --rebuild-engine) ==="
 stop_server
 ( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 ) 2>&1 | tail -3
+stop_server   # setup starts the engine itself: the cold run wants it cold
 
 log "=== 3/5: рестарт на холодном пуле, чистый лог ==="
 if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.diag-$(date +%H%M%S)" || true; fi
