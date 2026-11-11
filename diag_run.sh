@@ -47,6 +47,7 @@ HEALTH_URL="${BASE_URL%/v1}/health"
 
 PROMPT="$(awk -v a="$PROMPT_OFFSET" -v b="$PROMPT_LIMIT" 'NR>=a && (b==0 || NR<a+b)' "$PROMPT_FILE")"
 [[ -n "$PROMPT" ]] || die "PROMPT_FILE пуст (проверь PROMPT_OFFSET - файл короткий?)"
+mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
 
 port_open() { timeout 2 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; }
 stop_server() {
@@ -97,11 +98,11 @@ log "=== 1/5: git pull ==="
 git -C "$STRATA_DIR" stash push -m "diag auto" >/dev/null 2>&1 || true
 git -C "$STRATA_DIR" pull --ff-only 2>&1 | tail -2
 
-log "=== 2/5: пересборка strata-poly ==="
-"$STRATA_DIR/.venv/bin/cmake" --build "$STRATA_DIR/build-poly" --target strata-poly -j 16 2>&1 | tail -2
+log "=== 2/5: пересборка strata-poly (setup.sh --rebuild-engine) ==="
+stop_server
+( cd "$STRATA_DIR" && ./setup.sh --rebuild-engine --cuda 13 ) 2>&1 | tail -3
 
 log "=== 3/5: рестарт на холодном пуле, чистый лог ==="
-stop_server
 if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.diag-$(date +%H%M%S)" || true; fi
 start_server
 wait_ready || die "сервер не поднялся — смотри $LOG"
