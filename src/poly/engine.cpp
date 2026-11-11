@@ -3023,13 +3023,24 @@ void Engine::spec_loop() {
         lk.unlock();
         const Layer& L = layers_[(size_t) il];
         const size_t gu2 = 2 * L.gu_bytes;
-        int64_t filled = 0;
+        const bool by_file = L.gu_file != nullptr;   // positioned reads, ~10x the mapping's fault rate: the
+        int64_t filled = 0;                          // guess's bytes must land before the next layer stages
         for (int32_t e : list) {
             if (L.slot[(size_t) e] || ram_pool_->holds(il, e)) continue;
             uint8_t* gu = (uint8_t*) spec_scratch_, * down = gu + gu2;
-            std::memcpy(gu, L.exp_gate + (size_t) e * L.gu_stride, L.gu_bytes);
-            std::memcpy(gu + L.gu_bytes, L.exp_up + (size_t) e * L.gu_stride, L.gu_bytes);
-            std::memcpy(down, L.exp_down + (size_t) e * L.d_bytes, L.d_bytes);
+            try {
+                if (by_file) {
+                    L.gu_file->read(L.gu_at + (size_t) e * L.gu_stride, gu, L.gu_bytes);
+                    L.up_file->read(L.up_at + (size_t) e * L.gu_stride, gu + L.gu_bytes, L.gu_bytes);
+                    L.d_file->read(L.d_at + (size_t) e * L.d_bytes, down, L.d_bytes);
+                } else {
+                    std::memcpy(gu, L.exp_gate + (size_t) e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(gu + L.gu_bytes, L.exp_up + (size_t) e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(down, L.exp_down + (size_t) e * L.d_bytes, L.d_bytes);
+                }
+            } catch (const std::exception&) {
+                continue;   // a read that fails loses this expert, not the engine
+            }
             ram_pool_->fill(il, e, gu, down, gu2, L.d_bytes);
             ++filled;
         }
