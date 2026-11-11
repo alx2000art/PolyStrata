@@ -117,6 +117,17 @@ fi
 
 log "=== 3/4: рестарт на холодном пуле ==="
 stop_server
+# the server spawns the engine with the config's env block, not the caller's: the [moe] lines need their
+# switch inside the config
+python3 - "$CONFIG" <<'PYEOF'
+import json, os, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
+tmp = sys.argv[1] + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=1)
+os.replace(tmp, sys.argv[1])
+PYEOF
 start_server
 wait_ready || die "сервер не поднялся — смотри $OUT_DIR/server.log.last"
 
