@@ -3335,6 +3335,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     bool held_in2 = staged_in2_;   // and the buffer it sits in, until an upload of this call moves it
     // The card's part.  With the CPU's beside it, the rows of its experts' places are left at nothing.
     const auto card = [&] {
+        const Clock::time_point t_card = Clock::now();
+        double copies = 0;   // the staging rounds' fault-copying, the saw-tooth's prime suspect
         if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * n_embd_ * sizeof(float), cs(st_)), "expert rows");
         if (rg > 0) {
             if (xm) ExpertMma::quantize(xn_, d_tok, mqm_, n_embd_, n_embd_, rg, st_);
@@ -3412,7 +3414,11 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                 if (s2_debug_) std::fprintf(stderr,
                     "[stage2] il=%d upload r=%d/%d buf=%d kept=%d early=%d mine=%d g0=%d m=%d rows=%d\n",
                     il, r, n_round, (int) second, kept, (int) early, (int) mine, g0, m, rows);
+                const Clock::time_point t_cp = Clock::now();
                 stage(L, group_.data() + g0, m, up_, n_cpu > 0, buf);
+                const double cp = std::chrono::duration<double, std::milli>(Clock::now() - t_cp).count();
+                copies += cp;
+                if (s2_debug_) std::fprintf(stderr, "[stage2] il=%d copy r=%d took %.0f ms\n", il, r, cp);
                 ck(cudaEventRecord((cudaEvent_t) rdy, cs(up_)), "expert staging");
                 holds = r;
                 held_in2 = second;
@@ -3456,6 +3462,11 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ck(cudaEventRecord((cudaEvent_t) fre, cs(st_)), "expert staging");
         }
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
+        if (s2_debug_) {
+            const double card_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_card).count();
+            std::fprintf(stderr, "[moe] il=%d card %.0f ms, copies %.0f ms, rounds %d, cpu_rows %d\n",
+                         il, card_ms, copies, n_round, n_cpu);
+        }
     };
     if (n_cpu == 0) {
         card();
@@ -3475,6 +3486,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         const double cpu = ms_since(start);
         behind.wait();
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
+        if (s2_debug_)
+            std::fprintf(stderr, "[moe] il=%d cpu %.0f ms / gpu %.0f ms (both had to run in parallel)\n", il, cpu,
+                         gpu);
         stats_.cpu_ms += cpu;
         stats_.cpu_experts += (int64_t) host_.size();
         // the share that would have had both done at once, if each one's time grows with its share
