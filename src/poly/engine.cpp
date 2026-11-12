@@ -2131,8 +2131,7 @@ void Engine::load(const Options& o) {
         mapper_ = std::thread([this, spans = std::move(spans)] { map_pages(spans, map_quit_); });
     else if (spec_on_)
         std::fprintf(stderr, "strata-poly: the mapping's warmer stays off: the staging's guess-reader warms the "
-                             "page cache ahead of the layers the read routes to (STRATA_POLY_STAGE_SPEC)
-");
+                             "page cache ahead of the layers the read routes to (STRATA_POLY_STAGE_SPEC)\n");
 }
 
 void Engine::load_drafter() {
