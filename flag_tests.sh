@@ -28,12 +28,17 @@ die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
 
 declare -A TABLE
+
 run() {  # $1 = метка, $2 = флаг, $3 = значение A, $4 = значение B
-    local label="$1" flag="$2" a="$3" b="$4" f="$OUT_DIR/$label.log"
+    local label="$1"
+    local flag="$2"
+    local a="$3"
+    local b="$4"
+    local f="$OUT_DIR/$label.log"
     log ""
     log "=== A/B: $flag $a $b ($label) ==="
     PROMPT_FILE="$PROMPT_FILE" "$STRATA_DIR/knob_ab.sh" "$flag" "$a" "$b" 2>&1 | tee "$f" | tail -10
-    TABLE[$label]="$(sed -n '/=== ИТОГ/,$p' "$f" | head -8)"
+    TABLE["$label"]="$(sed -n '/=== ИТОГ/,$p' "$f" | head -8)"
 }
 
 run prefetch --prefetch-k 0 4
