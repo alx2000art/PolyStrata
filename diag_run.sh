@@ -127,6 +127,7 @@ python3 - "$CONFIG" <<'PYEOF'
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
+cfg.setdefault("env", {})["STRATA_POLY_STAGE_SPEC"] = "256"
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
