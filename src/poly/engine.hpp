@@ -538,6 +538,7 @@ protected:
     void mind_memory();
     void follow(int written);
     void follow_loop();
+    void trade_experts();
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
@@ -875,6 +876,11 @@ protected:
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     std::vector<int64_t> heat_;          ///< what the read under way has routed to, a count each (moe_rows);
                                          ///< folded into recent_ and cleared at the read's end (Engine::read)
+    std::vector<int64_t> warm_heat_;     ///< what the read's last call routed to: the answer's first windows
+                                         ///< route like it, so it folds into recent_ at the read's end
+                                         ///< whatever --read-heat says, and a trade pass goes out at once
+    int warm_last_il_ = -1;              ///< the last layer moe_rows counted: its index restarting says the
+                                         ///< read's next call began, and the accumulator keeps that call's
     bool in_read_ = false;               ///< a read() is running: its prompt batches count their routing into
                                          ///< heat_ (nothing else counts there; use_ counts every path)
     Stats stats_;

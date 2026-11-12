@@ -1827,7 +1827,6 @@ void Engine::follow(int written) {
     // first token claim them.
     if (freeze_experts_) return;
     const size_t ne = (size_t) n_expert_;
-    int n_free = 0;
     for (int j = 0; j < n_swap_; ++j) {
         Swap& s = swap_[(size_t) j];
         if (s.at.load() == Swap::kSent) {
@@ -1840,16 +1839,24 @@ void Engine::follow(int written) {
             ++stats_.swapped_experts;
             staged_il_ = -1;   // the staging buffer holds what was not cached
         }
-        n_free += s.at.load() == Swap::kFree;
     }
     if (written <= 0) return;
     const float keep = std::exp2(-(float) written / (float) kSwapHalf);
     for (float& r : recent_) r *= keep;
+    trade_experts();
+}
+
+// follow()'s trades, without its decay: one pass over the experts lists, for each slot size, the ones that may
+// come in, the most used first, and the cached ones that may go, the least used first: as many of each as
+// uploads are free, which is all the pairs below can take.  A pass for every upload was 0.6 ms of a window of
+// GLM 5.3 Flash's.  The warm fold at a read's end calls it too, before the answer's first window waits on its
+// experts (the uploads run on the swap stream while the first windows compute).
+void Engine::trade_experts() {
+    const size_t ne = (size_t) n_expert_;
+    int n_free = 0;
+    for (int j = 0; j < n_swap_; ++j) n_free += swap_[(size_t) j].at.load() == Swap::kFree;
     if (n_free == 0) return;
 
-    // One pass over the experts lists, for each slot size, the ones that may come in, the most used first, and
-    // the cached ones that may go, the least used first: as many of each as uploads are free, which is all the
-    // pairs below can take.  A pass for every upload was 0.6 ms of a window of GLM 5.3 Flash's.
     const size_t most = (size_t) n_free;
     in_.assign((size_t) n_trade_ * most, Pick{});
     out_.assign((size_t) n_trade_ * most, Pick{});
@@ -2393,6 +2400,7 @@ void Engine::alloc() {
     }
     use_.assign(layers_.size() * n_expert_, 0);
     heat_.assign(layers_.size() * n_expert_, 0);
+    warm_heat_.assign(layers_.size() * n_expert_, 0);
     // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
     // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.  Here,
     // where layers_ and n_expert_ are final (alloc() runs after load_geometry()).
@@ -3188,6 +3196,13 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         // runs (plan_ahead) and for the cache at its end (Engine::read folds it into recent_)
         if (in_read_ && opt_.read_heat != 0 && !heat_.empty())
             ++heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
+        // the answer's first windows route like the read's tail: the accumulator keeps the current call's
+        // routes alone, the layer index restarting saying the read's next call began
+        if (in_read_ && !warm_heat_.empty()) {
+            if (il <= warm_last_il_) std::fill(warm_heat_.begin(), warm_heat_.end(), 0);
+            warm_last_il_ = il;
+            ++warm_heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
+        }
     }
     // STRATA_POLY_STAGE_SPEC: this layer's routing is the next one's likeliest (the neighbours' experts
     // correlate), and the pool is filled with it while the card takes this layer's batches.
@@ -4253,6 +4268,27 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             if (heat_[i] > 0) recent_[i] += (float) std::min<int64_t>(heat_[i], kSwapHeat);
             heat_[i] = 0;
         }
+    // The answer's first windows route like the read's tail: the last call's routes fold into recent_ whatever
+    // --read-heat says (that switch governs the staging's order and the cache's take at the read's end; the
+    // decode's trades need the signal even with it off - on a cold start recent_ has nothing else, and the
+    // first windows wait on routes that have not happened yet), and one trade pass goes out now - its uploads
+    // stream on the swap stream while the first windows compute.
+    static const bool warm_dbg = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
+    if (n_swap_ > 0 && !freeze_experts_ && !recent_.empty() && !warm_heat_.empty()) {
+        int folded = 0;
+        for (size_t i = 0; i < warm_heat_.size(); ++i) {
+            if (warm_heat_[i] > 0) {
+                recent_[i] += (float) std::min<int64_t>(warm_heat_[i], kSwapHeat);
+                ++folded;
+            }
+            warm_heat_[i] = 0;
+        }
+        warm_last_il_ = -1;
+        trade_experts();
+        if (warm_dbg)
+            std::fprintf(stderr, "[warm] the read's tail folded %d experts into recent_, the trades asked\n",
+                         folded);
+    }
     r_ = r0;
     pos_ = pos0;
     if (next_) {
