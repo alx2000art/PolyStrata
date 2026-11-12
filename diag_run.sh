@@ -53,6 +53,7 @@ HEALTH_URL="${BASE_URL%/v1}/health"
 
 PROMPT="$(awk -v a="$PROMPT_OFFSET" -v b="$PROMPT_LIMIT" 'NR>=a && (b==0 || NR<a+b)' "$PROMPT_FILE")"
 [[ -n "$PROMPT" ]] || die "PROMPT_FILE пуст (проверь PROMPT_OFFSET - файл короткий?)"
+PROMPT_CHARS="${#PROMPT}"
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
 
 port_open() { timeout 2 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; }
