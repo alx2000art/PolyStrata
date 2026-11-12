@@ -32,13 +32,16 @@ log() { printf '%s\n' "$*"; }
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 
 ENV_NAME=""
+FLAG=""
 if [[ "${1:-}" == "--env" ]]; then   # --env ПЕРЕМЕННАЯ значение1 значение2 ...: an env-block variable's A/B;
-    shift                            # the value "off" removes the variable for that run
-    ENV_NAME="${1:-}"
+    shift                            # the value "off" removes the variable for that run.  The name takes
+    ENV_NAME="${1:-}"                # FLAG's seat in the check and the report, the values stay all values
+    FLAG="$ENV_NAME"
+    shift || true
+else
+    FLAG="${1:-}"
     shift || true
 fi
-FLAG="${1:-}"
-shift || true
 VALUES=("$@")
 [[ -n "$FLAG" && ${#VALUES[@]} -ge 2 ]] || die "usage: PROMPT_FILE=... ./knob_ab.sh --флаг значение1 значение2 [значение3 ...] | ./knob_ab.sh --env ПЕРЕМЕННАЯ значение1 значение2 [значение3 ...]"
 [[ -f "$CONFIG" ]] || die "нет конфига $CONFIG"
