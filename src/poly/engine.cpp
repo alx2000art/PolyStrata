@@ -2842,15 +2842,12 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         return;
     }
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
-    // positioned reads over the mapping: a steady channel the page cache's state does not bend - the
-    // mapping's copies ran at the fault rate, and a prompt's staging ran at the speed of the file cache's
-    // luck (the saw-tooth the dmon kept showing).  The spec-reader and the follow's uploads read the same way.
-    const bool by_file = L.gu_file != nullptr;
-    // --ram-experts-mib: the pool serves the mapped path (a file read goes to the files whatever the pool
-    // holds); a task takes an expert whole, so a hit's two copies and a miss's fill never race each other.
-    // The misses memcpy plainly: the fill reads its own bytes back, which non-temporal stores would not
-    // promise.
-    const bool pooled = ram_pool_ && own && !by_file && g_pool_stage_;
+    // --ram-experts-mib: the pool serves the staging (a hit's two copies and a miss's fill never race each
+    // other: a task takes an expert whole).  A miss reads by position (pread) instead of memcpy through the
+    // mapping - a steady channel the page cache's state does not bend (the saw-tooth the dmon kept showing).
+    // The spec-reader pre-settles the next layer's experts into the pool, so most reads are pool hits.
+    const bool pooled = ram_pool_ && own && g_pool_stage_;
+    const bool by_file = L.gu_file != nullptr;   // positioned reads for pool misses (and the no-pool path)
     const int pool_il = own ? (int) (&L - layers_.data()) : -1;
     // A task of the pool must not throw - a worker takes no exception out of it - so the first read that fails
     // is kept and thrown on the engine's thread, where the batch's caller sees it, once every task is done.
@@ -2888,9 +2885,17 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
             try {
                 uint8_t* gu_dst = h + j * gu2, * d_dst = h + c * gu2 + j * L.d_bytes;
                 if (ram_pool_->copy_out(pool_il, (int) e, gu_dst, d_dst, gu2, L.d_bytes)) return;
-                std::memcpy(gu_dst, L.exp_gate + e * L.gu_stride, L.gu_bytes);
-                std::memcpy(gu_dst + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
-                std::memcpy(d_dst, L.exp_down + e * L.d_bytes, L.d_bytes);
+                // pool miss: positioned reads (a steady channel) instead of memcpy through the mapping's
+                // faults; the read warms the page cache for the CPU's experts that read beside it
+                if (by_file) {
+                    L.gu_file->read(L.gu_at + e * L.gu_stride, gu_dst, L.gu_bytes);
+                    L.up_file->read(L.up_at + e * L.gu_stride, gu_dst + L.gu_bytes, L.gu_bytes);
+                    L.d_file->read(L.d_at + e * L.d_bytes, d_dst, L.d_bytes);
+                } else {
+                    std::memcpy(gu_dst, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(gu_dst + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(d_dst, L.exp_down + e * L.d_bytes, L.d_bytes);
+                }
                 ram_pool_->fill(pool_il, (int) e, gu_dst, d_dst, gu2, L.d_bytes);
             } catch (...) {
                 if (!err_taken.exchange(true)) read_err = std::current_exception();
