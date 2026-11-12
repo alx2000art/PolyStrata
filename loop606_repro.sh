@@ -107,7 +107,7 @@ open(out, "w", encoding="utf-8").write(text + f"\n[elapsed {el:.0f} s]\n")
 print(f"{el:.0f}s")
 PYEOF
 }
-repeats() { grep -c "repeated one token" "$OUT_DIR/server.log" 2>/dev/null || echo 0; }
+repeats() { grep -c "repeated one token" "$OUT_DIR/server.log" 2>/dev/null || true; }
 
 TOTAL_LOOPS=0
 for boot in $(seq 1 "$BOOTS"); do
