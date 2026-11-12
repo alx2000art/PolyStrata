@@ -102,8 +102,9 @@ private:
     int32_t* sel_ = nullptr;
     void* idx_st_ = nullptr;   ///< the indexer's second stream: score(batch k+1) overlaps select(batch k)
     void* idx_ev_ = nullptr;   ///< marks score(batch k) done on idx_st_; select(batch k) on st_ waits on it
-    void* att_ev_[3] = {};     ///< the attention phase's timing events (STRATA_POLY_STAGE2_DEBUG): the phase's
-                               ///< start, the attend's, out_proj's end
+    void* att_ev_[6] = {};     ///< the attention phase's timing events (STRATA_POLY_STAGE2_DEBUG): the phase's
+                               ///< start, after the key store, after the compressor, before the indexer's scores,
+                               ///< the attend's, out_proj's end
     bool att_trace_ = true;    ///< false inside step()'s per-row recursion, whose calls stay untimed
 };
 

@@ -411,9 +411,10 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
         rows_of_ = rows;
         return;
     }
-    // the timing events do not go into a recorded launch: a sync inside a capture is an error, and an event
-    // node a replay re-fires tells nothing
-    const bool dbg = g_att_dbg && att_trace_ && !recording_;
+    // the timing events do not go into a recorded launch (a sync inside a capture is an error, and an event node
+    // a replay re-fires tells nothing) and not into the decode windows: a sync a layer would pace the decode to
+    // the host.  The timing is for the prompt batches, where the phase's cost is worth a sync a call.
+    const bool dbg = g_att_dbg && att_trace_ && !recording_ && n > 16;
     if (dbg) {
         if (!att_ev_[0])
             for (void*& e : att_ev_) {
@@ -452,7 +453,9 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
     }
 
     // The compressed rows the tokens finish are there before they attend: a token reads its own block's.
+    if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[3], cs(st_)), "att ev3");
     if (B.ratio) squeeze(B, B.comp, pos, n);
+    if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[4], cs(st_)), "att ev4");
     const float scale = 1.f / std::sqrt((float) dim);
     if (B.ratio == 4) {
         squeeze(B, B.idx, pos, n);
@@ -461,6 +464,7 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
                   st_, at);
         lin(B.idx_proj, xn_, iw_, n);
         const float iscale = 1.f / std::sqrt((float) (idx_dim_ * idx_heads_));
+        if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[5], cs(st_)), "att ev5");
         // score_ has room for some of a batch's tokens at a long context; they take turns.  A token that sees
         // top_k compressed rows or fewer takes them all and needs no scores; a recorded launch cannot tell.
         //
@@ -519,6 +523,7 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
                     opt_.kv_format == KvFmt::kQ8_0 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
                     opt_.attend_batch, opt_.group_heads, opt_.q8_dequant, opt_.attend_chunks);
     } else {
+        if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[5], cs(st_)), "att ev5");
         if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[1], cs(st_)), "att ev1");
         dsv4_attend(q_, B.raw, raw_ring_, window_, B.ratio ? B.rows : nullptr, std::max(B.ratio, 1), nullptr, 0, 0,
                     fp(B.sinks), att_, dim, n_head_, scale, pos, n, st_, at, sized,
@@ -530,11 +535,15 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
     if (dbg) {
         ck(cudaEventRecord((cudaEvent_t) att_ev_[2], cs(st_)), "att ev2");
         ck(cudaEventSynchronize((cudaEvent_t) att_ev_[2]), "att ev sync");
-        float prep = 0.f, attend = 0.f;
-        ck(cudaEventElapsedTime(&prep, (cudaEvent_t) att_ev_[0], (cudaEvent_t) att_ev_[1]), "att prep elapsed");
+        float qkv = 0.f, squeeze = 0.f, idxp = 0.f, sc = 0.f, attend = 0.f;
+        ck(cudaEventElapsedTime(&qkv, (cudaEvent_t) att_ev_[0], (cudaEvent_t) att_ev_[3]), "att qkv elapsed");
+        ck(cudaEventElapsedTime(&squeeze, (cudaEvent_t) att_ev_[3], (cudaEvent_t) att_ev_[4]), "att squeeze elapsed");
+        ck(cudaEventElapsedTime(&idxp, (cudaEvent_t) att_ev_[4], (cudaEvent_t) att_ev_[5]), "att idx elapsed");
+        ck(cudaEventElapsedTime(&sc, (cudaEvent_t) att_ev_[5], (cudaEvent_t) att_ev_[1]), "att score elapsed");
         ck(cudaEventElapsedTime(&attend, (cudaEvent_t) att_ev_[1], (cudaEvent_t) att_ev_[2]), "att attend elapsed");
-        std::fprintf(stderr, "[att] il=%d n=%d pos=%lld prep+idx %.1f ms, attend %.1f ms\n", il, n, (long long) pos,
-                     prep, attend);
+        std::fprintf(stderr,
+                     "[att] il=%d n=%d pos=%lld qkv %.1f, squeeze %.1f, idx %.1f, score+sel %.1f, attend %.1f ms\n",
+                     il, n, (long long) pos, qkv, squeeze, idxp, sc, attend);
     }
 }
 
