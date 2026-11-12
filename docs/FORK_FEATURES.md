@@ -78,8 +78,8 @@ The chain adds these command-line switches to the engine:
 | `--group-heads N` | the heads an attention block takes: 16 or 8 | 16 |
 | `--q8-dequant N` | with `--kv q8_0`: 1 = packed dequant of a staged key row, 0 = a value at a time | 1 |
 | `--attend-chunks N` | 1: a batch above 65535 rows is attended in launches of that many; 0: one launch | 1 |
-| `--idx-mma N` | 1: the indexer's scores on the tensor cores at the decode windows' shapes only (n ≤ 16; the prompt batches take the scalar kernel they win with); 2: the mma at the prompt batches too - the prompt batch's score kernel is the attention phase's biggest cost and grows with the context, and the [att] lines' score+sel is what to compare; 0: the scalar kernel everywhere | 1 |
-| `--idx-fused N` | 1: a prompt batch's indexer score and select run in one kernel, the scores held in the card's shared memory and never written to HBM, one launch for the whole call (a block a token; needs 256 tokens and more, and every token up to position 32k, else the two-kernel path keeps the call). The scores are bit-identical to the scalar kernel's, so the picks do not change; 0: the score and select kernels, batched by the score buffer, score(batch k+1) beside select(batch k) | 0 (off) |
+| `--idx-mma N` | the indexer's scores on the tensor cores where the card has them. 2, the default: the mma at the decode windows and the prompt batches alike - the scalar score kernel is smem-bound (the queries and the key both out of shared memory, 8 bytes a multiply) and its segment costs 17 ms a call at a 26k prompt where the mma's is 1.3 ([att]'s score+sel); 1: the mma at the decode windows' shapes only; 0: the scalar kernel everywhere. The mma's scores are halves, not bit-exact: near-tie picks may differ | 2 |
+| `--idx-fused N` | 1: a prompt batch's indexer score and select run in one kernel, the scores held in the card's shared memory and never written to HBM, one launch for the whole call (a block a token; needs 256 tokens and more, and every token up to position 32k, else the two-kernel path keeps the call). The scores are bit-identical to the scalar kernel's, so the picks do not change; 0: the score and select kernels, batched by the score buffer, score(batch k+1) beside select(batch k). Kept as research and off: the phase's cost is the scorer's arithmetic, not the scores' HBM round trip (0.4 of 17 ms), and the mma scorer takes the same arithmetic 13 times faster - the fused kernel shares the scalar loop, so it is dominated by `--idx-mma 2` | 0 (off) |
 | `--ram-experts-mib N` | a RAM pool of this many MiB keeping the most used experts outside VRAM whole in the process's own memory (an LRU of whole experts; the reads of a kept expert stop touching the page cache; the decode swaps read through it too - a miss settles into the pool and the next ask promotes out of RAM at memcpy speed, which holds the model's files only while nothing else wants the RAM). 0 = through the page cache, as before | 0 (off) |
 | `--vram-pool` | claim the card's VRAM once at load (all that is free but for the reserve) and hand it to the growing maps from a pool of handles, so the expert cache's and attention caches' stages stop asking the driver each time. Needs VMM, growing attention caches and one card | off |
 | `--resident-topk N` | a decode window computes only the N heaviest of each token's routed experts, wherever they live (the VRAM cache's included), the top-1 always kept, the kept weights renormalised the model's way; prefill stays exact. Changes the answers (Maya's Turbo's cap; DSv4 routes 6) | 0 (off) |
@@ -116,6 +116,11 @@ prompt batches' 6500-token calls take the scalar dp4a scorer they win with (−8
 
 ## Verdicts of the live checks (DeepSeek V4 Flash 0731, one RTX 4080 SUPER, November 2026)
 
+- **`--idx-mma 2` — kept, the default.** The [att] timing's verdict: the attention phase's growth
+  with the context is all in the score+sel segment (17 ms a ratio-4 call at a 26k prompt, the
+  scalar scorer smem-bound at two shared loads a multiply), and the mma's segment is 1.3 ms -
+  thirteen times less, 9 s of a 98 s prefill. The earlier 8 percent prefill loss did not repeat.
+  The mma's scores are halves, so near-tie picks may differ from the scalar's.
 - **`--ram-experts-mib 6144` — kept.** Quality-neutral (a ten-prompt battery at temperature 0
   answers identically to the plain run; the pool's self-check passes 387/0, no torn slots), the
   decode sweep puts 6144 ahead of 2048, the long talks hit rate at 64.6 percent.

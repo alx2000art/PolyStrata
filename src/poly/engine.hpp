@@ -88,10 +88,11 @@ struct Options {
                                   ///< at a time, the row's scale fetched for each
     int attend_chunks = 1;        ///< a batch above 65535 rows is attended in launches of that many; 0: one
                                   ///< launch, as before, which that many rows fail
-    int idx_mma = 1;              ///< the indexer's scores on the tensor cores where the card has them; 1 keeps
-                                  ///< them at the decode windows' shapes only (the prompt batches win with the
-                                  ///< scalar kernel), 2 runs the mma at the prompt batches too, 0: the scalar
-                                  ///< kernel everywhere
+    int idx_mma = 2;              ///< the indexer's scores on the tensor cores where the card has them: 2 runs
+                                  ///< the mma at the prompt batches too - the default, the scalar score kernel
+                                  ///< is smem-bound (two shared loads a multiply) and its segment costs 17 ms a
+                                  ///< call at a 26k prompt against the mma's 1.3; 1 keeps the mma at the decode
+                                  ///< windows' shapes only, 0: the scalar kernel everywhere
     int idx_fused = 0;            ///< the indexer's score and select in one kernel, the scores held in shared
                                   ///< memory and never written to HBM (--idx-fused; a token past position 32k
                                   ///< keeps the two-kernel path, its scores would not fit); 0: the two kernels
