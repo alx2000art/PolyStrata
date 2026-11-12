@@ -135,8 +135,13 @@ prompt batches' 6500-token calls take the scalar dp4a scorer they win with (−8
 - **`--resident-topk` — rejected on DSv4.** The router's weights are flat (the top-3 hold only
   65 to 67 percent of the token's expert weight), the cap dulls the model. The cells are out of
   the sweep.
-- **STRATA_POLY_STAGED_TILES (env)** — off for live use: the measured decode gain of 9.3
-  percent exists, but the same stream-k rounding class as --expert-mma.
+- **STRATA_POLY_STAGED_TILES (env)** — kept on in the production set (`8,16,32`): the decode
+  sweep put it at +9.3 percent inside the whole set, though the number was never isolated against
+  it off.  The answers' risk is narrower than the first verdict read: the size classes' launches
+  agree with the one-launch path to the bit except where llama.cpp's MMQ stream-k (split_exact)
+  reorders a row's partial sums by the launch's tile count - a fp32 summation reorder, not the
+  fp16 mma class of --expert-mma.  An isolated on/off A/B (`knob_ab.sh --env
+  STRATA_POLY_STAGED_TILES 8,16,32 off`) and a temperature-0 answer battery are still due.
 - **`--prefetch-k`** — not ported: the upstream series rides on foreign refactors; the native
   `--ram-experts-mib` pool took over its part.
 

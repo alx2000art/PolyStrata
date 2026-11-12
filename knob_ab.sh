@@ -4,6 +4,7 @@
 #
 #   PROMPT_FILE=/path/to/prompt.txt ./knob_ab.sh --stage2-mib 512 256
 #   PROMPT_FILE=/path/to/fresh.txt ./knob_ab.sh --ram-experts-mib 6144 12288
+#   PROMPT_FILE=/path/to/prompt.txt ./knob_ab.sh --env STRATA_POLY_STAGED_TILES 8,16,32 off
 #
 # For every value the script rewrites the flag in the config, restarts the
 # server, runs the prompt once to warm, then runs it again with the meters
@@ -30,10 +31,16 @@ STOP_WAIT="${STOP_WAIT:-90}"
 log() { printf '%s\n' "$*"; }
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 
+ENV_NAME=""
+if [[ "${1:-}" == "--env" ]]; then   # --env ПЕРЕМЕННАЯ значение1 значение2 ...: an env-block variable's A/B;
+    shift                            # the value "off" removes the variable for that run
+    ENV_NAME="${1:-}"
+    shift || true
+fi
 FLAG="${1:-}"
 shift || true
 VALUES=("$@")
-[[ -n "$FLAG" && ${#VALUES[@]} -ge 2 ]] || die "usage: PROMPT_FILE=... ./knob_ab.sh --флаг значение1 значение2 [значение3 ...]"
+[[ -n "$FLAG" && ${#VALUES[@]} -ge 2 ]] || die "usage: PROMPT_FILE=... ./knob_ab.sh --флаг значение1 значение2 [значение3 ...] | ./knob_ab.sh --env ПЕРЕМЕННАЯ значение1 значение2 [значение3 ...]"
 [[ -f "$CONFIG" ]] || die "нет конфига $CONFIG"
 [[ -n "$PROMPT_FILE" && -f "$PROMPT_FILE" ]] || die "укажи PROMPT_FILE=/путь/к/промпту.txt"
 if [[ -z "${API_KEY:-}" ]]; then
@@ -101,8 +108,25 @@ wait_ready() {
     return 1
 }
 
-# the flag's value lives in the config's args list, right after the flag itself
+# the flag's value lives in the config's args list, right after the flag itself; with --env, in the env block
 set_flag() {
+    if [[ -n "$ENV_NAME" ]]; then
+        python3 - "$CONFIG" "$ENV_NAME" "$1" <<'PYEOF'
+import json, os, sys
+path, name, val = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(open(path, encoding="utf-8-sig"))
+env = cfg.setdefault("env", {})
+if val == "off":
+    env.pop(name, None)
+else:
+    env[name] = val
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
+PYEOF
+        return
+    fi
     python3 - "$CONFIG" "$FLAG" "$1" <<'PYEOF'
 import json, os, sys
 path, flag, val = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -150,7 +174,7 @@ reading_fields() {  # $1 = the line; prints "tokens s toks"
 }
 
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
-log "=== knob A/B: $FLAG ${VALUES[*]} ==="
+log "=== knob A/B: ${ENV_NAME:-$FLAG} ${VALUES[*]} ==="
 log "    промпт: $PROMPT_CHARS символов из $PROMPT_FILE, max_tokens $MAX_TOKENS"
 log "    каждый вариант: прогрев-запрос, затем замеренный повтор (SSD, tok/s, done)"
 log ""
