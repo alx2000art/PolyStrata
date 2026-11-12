@@ -254,6 +254,14 @@ void DeepSeek4::alloc_caches() {
         if (B.ratio == 4) B.keys = (uint16_t*) kv_alloc((size_t) idx_dim_ * sizeof(uint16_t), 4);
     }
     score_stride_ = opt_.max_context / 4 + 1;
+    // STRATA_POLY_SCORE_CONTEXT=<N>: the score stride covers N/4+1 entries instead of max_context/4+1.
+    // A 26k-token prompt needs stride 6501, not 33193 - the score tensor's HBM traffic drops proportionally
+    // (each row the score kernel writes and the select kernel reads is 5x shorter).  The buffer was allocated
+    // for the max stride, so a smaller one just wastes less of it per row and fits more tokens per batch.
+    if (const char* v = std::getenv("STRATA_POLY_SCORE_CONTEXT"); v && *v) {
+        const long long ctx = std::atoll(v);
+        if (ctx > 0 && ctx <= opt_.max_context) score_stride_ = (int) (ctx / 4 + 1);
+    }
     score_rows_ = (int) std::clamp<size_t>(score_bytes() / (score_stride_ * sizeof(float)), 1, (size_t) rows_);
     if (!sel_) sel_ = (int32_t*) dmalloc((size_t) rows_ * idx_top_k_ * sizeof(int32_t), "scratch");
 }
