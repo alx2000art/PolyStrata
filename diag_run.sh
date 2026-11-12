@@ -122,12 +122,16 @@ log "=== 3/4: рестарт на холодном пуле ==="
 stop_server
 if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.diag-$(date +%H%M%S)" || true; fi
 # the server spawns the engine with the config's env block, not the caller's: the [moe] lines need their
-# switch inside the config
-python3 - "$CONFIG" <<'PYEOF'
+# switch inside the config.  STRATA_POLY_SCORE_CONTEXT: the score stride covers the prompt's actual length
+# (chars/3 rounded up) instead of max_context - the score tensor's HBM traffic drops proportionally.
+EST_CTX=$(( (PROMPT_CHARS / 3 + 1023) / 1024 * 1024 + 1024 ))
+log "  score context: $EST_CTX (estimated from $PROMPT_CHARS chars)"
+python3 - "$CONFIG" "$EST_CTX" <<'PYEOF'
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
 cfg.setdefault("env", {})["STRATA_POLY_STAGE_SPEC"] = "256"
+cfg.setdefault("env", {})["STRATA_POLY_SCORE_CONTEXT"] = sys.argv[2]
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
