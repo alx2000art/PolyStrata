@@ -411,7 +411,9 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
         rows_of_ = rows;
         return;
     }
-    const bool dbg = g_att_dbg && att_trace_;
+    // the timing events do not go into a recorded launch: a sync inside a capture is an error, and an event
+    // node a replay re-fires tells nothing
+    const bool dbg = g_att_dbg && att_trace_ && !recording_;
     if (dbg) {
         if (!att_ev_[0])
             for (void*& e : att_ev_) {
