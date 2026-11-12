@@ -301,6 +301,16 @@ void dsv4_idx_score(const float* q, const float* w, const uint16_t* keys, float*
 /// scores, the lower row first among equals, or all of them when it sees n_top or fewer.  sel_stride apart.
 void dsv4_select(const float* score, int score_stride, int32_t* sel, int sel_stride, int n_top, int ratio,
                  int64_t pos, int rows, void* stream, const long long* at = nullptr);
+/// The score and the select of the indexer in one kernel: a token's scores are computed into the card's shared
+/// memory and the select runs on them there, so no score tensor crosses HBM, and the whole call is one launch
+/// instead of a score batch's two a turn.  The scores are bit-identical to dsv4_idx_score's scalar kernel's, so
+/// the picks match dsv4_select's exactly.  A token that sees n_top rows or fewer takes them all and scores
+/// nothing.  Only tokens up to `kIdxFusedRows` compressed rows fit the card's shared memory; the caller checks.
+/// With `at`, the launch is sized for the tokens of positions below `room`.
+inline constexpr int kIdxFusedRows = 8192;   // rows to position 32k; past that the two-kernel path runs
+void dsv4_idx_fused(const float* q, const float* w, const uint16_t* keys, int32_t* sel, int sel_stride, int n_top,
+                    int n_head, int ratio, int64_t pos, int rows, float scale, void* stream,
+                    const long long* at = nullptr, int room = 0);
 /// The attention of the tokens from position pos.  Token t (position p) attends the raw rows of the `window`
 /// positions up to p (row p at p % ring of `raw`), then compressed rows of `comp`: with sel, the
 /// min((p + 1) / ratio, top) of its list; without, every one below (p + 1) / ratio; with comp null, none.  The

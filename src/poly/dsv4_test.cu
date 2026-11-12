@@ -369,6 +369,40 @@ int test_index() {
     return bad;
 }
 
+// The fused score+select: its picks must match the two-kernel path's exactly - the scores are the scalar
+// kernel's bit for bit and the radix search is select_kernel's.  One draw where every token's pick is the radix
+// search (pos 4000: a token sees ~1000 rows, top 64) and one where every token takes all its rows (pos 100: 25
+// rows, the identity fill, no scores computed).
+int test_index_fused() {
+    const int heads = 8, dim = 128, ratio = 4, top = 64, rows = 3;
+    int bad = 0;
+    for (int64_t pos : {4000, 100}) {
+        const int stride = (int) ((pos + rows) / ratio) + 1, n_keys = stride;
+        auto q = random((size_t) rows * heads * dim, 0.1f), w = random((size_t) rows * heads);
+        auto keys = to_f16(random((size_t) n_keys * dim));
+        float *d_q = dev(q), *d_w = dev(w);
+        uint16_t* d_k = dev(keys);
+        std::vector<float> zs((size_t) rows * stride, -1e30f);
+        float* d_s = dev(zs);
+        std::vector<int32_t> zsel((size_t) rows * top, -1);
+        int32_t *d_sel = dev(zsel), *d_sel2 = dev(zsel);
+        dsv4_idx_score(d_q, d_w, d_k, d_s, stride, dim, heads, ratio, pos, rows, 0.01f, nullptr, 0, 0);
+        dsv4_select(d_s, stride, d_sel, top, top, ratio, pos, rows, nullptr);
+        dsv4_idx_fused(d_q, d_w, d_k, d_sel2, top, top, heads, ratio, pos, rows, 0.01f, nullptr, 0, 0);
+        auto a = host(d_sel, zsel.size());
+        auto b = host(d_sel2, zsel.size());
+        int diff = 0;
+        for (size_t i = 0; i < zsel.size(); ++i) diff += a[i] != b[i];
+        char what[64];
+        std::snprintf(what, sizeof what, "indexer fused picks pos %lld", (long long) pos);
+        std::printf("%-34s %d tokens: %s\n", what, rows, diff ? "FAIL" : "ok");
+        bad += diff ? 1 : 0;
+        for (void* p : {(void*) d_q, (void*) d_w, (void*) d_k, (void*) d_s, (void*) d_sel, (void*) d_sel2})
+            cudaFree(p);
+    }
+    return bad;
+}
+
 // hc_pre's and hc_head's mix, both shapes, against the host's dots
 int test_hc() {
     const int hc = 4, n_embd = 512, rows = 40;
@@ -424,6 +458,7 @@ int main() {
     bad += test_attend(false, 4, 40, 16, 70, 0, true);
     bad += test_attend(true, 128, 40, 16, 70, 0, true);   // ratio 128: the window is the token's whole key list
     bad += test_index();
+    bad += test_index_fused();
     bad += test_hc();
     if (cudaGetLastError() != cudaSuccess) {
         std::printf("CUDA error\n");

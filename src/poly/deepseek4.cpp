@@ -22,6 +22,11 @@ namespace {
 // STRATA_POLY_TOPK_STATS=1: under --resident-topk, route() accumulates how much of a token's routed weight
 // the kept prefixes carry and prints the running shares every 2,048 capped tokens.
 const bool g_topk_stats = std::getenv("STRATA_POLY_TOPK_STATS") != nullptr;
+
+// STRATA_POLY_STAGE2_DEBUG=1: a prefill call's attention phase prints [att] il=.. n=.. pos=.. prep+idx .. ms,
+// attend .. ms - the GPU time from the phase's first launch to the attend's, and from it to out_proj's end
+// (CUDA events, one sync a call; the phase's own cost plus the queue it waits behind).
+const bool g_att_dbg = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
 std::atomic<uint64_t> g_topk_tokens{0};
 std::atomic<double> g_topk_share[16] = {};
 
@@ -363,7 +368,7 @@ void DeepSeek4::pair(const Dev& a, const Dev& b, float* ya, float* yb, int n) {
 
 // The queries, and the key the token leaves in the window ring, are turned on their last n_rot values; the queries
 // are normed a head without weights first.  The heads' output is turned back by the query's position.
-void DeepSeek4::attention(Block& B, int64_t pos, int n) {
+void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
     if (rows_of_) {
         // step(): a row at a time, the whole attention, with the row's sequence's window ring, compressed rows,
         // indexer keys and compressors, at the row's buffers, position and recorded position
@@ -373,6 +378,7 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
         long long* const at = at_;
         const int64_t keep = pos_;
         const size_t q8 = kernels::native_q8_1_bytes(n_embd_);
+        const bool trace = std::exchange(att_trace_, false);   // the per-row calls stay untimed
         for (int i = 0; i < n; ++i) {
             const int s = rows[i].seq;
             Block one = B;
@@ -394,8 +400,9 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
             ao_ = ao + (size_t) i * n_embd_;
             at_ = at + 2 * i;
             pos_ = rows[i].pos;
-            attention(one, rows[i].pos, 1);
+            attention(one, il, rows[i].pos, 1);
         }
+        att_trace_ = trace;
         xn_ = xn;
         xq_ = xq;
         ao_ = ao;
@@ -403,6 +410,16 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
         pos_ = keep;
         rows_of_ = rows;
         return;
+    }
+    const bool dbg = g_att_dbg && att_trace_;
+    if (dbg) {
+        if (!att_ev_[0])
+            for (void*& e : att_ev_) {
+                cudaEvent_t ev = nullptr;
+                ck(cudaEventCreate(&ev), "att event");
+                e = ev;
+            }
+        ck(cudaEventRecord((cudaEvent_t) att_ev_[0], cs(st_)), "att ev0");
     }
     const int dim = head_dim_, off = dim - n_rot_;
     const long long* at = recording_ ? at_ : nullptr;   // a recorded launch: the tokens from what at_ holds
@@ -445,51 +462,62 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
         // score_ has room for some of a batch's tokens at a long context; they take turns.  A token that sees
         // top_k compressed rows or fewer takes them all and needs no scores; a recorded launch cannot tell.
         //
-        // Pipelined across two streams when there is more than one batch: score(batch k+1) on idx_st_ runs
-        // beside select(batch k) on st_ - the score kernel is memory-bound (reads compressed rows from HBM),
-        // the select is compute-light, so they share the GPU.  Each select waits its batch's score via the
-        // event; the attend below waits for all selects on st_ (they are st_-ordered).
-        const int n_batches = (n + score_rows_ - 1) / score_rows_;
-        if (n_batches <= 1 || !idx_st_) {
-            for (int t = 0, c = 0; t < n; t += c) {
-                c = std::min(score_rows_, n - t);
-                const long long* at_t = at ? at + 2 * t : nullptr;
-                if (at || (pos + t + c) / 4 > idx_top_k_)
-                    dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys, score_,
-                                   score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, st_, at_t, sized,
-                                   opt_.idx_mma && n <= 16);
-                dsv4_select(score_, score_stride_, sel_ + (size_t) t * idx_top_k_, idx_top_k_, idx_top_k_, 4, pos + t, c,
-                            st_, at_t);
-            }
+        // --idx-fused: the scores and the select in one kernel, the scores held in shared memory - no score
+        // tensor crosses HBM, and no batching: one launch for the whole call.  A block a token, so the call
+        // needs enough tokens to fill the card (256; the decode windows keep the tuned paths below), and a
+        // token past position 32k's scores would not fit the card's shared memory - such a call keeps the
+        // two-kernel path below, whose score(batch k+1) on idx_st_ runs beside select(batch k) on st_ - the
+        // score kernel is memory-bound (reads compressed rows from HBM), the select is compute-light, so they
+        // share the GPU.  Each select waits its batch's score via the event; the attend below waits for all
+        // selects on st_ (they are st_-ordered).
+        if (opt_.idx_fused && n >= 256 && (at ? sized : pos + n) / 4 <= kIdxFusedRows) {
+            dsv4_idx_fused(iq_, iw_, B.keys, sel_, idx_top_k_, idx_top_k_, idx_heads_, 4, pos, n, iscale, st_, at,
+                           sized);
         } else {
-            int prev_t = 0, prev_c = 0;
-            for (int t = 0, c = 0; t < n; t += c) {
-                c = std::min(score_rows_, n - t);
-                const long long* at_t = at ? at + 2 * t : nullptr;
-                if (at || (pos + t + c) / 4 > idx_top_k_)
-                    dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys, score_,
-                                   score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, cs(idx_st_), at_t, sized,
-                                   opt_.idx_mma && n <= 16);
-                ck(cudaEventRecord((cudaEvent_t) idx_ev_, cs(idx_st_)), "idx score event");
-                if (t > 0) {
-                    ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) idx_ev_, 0), "idx score wait");
-                    const long long* at_p = at ? at + 2 * prev_t : nullptr;
-                    dsv4_select(score_, score_stride_, sel_ + (size_t) prev_t * idx_top_k_, idx_top_k_, idx_top_k_, 4,
-                                pos + prev_t, prev_c, st_, at_p);
+            const int n_batches = (n + score_rows_ - 1) / score_rows_;
+            if (n_batches <= 1 || !idx_st_) {
+                for (int t = 0, c = 0; t < n; t += c) {
+                    c = std::min(score_rows_, n - t);
+                    const long long* at_t = at ? at + 2 * t : nullptr;
+                    if (at || (pos + t + c) / 4 > idx_top_k_)
+                        dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys,
+                                       score_, score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, st_, at_t,
+                                       sized, opt_.idx_mma && n <= 16);
+                    dsv4_select(score_, score_stride_, sel_ + (size_t) t * idx_top_k_, idx_top_k_, idx_top_k_, 4,
+                                pos + t, c, st_, at_t);
                 }
-                prev_t = t, prev_c = c;
+            } else {
+                int prev_t = 0, prev_c = 0;
+                for (int t = 0, c = 0; t < n; t += c) {
+                    c = std::min(score_rows_, n - t);
+                    const long long* at_t = at ? at + 2 * t : nullptr;
+                    if (at || (pos + t + c) / 4 > idx_top_k_)
+                        dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys,
+                                       score_, score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale,
+                                       cs(idx_st_), at_t, sized, opt_.idx_mma && n <= 16);
+                    ck(cudaEventRecord((cudaEvent_t) idx_ev_, cs(idx_st_)), "idx score event");
+                    if (t > 0) {
+                        ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) idx_ev_, 0), "idx score wait");
+                        const long long* at_p = at ? at + 2 * prev_t : nullptr;
+                        dsv4_select(score_, score_stride_, sel_ + (size_t) prev_t * idx_top_k_, idx_top_k_,
+                                    idx_top_k_, 4, pos + prev_t, prev_c, st_, at_p);
+                    }
+                    prev_t = t, prev_c = c;
+                }
+                // the last batch's select: its score is done on idx_st_
+                ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) idx_ev_, 0), "idx score wait");
+                const long long* at_p = at ? at + 2 * prev_t : nullptr;
+                dsv4_select(score_, score_stride_, sel_ + (size_t) prev_t * idx_top_k_, idx_top_k_, idx_top_k_, 4,
+                            pos + prev_t, prev_c, st_, at_p);
             }
-            // the last batch's select: its score is done on idx_st_
-            ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) idx_ev_, 0), "idx score wait");
-            const long long* at_p = at ? at + 2 * prev_t : nullptr;
-            dsv4_select(score_, score_stride_, sel_ + (size_t) prev_t * idx_top_k_, idx_top_k_, idx_top_k_, 4,
-                        pos + prev_t, prev_c, st_, at_p);
         }
+        if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[1], cs(st_)), "att ev1");
         dsv4_attend(q_, B.raw, raw_ring_, window_, B.rows, 4, sel_, idx_top_k_, idx_top_k_, fp(B.sinks), att_, dim,
                     n_head_, scale, pos, n, st_, at, sized,
                     opt_.kv_format == KvFmt::kQ8_0 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
                     opt_.attend_batch, opt_.group_heads, opt_.q8_dequant, opt_.attend_chunks);
     } else {
+        if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[1], cs(st_)), "att ev1");
         dsv4_attend(q_, B.raw, raw_ring_, window_, B.ratio ? B.rows : nullptr, std::max(B.ratio, 1), nullptr, 0, 0,
                     fp(B.sinks), att_, dim, n_head_, scale, pos, n, st_, at, sized,
                     opt_.kv_format == KvFmt::kQ8_0 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
@@ -497,6 +525,15 @@ void DeepSeek4::attention(Block& B, int64_t pos, int n) {
     }
     dsv4_rope(att_, att_, dim, n_head_, off, n_rot_, B.rope, pos, 1, n, false, 0.f, true, st_, at);
     out_proj(B, n);
+    if (dbg) {
+        ck(cudaEventRecord((cudaEvent_t) att_ev_[2], cs(st_)), "att ev2");
+        ck(cudaEventSynchronize((cudaEvent_t) att_ev_[2]), "att ev sync");
+        float prep = 0.f, attend = 0.f;
+        ck(cudaEventElapsedTime(&prep, (cudaEvent_t) att_ev_[0], (cudaEvent_t) att_ev_[1]), "att prep elapsed");
+        ck(cudaEventElapsedTime(&attend, (cudaEvent_t) att_ev_[1], (cudaEvent_t) att_ev_[2]), "att attend elapsed");
+        std::fprintf(stderr, "[att] il=%d n=%d pos=%lld prep+idx %.1f ms, attend %.1f ms\n", il, n, (long long) pos,
+                     prep, attend);
+    }
 }
 
 // What ggml's MoE graph does for this model: sqrt(softplus) of the router's scores; the n_used largest of those
@@ -582,7 +619,7 @@ void DeepSeek4::layer_head(Layer& L, int il, int n) {
     rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
     dbg("attn_in", il, xn_, n_embd_);
-    attention(B, pos_, n);
+    attention(B, il, pos_, n);
     dbg("attn", il, ao_, n_embd_);
     hc_post(ao_, hcw_, r_, n_embd_, n, st_);
 

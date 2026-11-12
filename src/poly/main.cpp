@@ -1229,6 +1229,7 @@ int main(int argc, char** argv) {
         else if (a == "--q8-dequant") o.q8_dequant = std::atoi(val());
         else if (a == "--attend-chunks") o.attend_chunks = std::atoi(val());
         else if (a == "--idx-mma") o.idx_mma = std::atoi(val());
+        else if (a == "--idx-fused") o.idx_fused = std::atoi(val());
         else if (a == "--expert-mma") o.expert_mma = std::atoi(val());
         else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoi(val());
         else if (a == "--prefetch-k") o.prefetch_k = std::atoi(val());

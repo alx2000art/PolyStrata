@@ -450,6 +450,105 @@ __global__ void select_kernel(const float* __restrict__ score, int score_stride,
     }
 }
 
+constexpr int FUSED_THREADS = 512;   // idx_fused_kernel: a token a block, the select's radix on 16 warps
+
+// The score and the select of the indexer in one kernel: a block a token.  The scores are computed into shared
+// memory by idx_score_kernel's loop (a warp a key, a lane a head, the same order of the sums - bit-identical
+// values), and select_kernel's radix search runs on them there: no score tensor crosses HBM, and the whole call
+// is one launch instead of a score batch's two a turn.  A token that sees n_top rows or fewer takes them all and
+// scores nothing.
+__global__ void idx_fused_kernel(const float* __restrict__ q, const float* __restrict__ w,
+                                 const uint16_t* __restrict__ keys, int32_t* __restrict__ sel, int sel_stride,
+                                 int n_top, int n_head, int ratio, long long pos, float scale,
+                                 const long long* __restrict__ at) {
+    extern __shared__ __align__(16) float smf[];
+    float* sq = smf;                                // n_head * (IDX_DIM + 1) queries, a head a row
+    float* sw = sq + n_head * (IDX_DIM + 1);        // n_head weights
+    float* sk = sw + n_head;                        // SCORE_KEYS keys the tile stages
+    float* ss = sk + SCORE_KEYS * IDX_DIM;          // this token's scores, dense
+    __shared__ int hist[FUSED_THREADS / WARP][256], part[FUSED_THREADS / WARP], pick[2];
+    const int t = blockIdx.x;
+    const int n = int((position(at, pos, 1, t) + 1) / ratio);
+    int32_t* out = sel + size_t(t) * sel_stride;
+    if (n <= n_top) {
+        for (int i = threadIdx.x; i < n; i += blockDim.x) out[i] = i;
+        return;
+    }
+    const float* qt = q + size_t(t) * n_head * IDX_DIM;
+    for (int i = threadIdx.x; i < n_head * IDX_DIM; i += blockDim.x)
+        sq[(i / IDX_DIM) * (IDX_DIM + 1) + i % IDX_DIM] = qt[i];
+    for (int h = threadIdx.x; h < n_head; h += blockDim.x) sw[h] = w[size_t(t) * n_head + h];
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP, warps = blockDim.x / WARP;
+    for (int k0 = 0; k0 < n; k0 += SCORE_KEYS) {
+        const int nk = min(SCORE_KEYS, n - k0);
+        __syncthreads();   // the last tile's readers are done with sk
+        for (int i = threadIdx.x; i < nk * IDX_DIM; i += blockDim.x) sk[i] = half_at(keys, size_t(k0) * IDX_DIM + i);
+        __syncthreads();
+        for (int k = wid; k < nk; k += warps) {
+            const float* key = sk + k * IDX_DIM;
+            float acc = 0.0f;
+            for (int h = lane; h < n_head; h += WARP) {
+                const float* qh = sq + h * (IDX_DIM + 1);
+                float dot = 0.0f;
+#pragma unroll 8
+                for (int i = 0; i < IDX_DIM; ++i) dot += qh[i] * key[i];
+                acc += fmaxf(dot, 0.0f) * sw[h];
+            }
+            acc = warp_sum(acc);
+            if (lane == 0) ss[k0 + k] = acc * scale;
+        }
+    }
+    __syncthreads();
+    // the radix search for the n_top-th score, eight bits a round, then the rows above it and of those on it the
+    // lowest, written in the order of the rows - select_kernel's, on the shared scores
+    const float* s = ss;
+    uint32_t cut = 0, mask = 0;
+    int want = n_top;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (int d = lane; d < 256; d += WARP) hist[wid][d] = 0;
+        __syncwarp();
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            const uint32_t k = order_key(s[i]);
+            if ((k & mask) == cut) atomicAdd(&hist[wid][(k >> shift) & 255], 1);
+        }
+        __syncthreads();
+        if (threadIdx.x < 256) {
+            int v = 0;
+            for (int k = 0; k < FUSED_THREADS / WARP; ++k) v += hist[k][threadIdx.x];
+            hist[0][threadIdx.x] = v;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            int d = 255, above = 0;
+            for (; d > 0 && above + hist[0][d] < want; --d) above += hist[0][d];
+            pick[0] = d;
+            pick[1] = above;
+        }
+        __syncthreads();
+        cut |= uint32_t(pick[0]) << shift;
+        mask |= 255u << shift;
+        want -= pick[1];
+        __syncthreads();
+    }
+    const int per = (n + int(blockDim.x) - 1) / int(blockDim.x);
+    const int lo = threadIdx.x * per, hi = min(lo + per, n);
+    int g = 0, e = 0;
+    for (int i = lo; i < hi; ++i) {
+        const uint32_t k = order_key(s[i]);
+        g += k > cut;
+        e += k == cut;
+    }
+    int g_all, e_all;
+    const int g0 = block_before(g, part, &g_all);
+    int e0 = block_before(e, part, &e_all);
+    const int need = n_top - g_all;
+    int o = g0 + min(e0, need);
+    for (int i = lo; i < hi; ++i) {
+        const uint32_t k = order_key(s[i]);
+        if (k > cut || (k == cut && e0++ < need)) out[o++] = i;
+    }
+}
+
 // A block a head of a token.  Its keys are the raw rows of its window, oldest first, then its compressed rows; a
 // key is its value too.  Scores, the softmax with the head's sink, then the weighted sum of the keys.
 __global__ void attend_kernel(const float* __restrict__ q, const uint16_t* __restrict__ raw, int ring, int window,
@@ -1240,6 +1339,20 @@ void dsv4_select(const float* score, int score_stride, int32_t* sel, int sel_str
     select_kernel<<<rows, SELECT_THREADS, 0, cs(stream)>>>(score, score_stride, sel, sel_stride, n_top, ratio,
                                                            (long long) pos, at);
     ck("dsv4_select");
+}
+
+void dsv4_idx_fused(const float* q, const float* w, const uint16_t* keys, int32_t* sel, int sel_stride, int n_top,
+                    int n_head, int ratio, int64_t pos, int rows, float scale, void* stream, const long long* at,
+                    int room) {
+    if (rows <= 0) return;
+    const size_t smem =
+        (size_t(n_head) * (IDX_DIM + 1) + n_head + SCORE_KEYS * IDX_DIM + size_t(kIdxFusedRows)) * sizeof(float);
+    static unsigned done = 0;
+    if (smem > allow_smem(idx_fused_kernel, done))
+        throw std::runtime_error("dsv4_idx_fused: a token's scores do not fit the card's shared memory");
+    idx_fused_kernel<<<rows, FUSED_THREADS, smem, cs(stream)>>>(q, w, keys, sel, sel_stride, n_top, n_head, ratio,
+                                                                (long long) pos, scale, at);
+    ck("dsv4_idx_fused");
 }
 
 void dsv4_attend(const float* q, const uint16_t* raw, int ring, int window, const uint16_t* comp, int ratio,

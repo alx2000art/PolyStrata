@@ -90,6 +90,9 @@ struct Options {
                                   ///< launch, as before, which that many rows fail
     int idx_mma = 1;              ///< the indexer's scores on the tensor cores where the card has them; 0: the
                                   ///< scalar kernel
+    int idx_fused = 0;            ///< the indexer's score and select in one kernel, the scores held in shared
+                                  ///< memory and never written to HBM (--idx-fused; a token past position 32k
+                                  ///< keeps the two-kernel path, its scores would not fit); 0: the two kernels
     int expert_mma = 0;           ///< the experts' Q3_K products on the tensor cores through this fork's own
                                   ///< kernel (expert_mma.hpp), and not llama.cpp's generic mmq; 0: the generic
     int resident_topk = 0;        ///< a decode window computes only this many of each token's routed experts -

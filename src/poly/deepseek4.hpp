@@ -71,7 +71,7 @@ private:
     };
 
     bool batch_heads() const override { return true; }
-    void attention(Block& B, int64_t pos, int n);
+    void attention(Block& B, int il, int64_t pos, int n);
     void squeeze(Block& B, Squeeze& S, int64_t pos, int n);
     void out_proj(Block& B, int n);
     void pair(const Dev& a, const Dev& b, float* ya, float* yb, int n);
@@ -102,6 +102,9 @@ private:
     int32_t* sel_ = nullptr;
     void* idx_st_ = nullptr;   ///< the indexer's second stream: score(batch k+1) overlaps select(batch k)
     void* idx_ev_ = nullptr;   ///< marks score(batch k) done on idx_st_; select(batch k) on st_ waits on it
+    void* att_ev_[3] = {};     ///< the attention phase's timing events (STRATA_POLY_STAGE2_DEBUG): the phase's
+                               ///< start, the attend's, out_proj's end
+    bool att_trace_ = true;    ///< false inside step()'s per-row recursion, whose calls stay untimed
 };
 
 }  // namespace strata::poly
