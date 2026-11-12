@@ -26,7 +26,11 @@ std::atomic<uint64_t> g_topk_tokens{0};
 std::atomic<double> g_topk_share[16] = {};
 
 constexpr int kHc = 4;   // what kernels.cu is written for; checked at load
-constexpr size_t kScoreBytes = size_t(128) << 20;   // a prompt batch's indexer scores at most
+constexpr size_t kScoreBytesDefault = size_t(128) << 20;   // a prompt batch's indexer scores at most
+size_t score_bytes() {   // STRATA_POLY_SCORE_MIB: more MiB - bigger the batch of tokens the indexer scores
+    const char* v = std::getenv("STRATA_POLY_SCORE_MIB");                  // in one launch (fewer launches,
+    return v && *v ? (size_t) std::max(0, std::atoi(v)) << 20 : kScoreBytesDefault;   // a steadier read)
+}
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 constexpr uint32_t kTypeI32 = 26;
 constexpr float kPi = 3.14159265358979323846f;
@@ -250,7 +254,7 @@ void DeepSeek4::alloc_caches() {
         if (B.ratio == 4) B.keys = (uint16_t*) kv_alloc((size_t) idx_dim_ * sizeof(uint16_t), 4);
     }
     score_stride_ = opt_.max_context / 4 + 1;
-    score_rows_ = (int) std::clamp<size_t>(kScoreBytes / (score_stride_ * sizeof(float)), 1, (size_t) rows_);
+    score_rows_ = (int) std::clamp<size_t>(score_bytes() / (score_stride_ * sizeof(float)), 1, (size_t) rows_);
     if (!sel_) sel_ = (int32_t*) dmalloc((size_t) rows_ * idx_top_k_ * sizeof(int32_t), "scratch");
 }
 

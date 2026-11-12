@@ -2124,9 +2124,15 @@ void Engine::load(const Options& o) {
     start_swaps();
     reset();
     pin_experts();
-    // nothing is read from the files when every expert is in VRAM
-    if (!all_cached())
+    // nothing is read from the files when every expert is in VRAM.  The staging's guess-reader reads the next
+    // layer by position, which warms the page cache for the CPU's experts beside settling the pool - the mapper's
+    // whole-file pass would only fight it for the disk and wash itself out of a cache a third the file's size.
+    if (!all_cached() && !spec_on_)
         mapper_ = std::thread([this, spans = std::move(spans)] { map_pages(spans, map_quit_); });
+    else if (spec_on_)
+        std::fprintf(stderr, "strata-poly: the mapping's warmer stays off: the staging's guess-reader warms the "
+                             "page cache ahead of the layers the read routes to (STRATA_POLY_STAGE_SPEC)
+");
 }
 
 void Engine::load_drafter() {
