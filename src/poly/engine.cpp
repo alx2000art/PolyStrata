@@ -3197,9 +3197,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         if (in_read_ && opt_.read_heat != 0 && !heat_.empty())
             ++heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
         // the answer's first windows route like the read's tail: the accumulator keeps the current call's
-        // routes alone, the layer index restarting saying the read's next call began
+        // routes alone, the layer index dropping (the read's next call began) clearing it
         if (in_read_ && !warm_heat_.empty()) {
-            if (il <= warm_last_il_) std::fill(warm_heat_.begin(), warm_heat_.end(), 0);
+            if (il < warm_last_il_) std::fill(warm_heat_.begin(), warm_heat_.end(), 0);
             warm_last_il_ = il;
             ++warm_heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
         }
