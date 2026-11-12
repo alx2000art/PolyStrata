@@ -100,6 +100,8 @@ private:
     float *ckv_ = nullptr, *cscore_ = nullptr;
     float *iq_ = nullptr, *iw_ = nullptr, *score_ = nullptr;
     int32_t* sel_ = nullptr;
+    void* idx_st_ = nullptr;   ///< the indexer's second stream: score(batch k+1) overlaps select(batch k)
+    void* idx_ev_ = nullptr;   ///< marks score(batch k) done on idx_st_; select(batch k) on st_ waits on it
 };
 
 }  // namespace strata::poly
