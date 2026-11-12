@@ -167,8 +167,12 @@ for V in "${VALUES[@]}"; do
         continue
     fi
     log "  прогрев (ответ в $OUT_DIR/warm-$V.txt) ..."
+    wb=$(sectors)
+    w0=$(date +%s)
     ask "$OUT_DIR/warm-$V.txt" || true
     sleep 3
+    wa=$(sectors)
+    w1=$(date +%s)
     mark=$(( $(wc -l < "$OUT_DIR/server.log") + 1 ))
     b=$(sectors)
     log "  замеренный прогон ..."
@@ -189,6 +193,7 @@ for V in "${VALUES[@]}"; do
     fi
     R_SSD[$V]=$(( (a - b) * 512 / 1024 / 1024 ))
     R_DONE[$V]="$(grep '\[strata\] done:' "$OUT_DIR/server.log" | tail -1)"
+    log "  прогрев: elapsed $(( w1 - w0 )) s, SSD $(( (wa - wb) * 512 / 1024 / 1024 )) MiB (это настоящий префилл)"
     log "  хвост чтения ${R_TAIL[$V]} tok/s, средняя ${R_AVG[$V]} tok/s, SSD ${R_SSD[$V]} MiB"
     log ""
 done
