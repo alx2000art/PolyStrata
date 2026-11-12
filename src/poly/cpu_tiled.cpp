@@ -1184,7 +1184,26 @@ size_t cpu_tiled_ws_slot_bytes() {
 }
 
 bool cpu_tiled_supported(int w_type) {
-    return w_type == GGML_TYPE_Q2_K;
+    // the tiled kernel's dispatch already handles all these formats (the unpack
+    // routines and the microkernel instantiations are in cpu_tiled_kernel.cpp) -
+    // the gate only reached Q2_K, leaving every IQ type to the slow vec_dot path
+    switch (w_type) {
+        case GGML_TYPE_Q2_K:
+        case GGML_TYPE_Q3_K:
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q5_K:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
+        case GGML_TYPE_IQ4_XS:
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ1_M:
+            return true;
+        default:
+            return false;
+    }
 }
 
 size_t cpu_tiled_scratch_bytes(int n_threads) {
