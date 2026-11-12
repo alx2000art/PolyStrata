@@ -764,6 +764,23 @@ protected:
     bool pf_req_ = false, pf_quit_ = false, pf_busy_ = false;
     int pf_j_ = -1, pf_n_ = 0;                              ///< the layer the guess names, and its tokens
     void *d_pf_ = nullptr, *h_pf_ = nullptr, *ev_pf_ = nullptr, *pf_scratch_ = nullptr;
+
+    // STRATA_POLY_STAGE_SPEC=<M>: once a prompt batch's routing is known, a thread of its own settles the
+    // layer's most used experts that the cache lacks into --ram-experts-mib's pool: the next layer's staging
+    // then reads them out of RAM at memcpy speed instead of faulting them in beside the card's work.
+    bool spec_on_ = false;
+    int spec_m_ = 0;
+    void* spec_scratch_ = nullptr;
+    std::vector<int32_t> spec_cand_, spec_experts_;
+    int spec_il_ = 0;
+    std::thread spec_thread_;
+    std::mutex spec_mx_;
+    std::condition_variable spec_cv_;
+    bool spec_req_ = false, spec_quit_ = false;
+    std::atomic<int64_t> spec_filled_{0};
+    void start_spec();
+    void spec_loop();
+    void stage_spec(int il);
     void* mqx_ = nullptr;                                   ///< lin()'s tokens quantized for a product
     int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
     int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...

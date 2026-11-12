@@ -400,6 +400,14 @@ Engine::~Engine() {
         pf_cv_.notify_all();
         pf_thread_.join();
     }
+    if (spec_thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> l(spec_mx_);
+            spec_quit_ = true;
+        }
+        spec_cv_.notify_all();
+        spec_thread_.join();
+    }
     if (swap_st_) cudaStreamSynchronize(cs(swap_st_));
     if (up_) cudaStreamSynchronize(cs(up_));
     if (rs_) cudaStreamSynchronize(cs(rs_));
@@ -2297,6 +2305,7 @@ void Engine::alloc() {
     } else if (opt_.prefetch_k > 0) {
         std::fprintf(stderr, "strata-poly: --prefetch-k needs --ram-experts-mib; the read-ahead stays off\n");
     }
+    start_spec();
     if (opt_.expert_mma) {
         const bool gu_ok = ExpertMma::fits(11, n_embd_), down_ok = ExpertMma::fits(11, n_ff_exp_);
         std::fprintf(stderr, "strata-poly: --expert-mma on (the card's tensor cores take the Q3_K products: "
@@ -2828,7 +2837,10 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         return;
     }
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
-    const bool by_file = opt_.file_reads;
+    // positioned reads over the mapping: a steady channel the page cache's state does not bend - the
+    // mapping's copies ran at the fault rate, and a prompt's staging ran at the speed of the file cache's
+    // luck (the saw-tooth the dmon kept showing).  The spec-reader and the follow's uploads read the same way.
+    const bool by_file = L.gu_file != nullptr;
     // --ram-experts-mib: the pool serves the mapped path (a file read goes to the files whatever the pool
     // holds); a task takes an expert whole, so a hit's two copies and a miss's fill never race each other.
     // The misses memcpy plainly: the fill reads its own bytes back, which non-temporal stores would not
@@ -2946,6 +2958,117 @@ void Engine::pf_read() {
     }
 }
 
+// The staging's own guess-reader (STRATA_POLY_STAGE_SPEC=<M>): a prompt batch's layer hands this thread the
+// experts it routed to, the most used first, and the thread settles the ones the cache and the pool lack into
+// the pool while the card takes the layer's batches.  The next layer's staging then reads its experts out of
+// RAM at memcpy speed instead of faulting them in beside the card's work - the load's bursts and holes
+// straighten, the reads' disk bytes move off the card's critical path.
+void Engine::start_spec() {
+    const char* v = std::getenv("STRATA_POLY_STAGE_SPEC");
+    if (!v || !*v) return;
+    spec_m_ = std::atoi(v);
+    if (spec_m_ <= 0 || spec_m_ > n_expert_) {
+        std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGE_SPEC=%s is not a candidate count of 1..%d: "
+                             "the staging's guess-reader stays off\n", v, n_expert_);
+        return;
+    }
+    if (!ram_pool_) {
+        std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGE_SPEC needs --ram-experts-mib: the staging's "
+                             "guess-reader stays off\n");
+        return;
+    }
+    spec_on_ = true;
+    spec_scratch_ = std::malloc(ram_pool_->slot_bytes());
+    if (!spec_scratch_) return;
+    spec_thread_ = std::thread([this] { spec_loop(); });
+    std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGE_SPEC: a layer's top %d routed experts settle into the "
+                         "pool while the card takes its batches\n", spec_m_);
+}
+
+// The hand-off: the NEXT MoE layer's whole non-cached set, settled under that layer's own keys while the card
+// takes the current one's batches - the pool holds two layers at once, so the next staging reads its experts
+// out of RAM at memcpy speed instead of faulting them in.  (The first cut filled this layer's keys, which the
+// staging had already settled reactively: settled 0 of 220 said it clearly.)  A cap below the layer's expert
+// count keeps only the current routing's most used - the neighbours' experts correlate.
+void Engine::stage_spec(int il) {
+    if (!spec_on_) return;
+    int next = il + 1;
+    while (next < (int) layers_.size() && !layers_[(size_t) next].moe) ++next;
+    if (next >= (int) layers_.size()) return;   // nothing follows
+    if (all_cached()) return;
+    if (pinned_layer_.size() == layers_.size() && pinned_layer_[(size_t) next]) return;   // registered RAM: the
+    const Layer& Ln = layers_[(size_t) next];                                            // staging takes no pool
+    spec_cand_.clear();
+    for (int e = 0; e < n_expert_; ++e)
+        if (!Ln.slot[(size_t) e]) spec_cand_.push_back(e);
+    std::stable_sort(spec_cand_.begin(), spec_cand_.end(), [&](int32_t a, int32_t b) {
+        return count_[(size_t) a] > count_[(size_t) b];
+    });
+    if ((int) spec_cand_.size() > spec_m_) spec_cand_.resize((size_t) spec_m_);
+    if (spec_cand_.empty()) return;
+    {
+        std::lock_guard<std::mutex> l(spec_mx_);
+        spec_il_ = next;
+        spec_experts_ = spec_cand_;
+        spec_req_ = true;
+    }
+    spec_cv_.notify_one();
+}
+
+// The thread's loop: one hand-off a layer, the pool's LRU takes what the cache misses, the mapping's pages
+// fault in beside the card's batches instead of inside the next staging's round.
+void Engine::spec_loop() {
+    cudaSetDevice(device_);
+    static const bool debug = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
+    std::unique_lock<std::mutex> lk(spec_mx_);
+    for (;;) {
+        spec_cv_.wait(lk, [&] { return spec_quit_ || spec_req_; });
+        if (spec_quit_) return;
+        spec_req_ = false;
+        const int il = spec_il_;
+        const int asked = (int) spec_experts_.size();
+        std::vector<int32_t> list;
+        list.swap(spec_experts_);
+        lk.unlock();
+        const Layer& L = layers_[(size_t) il];
+        const size_t gu2 = 2 * L.gu_bytes;
+        const bool by_file = L.gu_file != nullptr;   // positioned reads, ~10x the mapping's fault rate: the
+        int64_t filled = 0, held = 0;                // guess's bytes must land before the next layer stages
+        for (int32_t e : list) {
+            if (L.slot[(size_t) e] || ram_pool_->holds(il, e)) {
+                ++held;
+                continue;
+            }
+            uint8_t* gu = (uint8_t*) spec_scratch_, * down = gu + gu2;
+            try {
+                if (by_file) {
+                    L.gu_file->read(L.gu_at + (size_t) e * L.gu_stride, gu, L.gu_bytes);
+                    L.up_file->read(L.up_at + (size_t) e * L.gu_stride, gu + L.gu_bytes, L.gu_bytes);
+                    L.d_file->read(L.d_at + (size_t) e * L.d_bytes, down, L.d_bytes);
+                } else {
+                    std::memcpy(gu, L.exp_gate + (size_t) e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(gu + L.gu_bytes, L.exp_up + (size_t) e * L.gu_stride, L.gu_bytes);
+                    std::memcpy(down, L.exp_down + (size_t) e * L.d_bytes, L.d_bytes);
+                }
+            } catch (const std::exception&) {
+                continue;   // a read that fails loses this expert, not the engine
+            }
+            ram_pool_->fill(il, e, gu, down, gu2, L.d_bytes);
+            ++filled;
+        }
+        spec_filled_.fetch_add(filled, std::memory_order_relaxed);
+        if (debug)
+            std::fprintf(stderr, "[stage-spec] layer %d: settled %lld of %d candidates (held %lld)\n", il,
+                         (long long) filled, asked, (long long) held);
+        lk.lock();
+    }
+}
+
+// of the experts it routes to.  The rows are sorted by expert, the experts of the VRAM cache first; the other
+// experts pass through the staging buffer, as many at a time as it holds.  A full batch starts the copy of
+// L.ahead before it knows the routing, on a stream of its own, so the upload runs under the layer's attention.
+// A call that copies only the experts it routes to leaves a share of them to the CPU, which computes them while
+// the others are copied: the share that had the two take about as long (Options::cpu_share).
 // A MoE layer for a prompt batch: the experts on the GPU, by llama.cpp's MMQ.  A row is a token and one
 // of the experts it routes to.  The rows are sorted by expert, the experts of the VRAM cache first; the other
 // experts pass through the staging buffer, as many at a time as it holds.  A full batch starts the copy of
@@ -3045,6 +3168,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             route(il, h_rl_ + (size_t) t * n_expert_, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * n_used_,
                   w + (size_t) t * n_used_, tmp);
     });
+    const Clock::time_point t_route_end = Clock::now();
     count_.assign((size_t) n_expert_, 0);
     for (int i = 0; i < rr; ++i) {
         ++count_[(size_t) ids_[(size_t) i]];
@@ -3054,6 +3178,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         if (in_read_ && opt_.read_heat != 0 && !heat_.empty())
             ++heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
     }
+    // STRATA_POLY_STAGE_SPEC: this layer's routing is the next one's likeliest (the neighbours' experts
+    // correlate), and the pool is filled with it while the card takes this layer's batches.
+    stage_spec(il);
     // The CPU computes some of the routed experts outside VRAM while the others are copied: the ones the fewest
     // tokens chose, whose copy costs as much as any other's and which cost the CPU about as much as their tokens.
     int n_spare = 0, n_cpu = 0;
@@ -3212,6 +3339,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     bool held_in2 = staged_in2_;   // and the buffer it sits in, until an upload of this call moves it
     // The card's part.  With the CPU's beside it, the rows of its experts' places are left at nothing.
     const auto card = [&] {
+        const Clock::time_point t_card = Clock::now();
+        double copies = 0;   // the staging rounds' fault-copying, the saw-tooth's prime suspect
         if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * n_embd_ * sizeof(float), cs(st_)), "expert rows");
         if (rg > 0) {
             if (xm) ExpertMma::quantize(xn_, d_tok, mqm_, n_embd_, n_embd_, rg, st_);
@@ -3289,7 +3418,11 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                 if (s2_debug_) std::fprintf(stderr,
                     "[stage2] il=%d upload r=%d/%d buf=%d kept=%d early=%d mine=%d g0=%d m=%d rows=%d\n",
                     il, r, n_round, (int) second, kept, (int) early, (int) mine, g0, m, rows);
+                const Clock::time_point t_cp = Clock::now();
                 stage(L, group_.data() + g0, m, up_, n_cpu > 0, buf);
+                const double cp = std::chrono::duration<double, std::milli>(Clock::now() - t_cp).count();
+                copies += cp;
+                if (s2_debug_) std::fprintf(stderr, "[stage2] il=%d copy r=%d took %.0f ms\n", il, r, cp);
                 ck(cudaEventRecord((cudaEvent_t) rdy, cs(up_)), "expert staging");
                 holds = r;
                 held_in2 = second;
@@ -3333,6 +3466,12 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ck(cudaEventRecord((cudaEvent_t) fre, cs(st_)), "expert staging");
         }
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
+        if (s2_debug_) {
+            const double card_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_card).count();
+            const double route_ms = std::chrono::duration<double, std::milli>(t_route_end - t0).count();
+            std::fprintf(stderr, "[moe] il=%d route %.0f ms, card %.0f ms, copies %.0f ms, rounds %d, "
+                                 "cpu_rows %d\n", il, route_ms, card_ms, copies, n_round, n_cpu);
+        }
     };
     if (n_cpu == 0) {
         card();
@@ -3352,6 +3491,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         const double cpu = ms_since(start);
         behind.wait();
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
+        if (s2_debug_)
+            std::fprintf(stderr, "[moe] il=%d cpu %.0f ms / gpu %.0f ms (both had to run in parallel)\n", il, cpu,
+                         gpu);
         stats_.cpu_ms += cpu;
         stats_.cpu_experts += (int64_t) host_.size();
         // the share that would have had both done at once, if each one's time grows with its share

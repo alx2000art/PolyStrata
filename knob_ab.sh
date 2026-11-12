@@ -108,8 +108,10 @@ import json, os, sys
 path, flag, val = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = json.load(open(path, encoding="utf-8-sig"))
 args = cfg["args"] if isinstance(cfg.get("args"), list) else cfg["args"].split()
-i = args.index(flag)
-args[i + 1] = str(val)
+try:   # the flag may not be in the config yet: add it
+    args[args.index(flag) + 1] = str(val)
+except ValueError:
+    args += [flag, str(val)]
 cfg["args"] = args
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
