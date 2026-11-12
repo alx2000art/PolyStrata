@@ -90,6 +90,29 @@ The chain adds these command-line switches to the engine:
 The q8_0 KV cache is turned on per model with the engine's existing `--kv q8_0` flag, which this
 fork extends to DeepSeek V4 (it was qwen35moe-only before).
 
+## Environment switches (the engine reads these from the config's env block)
+
+| env switch | what it does | default |
+| --- | --- | --- |
+| `STRATA_POLY_STAGE_SPEC=<M>` | the staging's guess-reader: while the card takes layer j's batches, a thread settles layer j+1's whole non-cached expert set into --ram-experts-mib's pool (positioned reads). The next layer's staging then reads its experts out of RAM at memcpy speed instead of faulting them in. On whenever --ram-experts-mib is on; the value caps the candidate count per layer (256 covers a 256-expert layer) | on, 256 |
+| `STRATA_POLY_SCORE_CONTEXT=<N>` | the indexer's score stride covers N/4+1 entries instead of max_context/4+1. A 26k-token prompt needs stride 6501, not 33193 — the score tensor's HBM traffic drops proportionally. Set to the expected prompt's token count | max_context |
+| `STRATA_POLY_SCORE_MIB=<N>` | the indexer's score buffer budget in MiB: a bigger budget fits more tokens per launch, fewer launches, a steadier read | 128 |
+| `STRATA_POLY_STAGE2_DEBUG=1` | prints each staging round's copy time and each layer's route/card/copies split to stderr | off |
+
+The staging reads by position (pread) instead of memcpy through the mapping: a steady channel the
+page cache's state does not bend. The mapper's whole-file warmer stays off when the staging's
+guess-reader runs: the guess-reader's positioned reads warm the page cache exactly where the read
+routes to, beside settling the pool — a whole-file pass beside it only fights it for the disk.
+
+The indexer's score and select are pipelined across two streams when a prompt batch has more than
+one score batch: score(batch k+1) on the indexer's stream runs beside select(batch k) on the main
+stream — the score kernel is memory-bound, the select is compute-light, so they share the GPU.
+Each select waits its batch's score via an event; the attend below waits all selects on the main
+stream. Single-batch calls keep the old one-stream path.
+
+The idx scorer's mma runs at the decode windows' shapes only (n ≤ 16 tokens, +17% decode): the
+prompt batches' 6500-token calls take the scalar dp4a scorer they win with (−8% of the read).
+
 ## Verdicts of the live checks (DeepSeek V4 Flash 0731, one RTX 4080 SUPER, November 2026)
 
 - **`--ram-experts-mib 6144` — kept.** Quality-neutral (a ten-prompt battery at temperature 0
