@@ -2963,31 +2963,26 @@ void Engine::pf_read() {
     }
 }
 
-// The staging's own guess-reader (STRATA_POLY_STAGE_SPEC=<M>): a prompt batch's layer hands this thread the
+// The staging's own guess-reader: a prompt batch's layer hands this thread the
 // experts it routed to, the most used first, and the thread settles the ones the cache and the pool lack into
 // the pool while the card takes the layer's batches.  The next layer's staging then reads its experts out of
 // RAM at memcpy speed instead of faulting them in beside the card's work - the load's bursts and holes
 // straighten, the reads' disk bytes move off the card's critical path.
+// On whenever --ram-experts-mib is on (the pool is the carrier); STRATA_POLY_STAGE_SPEC=<M> overrides the
+// candidate count (default 256).
 void Engine::start_spec() {
-    const char* v = std::getenv("STRATA_POLY_STAGE_SPEC");
-    if (!v || !*v) return;
-    spec_m_ = std::atoi(v);
-    if (spec_m_ <= 0 || spec_m_ > n_expert_) {
-        std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGE_SPEC=%s is not a candidate count of 1..%d: "
-                             "the staging's guess-reader stays off\n", v, n_expert_);
-        return;
-    }
-    if (!ram_pool_) {
-        std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGE_SPEC needs --ram-experts-mib: the staging's "
-                             "guess-reader stays off\n");
-        return;
+    if (!ram_pool_) return;
+    spec_m_ = 256;
+    if (const char* v = std::getenv("STRATA_POLY_STAGE_SPEC"); v && *v) {
+        const int m = std::atoi(v);
+        if (m > 0 && m <= n_expert_) spec_m_ = m;
     }
     spec_on_ = true;
     spec_scratch_ = std::malloc(ram_pool_->slot_bytes());
     if (!spec_scratch_) return;
     spec_thread_ = std::thread([this] { spec_loop(); });
-    std::fprintf(stderr, "strata-poly: STRATA_POLY_STAGE_SPEC: a layer's top %d routed experts settle into the "
-                         "pool while the card takes its batches\n", spec_m_);
+    std::fprintf(stderr, "strata-poly: the staging's guess-reader: a layer's top %d routed experts settle into "
+                         "the pool while the card takes its batches\n", spec_m_);
 }
 
 // The hand-off: the NEXT MoE layer's whole non-cached set, settled under that layer's own keys while the card
