@@ -331,6 +331,9 @@ public:
     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
 
     const Stats& stats() const;
+    /// The ladder's RAM rung (follow_loop()): pool reads that hit and that had to go to the file.
+    int64_t pool_hits() const { return pool_hits_.load(std::memory_order_relaxed); }
+    int64_t pool_misses() const { return pool_misses_.load(std::memory_order_relaxed); }
     int cached_experts() const { return cached_ + (next_ ? next_->cached_experts() : 0); }
     int total_experts() const { return n_moe_ * n_expert_ + (next_ ? next_->total_experts() : 0); }
     double cached_gib() const { return double(exp_at_) / double(1ull << 30) + (next_ ? next_->cached_gib() : 0); }
@@ -834,6 +837,13 @@ protected:
     std::vector<uint8_t> coming_;    ///< per (layer, expert): on its way into the cache
     std::vector<Pick> in_, out_;     ///< per trade number: the experts to bring in, and the ones to give up
     std::vector<size_t> trade_at_;   ///< per trade number: how many of its pairs follow() has taken
+    std::atomic<int64_t> pool_hits_{0}, pool_misses_{0};   ///< the ladder's RAM rung (follow_loop())
+
+    // STRATA_POLY_ROUTE_DUMP: moe()'s (layer, expert) stream, uint16 codes of il*n_expert+e behind an 8-byte
+    // header { "PRTD", n_layers, n_expert } - pool_tune.py's replay of the ladder reads this.
+    void* route_dump_ = nullptr;
+    std::vector<uint16_t> route_buf_;
+    void route_dump_put(int il, int e);
 
     int64_t pos_ = 0;
     const int32_t* tok_ = nullptr;       ///< the tokens of the call under way, a row each as h_rl_ has them (route())
