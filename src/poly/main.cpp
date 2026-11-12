@@ -85,6 +85,8 @@ struct Sampling {
     unsigned long long seed = 0;
 };
 
+void print_top(const float* logits, int n_vocab, int n);   // below once(): the loop watch's dumps use it
+
 // llama.cpp's sampler chain in its default order: penalties, top-k, top-p, min-p, temperature, then the draw.
 class Sampler {
 public:
@@ -462,6 +464,13 @@ struct Session {
             repeats.reset();
             repeats.append(history.data(), history.size());
         }
+        // STRATA_POLY_LOOP_WATCH=1: a run of one token 32 long prints the top logits of the run's steps -
+        // the '#606' loop's live state, caught while it still is one.  The logits identical step to step say
+        // the decode's state stopped moving (a per-step write the replay misses); logits that change under a
+        // stuck argmax say the sampler or the caches; how they change is which of those to hunt.
+        const bool loop_watch = std::getenv("STRATA_POLY_LOOP_WATCH") != nullptr;
+        int32_t watch_tok = 0;
+        int watch_run = 0, watch_left = 0;
         const auto pick = [&](const float* logits) {
             picked_from = logits;
             if (follow && r.produced < (int64_t) follow->size()) return (*follow)[(size_t) r.produced];
@@ -469,6 +478,16 @@ struct Session {
         };
         // Shows a token.  False when the answer ends with it.
         const auto show = [&](int32_t t) {
+            if (loop_watch) {
+                if (t == watch_tok) ++watch_run; else { watch_tok = t; watch_run = 1; }
+                if (watch_run >= 32 && watch_left <= 0) watch_left = 12;
+                if (watch_left > 0) {
+                    --watch_left;
+                    std::fprintf(stderr, "[loop606] step %d of %dx %d, pos %lld: ", watch_run, watch_run,
+                                 watch_tok, (long long) history.size());
+                    print_top(picked_from, engine.n_vocab(), 8);
+                }
+            }
             on_token(t);
             ++r.produced;
             history.push_back(t);
