@@ -121,6 +121,8 @@ void DeepSeek4::load_geometry() {
     need(head_dim_ % 2 == 0 && head_dim_ <= 2048 && n_rot_ % 2 == 0 && n_rot_ <= head_dim_ && n_rot_ <= idx_dim_,
          "bad attention.key_length or rope.dimension_count");
     need(idx_dim_ == 128 && idx_heads_ > 0 && idx_top_k_ > 0, "the indexer's keys are not 128 values");
+    std::fprintf(stderr, "strata-poly: the indexer: %d heads of %d values, top %d rows, the scores start at "
+                         "position %d\n", idx_heads_, idx_dim_, idx_top_k_, idx_top_k_ * 4);
     need(o_groups_ > 0 && n_head_ % o_groups_ == 0 && window_ > 0, "bad attention.output_group_count or window");
 
     const MetaValue* ratios = find("attention.compress_ratios");
@@ -464,6 +466,10 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
                   st_, at);
         lin(B.idx_proj, xn_, iw_, n);
         const float iscale = 1.f / std::sqrt((float) (idx_dim_ * idx_heads_));
+        // 1: the tensor cores at the decode windows' shapes only (the prompt batches win with the scalar
+        // kernel); 2: always, the prompt batches too - their score kernel is the phase's biggest cost and the
+        // mma's is to be measured against it ([att] score+sel)
+        const bool mma = opt_.idx_mma == 2 || (opt_.idx_mma == 1 && n <= 16);
         if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[5], cs(st_)), "att ev5");
         // score_ has room for some of a batch's tokens at a long context; they take turns.  A token that sees
         // top_k compressed rows or fewer takes them all and needs no scores; a recorded launch cannot tell.
@@ -488,7 +494,7 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
                     if (at || (pos + t + c) / 4 > idx_top_k_)
                         dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys,
                                        score_, score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale, st_, at_t,
-                                       sized, opt_.idx_mma && n <= 16);
+                                       sized, mma);
                     dsv4_select(score_, score_stride_, sel_ + (size_t) t * idx_top_k_, idx_top_k_, idx_top_k_, 4,
                                 pos + t, c, st_, at_t);
                 }
@@ -500,7 +506,7 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
                     if (at || (pos + t + c) / 4 > idx_top_k_)
                         dsv4_idx_score(iq_ + (size_t) t * idx_heads_ * idx_dim_, iw_ + (size_t) t * idx_heads_, B.keys,
                                        score_, score_stride_, idx_dim_, idx_heads_, 4, pos + t, c, iscale,
-                                       cs(idx_st_), at_t, sized, opt_.idx_mma && n <= 16);
+                                       cs(idx_st_), at_t, sized, mma);
                     ck(cudaEventRecord((cudaEvent_t) idx_ev_, cs(idx_st_)), "idx score event");
                     if (t > 0) {
                         ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) idx_ev_, 0), "idx score wait");
