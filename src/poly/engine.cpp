@@ -2977,7 +2977,10 @@ void Engine::pf_read() {
 // candidate count (default 256).
 void Engine::start_spec() {
     if (!ram_pool_) return;
-    spec_m_ = 256;
+    // 64 and not the whole layer: the settles take 17-51 experts a layer, and every candidate above what the
+    // pool keeps is a pread whose page-cache churn evicts what the routed reads were going to take - the A/B
+    // gave 64 the prefill 10 s faster and 32 GiB of the SSD less than 256.
+    spec_m_ = 64;
     if (const char* v = std::getenv("STRATA_POLY_STAGE_SPEC"); v && *v) {
         const int m = std::atoi(v);
         if (m > 0 && m <= n_expert_) spec_m_ = m;

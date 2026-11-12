@@ -95,7 +95,7 @@ fork extends to DeepSeek V4 (it was qwen35moe-only before).
 
 | env switch | what it does | default |
 | --- | --- | --- |
-| `STRATA_POLY_STAGE_SPEC=<M>` | the staging's guess-reader: while the card takes layer j's batches, a thread settles layer j+1's whole non-cached expert set into --ram-experts-mib's pool (positioned reads). The next layer's staging then reads its experts out of RAM at memcpy speed instead of faulting them in. On whenever --ram-experts-mib is on; the value caps the candidate count per layer (256 covers a 256-expert layer) | on, 256 |
+| `STRATA_POLY_STAGE_SPEC=<M>` | the staging's guess-reader: while the card takes layer j's batches, a thread settles layer j+1's likeliest experts into --ram-experts-mib's pool (positioned reads). The next layer's staging then reads those out of RAM at memcpy speed instead of faulting them in. On whenever --ram-experts-mib is on; the value caps the candidates a layer (the settles take 17-51, and every candidate past what the pool keeps is a pread whose page-cache churn evicts what the routed reads were going to take - 64 beat 256 by 10 s of a warm prefill and 32 GiB of the SSD) | on, 64 |
 | `STRATA_POLY_SCORE_CONTEXT=<N>` | the indexer's score stride covers N/4+1 entries instead of max_context/4+1. A 26k-token prompt needs stride 6501, not 33193 — the score tensor's HBM traffic drops proportionally. Set to the expected prompt's token count | max_context |
 | `STRATA_POLY_SCORE_MIB=<N>` | the indexer's score buffer budget in MiB: a bigger budget fits more tokens per launch, fewer launches, a steadier read | 128 |
 | `STRATA_POLY_STAGE2_DEBUG=1` | prints each staging round's copy time, each layer's route/card/copies split, and each prompt batch's attention phase (`[att] il=.. qkv .., squeeze .., idx .., score+sel .., attend .. ms` - the GPU time of the q/kv half, the compressor, the indexer's preparation, the indexer's score+select, and the attend's own; CUDA events, prompt batches only) to stderr | off |
@@ -135,13 +135,19 @@ prompt batches' 6500-token calls take the scalar dp4a scorer they win with (−8
 - **`--resident-topk` — rejected on DSv4.** The router's weights are flat (the top-3 hold only
   65 to 67 percent of the token's expert weight), the cap dulls the model. The cells are out of
   the sweep.
-- **STRATA_POLY_STAGED_TILES (env)** — kept on in the production set (`8,16,32`): the decode
-  sweep put it at +9.3 percent inside the whole set, though the number was never isolated against
-  it off.  The answers' risk is narrower than the first verdict read: the size classes' launches
-  agree with the one-launch path to the bit except where llama.cpp's MMQ stream-k (split_exact)
-  reorders a row's partial sums by the launch's tile count - a fp32 summation reorder, not the
-  fp16 mma class of --expert-mma.  An isolated on/off A/B (`knob_ab.sh --env
-  STRATA_POLY_STAGED_TILES 8,16,32 off`) and a temperature-0 answer battery are still due.
+- **STRATA_POLY_STAGED_TILES (env) — kept on (`8,16,32`), the isolated A/B confirms the decode
+  gain.** Off against on at a 26k prompt: 28.2 against 25.9 decode tokens a second (+8.9), the
+  prefill neutral, the prefill's SSD within the run-to-run spread.  With the first sweep's +9.3
+  that is two agreeing measurements.  The answers' risk stays the narrow one the code's comment
+  bounds: the size classes' launches agree with the one-launch path to the bit except where
+  llama.cpp's MMQ stream-k (split_exact) reorders a row's partial sums by the launch's tile count
+  - a fp32 summation reorder, not the fp16 mma class of --expert-mma.  A temperature-0 answer
+  battery would close the last question.
+- **STRATA_POLY_STAGE_SPEC=64 — the new default.** The guess-reader's candidates over-subscribe the
+  pool many times: the settles take 17-51 experts a layer, every candidate past that is a pread
+  whose page the routed reads will need from the cache the pread's churn evicts.  64 against 256
+  at a 26k prompt: the warm prefill 103 against 113 s, the SSD 106.6 against 138.2 GiB, the
+  settles' coverage and the decode untouched.
 - **`--prefetch-k`** — not ported: the upstream series rides on foreign refactors; the native
   `--ram-experts-mib` pool took over its part.
 
