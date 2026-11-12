@@ -3176,6 +3176,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const Clock::time_point t_route_end = Clock::now();
     count_.assign((size_t) n_expert_, 0);
     for (int i = 0; i < rr; ++i) {
+        // the route dump rides here: both of moe_rows' routing branches (the card's picks and the host's) have
+        // their picks in ids_ by now, and moe()'s hook covers the decode calls its own way
+        if (route_dump_) route_dump_put(il, ids_[(size_t) i]);
         ++count_[(size_t) ids_[(size_t) i]];
         ++use_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
         // a read's routing also counts as heat (no decay: a prompt is finite), for the staging's order while it
