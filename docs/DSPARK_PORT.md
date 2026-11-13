@@ -79,3 +79,30 @@ MTP; llama.cpp PR 25784 is the reference) ported to this fork's engine. The goal
   the prompt-cache restores (the drafter's state must follow).
 - The answer drift: like llama.cpp's, the guesses change the sampled path only through accepted
   tokens (the verify is exact) - the drift class of the existing guesses, not a new one.
+
+
+## Phase 0 done: the drafter's anatomy (from the header, 2026-11-13)
+
+The drafter GGUF (unsloth's `dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf`, 10.9 GB) is the
+**`dflash`** architecture - not deepseek4, the Engine class cannot load it:
+
+- **3 blocks** of the DSv4 block structure (the same tensor names: attn_q_a/q_b, kv, hc_*,
+  MoE with 256 experts, 6 used, expert_ffn 2048, exp_probs_b, the indexer in the metadata) -
+  but `compress_ratios [0,0,0]`: no compressed rows, a plain sliding-window attention of 128 -
+  far simpler than the main model's decode;
+- the **enc**: `fc.weight` (3*n_embd -> n_embd, the PR's number confirmed) +
+  `enc.output_norm.weight` - the stacked taps go through it into the blocks;
+- the **heads**: `output_hc_base/fn/scale.weight` + `output_norm.weight` (the logits),
+  `conf_proj.weight` (the confidence), `markov_w1/w2.weight` (the Markov re-rank);
+- **no embed_tokens / output.weight of its own** - the vocabulary is shared with the main model
+  (what the draft_ gate wants);
+- `dflash.target_layers: [41, 42, 43]` (1-based) = the config's [40, 41, 42] - the main model's
+  last three layers;
+- the quant mix: the experts MXFP4 (9 tensors), the attention projections Q3_K_XS (6), the rest
+  Q8_1/F32; no smaller quant exists (Q8_0 and BF16 only) and none is needed: the disk is the
+  experts (already MXFP4), the VRAM-resident dense part is ~1.5-2 GB.
+
+**The revised shape**: not a second Engine - a `DFlash` drafter class, a stripped DeepSeek4
+twin: the 3 blocks reuse the kernels (the same tensor structure), no comp rows, no hash layers,
+plus the enc and the heads; the drafter's KV is a simple ring of 128. The VRAM ledger improved:
+the main model's expert cache gives up ~1.5-2 GB, not 2.5-3.
