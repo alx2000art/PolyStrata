@@ -3738,24 +3738,11 @@ void Engine::run(const int32_t* tokens, int n) {
         if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, m); });
         else moe_shared(L, il, m);
     };
-    // DSpark: after a tap layer's tail, the call's rows' streams collapse to one n_embd row a row - the
-    // drafter's fc consumes their stack.  Inside the replayed lambda, so the graphs bake the capture in.
-    const auto tap_after = [&](int il, int m) {
-        if (!dspark_taps_) return;
-        for (int i = 0; i < dspark_taps_n_; ++i)
-            if (dspark_tap_layers_[i] == il) {
-                // the row-stacked layout: slot i's rows land at row * (slots * n_embd) + i * n_embd -
-                // the drafter's fc reads a row's stack as one 3 * n_embd vector
-                kernels::hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, m,
-                                 dspark_taps_n_ * n_embd_, st_);
-                break;
-            }
-    };
     const auto tail = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         dbg("ffn", il, fo_, n_embd_);
-        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, m); tap_after(il, m); });
-        else { layer_tail(L, il, m); tap_after(il, m); }
+        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, m); tap_capture(il, m); });
+        else { layer_tail(L, il, m); tap_capture(il, m); }
     };
 
     // A window's tokens, with experts on the CPU, go through the layers together or in two halves, one behind
@@ -4108,6 +4095,24 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     stats_.tokens += n;
 }
 
+// DSpark/EAGLE: after a tap layer's tail, the call's rows' streams collapse to one n_embd row a
+// row (the drafter's fc reads a row's stack as one 3 * n_embd vector).  A read's last tap layer's
+// rows ride to the host: the read goes through the layers call-major, so the device buffer holds
+// one call's taps only, and the read's end injects them in batches from there.
+void Engine::tap_capture(int il, int n) {
+    if (!dspark_taps_) return;
+    for (int i = 0; i < dspark_taps_n_; ++i)
+        if (dspark_tap_layers_[i] == il) {
+            kernels::hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
+            if (i == dspark_taps_n_ - 1 && in_read_ && taps_host_)
+                ck(cudaMemcpyAsync(taps_host_ + (size_t) pos_ * dspark_taps_n_ * n_embd_, dspark_taps_,
+                                   size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost,
+                                   cs(st_)),
+                   "the taps to the host");
+            break;
+        }
+}
+
 // A layer for n tokens, as run() hands it to the card when nothing is replayed or printed.
 void Engine::layer(int il, int n) {
     Layer& L = layers_[(size_t) il];
@@ -4121,6 +4126,7 @@ void Engine::layer(int il, int n) {
         if (moe(L, il, n)) moe_add(n);
     }
     layer_tail(L, il, n);
+    tap_capture(il, n);
 }
 
 // A prompt's tokens in the calls eval() would get, max_rows() at a time.  With experts outside the cache, each
@@ -4161,6 +4167,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     const int n_calls = (int) calls_.size();
     in_read_ = true;   // the batches below count their routing into heat_ (moe_rows), for the read's staging
                        // and for the cache at the read's end
+    // DSpark/EAGLE: the read's taps ride to the host (the layer-major order rewrites the device
+    // buffer per call); the read's end injects them in batches.
+    if (eagle3_ && dspark_taps_n_)
+        taps_host_ = (float*) std::malloc(size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float));
     OnCard here(device_, split_);
     cover(pos_ + n);
     // On several cards, each reads through its own layers and hands the rows on, and `turn` hears of a card's
@@ -4372,6 +4382,26 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             std::fprintf(stderr, "[warm] the read's tail folded %d experts into recent_, the trades asked\n",
                          folded);
     }
+    // DSpark/EAGLE: the read's rows' taps rode to the host (the layer-major order); the drafter's
+    // cache rows fill in batches here - the decode's draft rounds then attend them.
+    if (eagle3_ && taps_host_) {
+        float* emb_stage = (float*) std::malloc(size_t(rows_) * n_embd_ * sizeof(float));
+        if (!emb_stage) throw std::runtime_error("the eagle3 injection's staging ran out of memory");
+        for (int64_t p = 0; p < n; p += rows_) {
+            const int m = int(std::min<int64_t>(rows_, n - p));
+            ck(cudaMemcpyAsync(dspark_taps_, taps_host_ + (size_t) (pos0 + p) * dspark_taps_n_ * n_embd_,
+                               size_t(m) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyHostToDevice,
+                               cs(st_)),
+               "the taps back");
+            for (int t = 0; t < m; ++t) embed(tokens[p + t], emb_stage + (size_t) t * n_embd_);
+            ck(cudaMemcpyAsync(eagle3_->emb_dev(), emb_stage, size_t(m) * n_embd_ * sizeof(float),
+                               cudaMemcpyHostToDevice, cs(st_)), "the eagle embs");
+            eagle3_->inject(dspark_taps_, eagle3_->emb_dev(), pos0 + p, m, st_);
+        }
+        std::free(emb_stage);
+    }
+    std::free(taps_host_);
+    taps_host_ = nullptr;
     r_ = r0;
     pos_ = pos0;
     if (next_) {
@@ -4571,6 +4601,18 @@ void Engine::draft_step(int32_t token, int i) {
 
 int32_t Engine::draft(int32_t token, int i, float* prob) {
     if (next_) return next_->draft(token, i, prob);   // the last card has the draft block
+    if (eagle3_) {
+        // the EAGLE-3 drafter: its own one-layer forward and its own linear cache - the position
+        // bookkeeping lives in the class, the embed and the likeliest here
+        OnCard here(device_, split_);
+        if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
+        embed(token, eagle_emb_);
+        const float* logits = eagle3_->draft_logits(eagle_emb_, st_);
+        likeliest(logits, eagle3_->dvocab(), h_guess_, st_);
+        ck(cudaStreamSynchronize(cs(st_)), "draft");
+        *prob = h_guess_->prob;
+        return eagle3_->d2t(h_guess_->token);
+    }
     OnCard here(device_, split_);
     if (!draft_) throw std::logic_error("draft: this model has no block that guesses ahead");
     if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");

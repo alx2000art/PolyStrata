@@ -190,14 +190,11 @@ void Eagle3::midlayer(int64_t pos, int n, void* stream) {
     native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
 }
 
-void Eagle3::inject(const float* taps_dev, const float* emb_host, int64_t pos, int n, void* stream) {
+void Eagle3::inject(const float* taps_dev, const float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
     native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
     native_mmvq(GGML_TYPE_Q8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
-    // the embeddings ride into emb_dev_ for the midlayer's norms
-    ck(cudaMemcpyAsync(emb_dev_, emb_host, size_t(n) * n_embd_ * sizeof(float), cudaMemcpyHostToDevice,
-                       cs(stream)), "eagle emb");
-    midlayer(pos, n, stream);
+    midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
 }
 

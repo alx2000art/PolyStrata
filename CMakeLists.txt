@@ -2066,7 +2066,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
 
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
                             src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/cpu_tiled.cpp src/poly/cpu_tiled_kernel.cpp
-                            src/poly/kernels.cu src/poly/kernels_dsv4.cu src/poly/expert_mma.cu
+                            src/poly/kernels.cu src/poly/kernels_dsv4.cu src/poly/eagle3.cu src/poly/expert_mma.cu
                             src/core/conversation_memory.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories} ${_strata_tiled_ggml_src})
   # the driver's virtual memory calls: the attention caches grow with the conversation; on HIP they are HIP's
