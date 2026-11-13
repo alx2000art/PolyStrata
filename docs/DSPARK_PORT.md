@@ -128,3 +128,52 @@ they are.
 The tap capture rides the layer loop: after layer_tail at the tap layers, `hc_mean(r_, tap, n_embd_,
 rows, st_)` - inside the replayed lambda so the graphs bake it in; the taps buffer is 3 x rows x
 n_embd, per-row, rewritten every call.
+
+
+## The better drafter found: EAGLE-3 for DeepSeek-V4-Flash-0731 (2026-11-14)
+
+**AQ-MedAI/DeepSeek-V4-Flash-0731-eagle3**: a 0.7B Llama-arch EAGLE-3 head trained on our exact
+checkpoint (safetensors BF16, MIT; SGLang-only instructions, no GGUF).  The acceptance lengths:
+**2.62-3.20 tokens a round** (HumanEval 3.16, Mtbench 2.86) - far above the MTP head's 0.74 and
+the DSpark's ~1.7.  The mass profile is the dream for a 16 GB card: dense, no MoE, the whole
+drafter ~1.4 GB BF16 - **resident in VRAM entirely**.
+
+**The anatomy** (the safetensors header + config.json, read over HF Range):
+- `fc.weight` [4096, 12288] - the SAME 3 x n_embd taps shape as the dspark's; the config says
+  `eagle_aux_hidden_state_layer_ids: [1, 20, 39]` - the low/mid/high layers (EAGLE-3's spread,
+  not the dspark's last-three);
+- ONE `midlayer` - a standard Llama block: GQA attention (64 heads, 8 kv, head_dim 64), SwiGLU
+  18432; the input is 8192-wide = [the target's embedding of the token, fc(the three taps)] - the
+  classic EAGLE-3 concat;
+- `lm_head.weight` [96000, 4096] - the drafter's own head over a REDUCED vocabulary (96000 of
+  129280), with `d2t` (the draft-to-target ids) and `t2d` (the target-to-draft mask) mappings -
+  the rare tokens are never proposed;
+- no embed_tokens - the token embedding comes from the main model's token_embd (the shared-embed
+  pattern our draft_ gate wants); `hidden_norm` for the features; the rope carries the main
+  model's yarn (factor 16, original 65536).
+
+**The flow**: the target's taps (hc_mean at layers 1/20/39 - the phase-1 capture with these
+indices) -> fc -> concat with the token's embedding -> the midlayer -> the draft; the recursion
+feeds the midlayer's own 4096 output as the next step's feature; the confidence = the sampled
+token's probability (no separate head needed).  The drafter keeps its own KV over the accepted
+tokens (a 0.7B layer - its replay is trivial); accept() is NOT a noop here, unlike DSpark.
+
+**The port plan (revised - the DFlash sections above stay as the dspark notes)**:
+- 0. the conversion: the safetensors -> GGUF (tools/gguf_writer.py; the tensors keep their HF
+  names; the KVs carry the draft vocab, the tap layers, the rope, d2t/t2d as arrays);
+- 1. the taps capture generalized: the indices from the draft file's KVs instead of the main
+  model's metadata (the phase-1 code, one change);
+- 2. the Eagle3 drafter class: the file load, the ONE Llama layer forward (the fork's window
+  attention kernel reused for the drafter's own KV - the draft heads are forgiving of a window),
+  the fc, the lm_head, the d2t translation;
+- 3. the draft loop: the iterative n_max steps behind Engine::draft, the drafter's KV replay per
+  verified window (0.7B - cheap);
+- 4. the acceptance on the real workload - the convention check (hc_mean vs another collapse)
+  shows itself instantly: the acceptance ~2.9 says the taps match SGLang's export, ~0.5 says no.
+
+**The honest economics** (the same ledger as the dspark's): the window of 4-5 tokens costs
+~4.5 x the per-token expert IO (the union amortizes to ~4x) + ~1.5x the dense; the round yields
+~3.9 tokens - the ledger sits at ~1.0-1.1x on paper and lives or dies on the REAL acceptance of
+the head against our workload and our tap convention.  The MTP head (one block, 0.74) stays the
+cheap calibration experiment that measures the window overhead before this port's phases 2-3
+run.
