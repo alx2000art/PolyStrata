@@ -45,7 +45,7 @@ void hc_mix(const float* r, const float* fn, float* mix, int n_embd, int rows, i
 /// The hyper-connection write, in place on r: r[dst] = x * post[dst] + sum_src r[src] * comb[dst, src].
 void hc_post(const float* x, const float* hcw, float* r, int n_embd, int rows, void* stream);
 /// y = mean over the hc streams, token by token.
-void hc_mean(const float* r, float* y, int n_embd, int rows, void* stream);
+void hc_mean(const float* r, float* y, int n_embd, int rows, int y_stride, void* stream);
 /// DeepSeek V4's output read of the streams: y = sum_h r[h] * (sigmoid(fn[h] . r * rs * scale + base[h]) + hc_eps),
 /// rs the flat RMS norm's scale.  fn: hc rows of hc * n_embd.  mix: hc + 1 floats a token of scratch.
 void hc_head(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* y,

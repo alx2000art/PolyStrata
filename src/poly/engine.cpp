@@ -2469,7 +2469,7 @@ void Engine::alloc() {
     use_.assign(layers_.size() * n_expert_, 0);
     heat_.assign(layers_.size() * n_expert_, 0);
     warm_heat_.assign(layers_.size() * n_expert_, 0);
-    if (dspark_taps_n_) dspark_taps_ = (float*) dmalloc(size_t(dspark_taps_n_) * rows_ * n_embd_ * sizeof(float),
+    if (dspark_taps_n_) dspark_taps_ = (float*) dmalloc(rows_ * size_t(dspark_taps_n_) * n_embd_ * sizeof(float),
                                                         "the dspark taps");
     // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
     // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.  Here,
@@ -3744,7 +3744,10 @@ void Engine::run(const int32_t* tokens, int n) {
         if (!dspark_taps_) return;
         for (int i = 0; i < dspark_taps_n_; ++i)
             if (dspark_tap_layers_[i] == il) {
-                kernels::hc_mean(r_, dspark_taps_ + (size_t) i * rows_ * n_embd_, n_embd_, m, st_);
+                // the row-stacked layout: slot i's rows land at row * (slots * n_embd) + i * n_embd -
+                // the drafter's fc reads a row's stack as one 3 * n_embd vector
+                kernels::hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, m,
+                                 dspark_taps_n_ * n_embd_, st_);
                 break;
             }
     };

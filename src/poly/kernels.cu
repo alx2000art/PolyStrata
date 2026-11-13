@@ -357,13 +357,13 @@ __global__ void hc_head_kernel(const float* __restrict__ r, const float* __restr
     y[size_t(blockIdx.y) * n_embd + i] = s;
 }
 
-__global__ void hc_mean_kernel(const float* __restrict__ r, float* __restrict__ y, int n_embd) {
+__global__ void hc_mean_kernel(const float* __restrict__ r, float* __restrict__ y, int n_embd, int y_stride) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_embd) return;
     r += size_t(blockIdx.y) * HC * n_embd;
     float acc = r[i];
     for (int s = 1; s < HC; ++s) acc += r[size_t(s) * n_embd + i];
-    y[size_t(blockIdx.y) * n_embd + i] = acc * (1.0f / HC);
+    y[size_t(blockIdx.y) * y_stride + i] = acc * (1.0f / HC);
 }
 
 // d_conv is 4: three past inputs per channel, then the new one.  A thread is a channel and walks the tokens.
@@ -2302,8 +2302,8 @@ void hc_post(const float* x, const float* hcw, float* r, int n_embd, int rows, v
     hc_post_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(x, hcw, r, n_embd);
 }
 
-void hc_mean(const float* r, float* y, int n_embd, int rows, void* stream) {
-    hc_mean_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, y, n_embd);
+void hc_mean(const float* r, float* y, int n_embd, int rows, int y_stride, void* stream) {
+    hc_mean_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, y, n_embd, y_stride);
 }
 
 void hc_head(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* y,

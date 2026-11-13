@@ -94,7 +94,7 @@ void Glm5Next::shift_rows(ptrdiff_t by) {
 
 // The model's output for `rows` tokens from row `first` of the call: the streams' mean, normed.
 void Glm5Next::output_rows(int first, int rows, float* h) {
-    hc_mean(r_ + (size_t) first * kHc * n_embd_, cur_, n_embd_, rows, st_);
+    hc_mean(r_ + (size_t) first * kHc * n_embd_, cur_, n_embd_, rows, n_embd_, st_);
     rms_norm(cur_, fp(out_norm_), h, n_embd_, rows, rms_eps_, st_);
 }
 
