@@ -1999,15 +1999,28 @@ void Engine::load(const Options& o) {
     gg_ = std::make_unique<Shards>(opt_.model);
     if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
     load_geometry();
-    // DSpark's tap layers sit in the main model's metadata; the capture only runs when a draft file is
-    // there to consume the taps.
+    // DSpark/EAGLE: the tap layers.  A dflash draft file carries its own (eagle3.tap_layers - the
+    // EAGLE-3 heads' low/mid/high spread); the main model's dspark_target_layer_ids serve the dspark
+    // drafter.  The capture only runs when a draft file is there to consume the taps.
+    if (dg_ && opt_.draft && opt_.window != 1) {
+        if (const MetaValue* a = meta_in(*dg_, "general.architecture");
+            a && a->type == MetaType::STRING && a->s == "eagle3")
+            draft_is_eagle3_ = true;
+        if (const MetaValue* t = meta_in(*dg_, "eagle3.tap_layers");
+            t && t->type == MetaType::ARRAY && t->items.size() == 3) {
+            for (int i = 0; i < 3; ++i) dspark_tap_layers_[(size_t) i] = (int) t->items[(size_t) i].u;
+            dspark_taps_n_ = 3;
+        }
+    }
     if (const MetaValue* taps = meta_in(*gg_, "dspark_target_layer_ids"))
         if (taps->type == MetaType::ARRAY && taps->items.size() == 3 && !opt_.draft_model.empty() &&
-            opt_.draft && opt_.window != 1) {
+            opt_.draft && opt_.window != 1 && dspark_taps_n_ == 0) {
             for (int i = 0; i < 3; ++i) dspark_tap_layers_[(size_t) i] = (int) taps->items[(size_t) i].u;
             dspark_taps_n_ = 3;
         }
-    if (block_ != dg_.get()) dg_.reset();
+    // a dflash draft file is not the nextn block the probe looks for, but the Eagle3 drafter still
+    // reads it - the file stays loaded for it
+    if (block_ != dg_.get() && !draft_is_eagle3_) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;
 
     // STRATA_POLY_STAGED_TILES=8,16,32: a prompt batch's staged experts go to llama.cpp's MMQ in size classes, the

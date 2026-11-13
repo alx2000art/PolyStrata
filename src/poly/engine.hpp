@@ -873,6 +873,8 @@ protected:
     float* dspark_taps_ = nullptr;                 ///< dspark_taps_n_ slots of rows_ * n_embd_ floats
     int dspark_tap_layers_[3] = {-1, -1, -1};      ///< the layers the taps come from
     int dspark_taps_n_ = 0;                        ///< the filled slots (0: the capture is off)
+    bool draft_is_eagle3_ = false;                 ///< the draft file is a dflash/eagle3 head - the
+                                                   ///< Eagle3 drafter consumes it, not the nextn probe
 
     // STRATA_POLY_ROUTE_DUMP: moe()'s (layer, expert) stream, uint16 codes of il*n_expert+e behind an 8-byte
     // header { "PRTD", n_layers, n_expert } - pool_tune.py's replay of the ladder reads this.
