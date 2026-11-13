@@ -1999,6 +1999,14 @@ void Engine::load(const Options& o) {
     gg_ = std::make_unique<Shards>(opt_.model);
     if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
     load_geometry();
+    // DSpark's tap layers sit in the main model's metadata; the capture only runs when a draft file is
+    // there to consume the taps.
+    if (const MetaValue* taps = meta_in(*gg_, "dspark_target_layer_ids"))
+        if (taps->type == MetaType::ARRAY && taps->items.size() == 3 && !opt_.draft_model.empty() &&
+            opt_.draft && opt_.window != 1) {
+            for (int i = 0; i < 3; ++i) dspark_tap_layers_[(size_t) i] = (int) taps->items[(size_t) i].u;
+            dspark_taps_n_ = 3;
+        }
     if (block_ != dg_.get()) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;
 
@@ -2448,6 +2456,8 @@ void Engine::alloc() {
     use_.assign(layers_.size() * n_expert_, 0);
     heat_.assign(layers_.size() * n_expert_, 0);
     warm_heat_.assign(layers_.size() * n_expert_, 0);
+    if (dspark_taps_n_) dspark_taps_ = (float*) dmalloc(size_t(dspark_taps_n_) * rows_ * n_embd_ * sizeof(float),
+                                                        "the dspark taps");
     // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
     // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.  Here,
     // where layers_ and n_expert_ are final (alloc() runs after load_geometry()).
@@ -3715,11 +3725,21 @@ void Engine::run(const int32_t* tokens, int n) {
         if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, m); });
         else moe_shared(L, il, m);
     };
+    // DSpark: after a tap layer's tail, the call's rows' streams collapse to one n_embd row a row - the
+    // drafter's fc consumes their stack.  Inside the replayed lambda, so the graphs bake the capture in.
+    const auto tap_after = [&](int il, int m) {
+        if (!dspark_taps_) return;
+        for (int i = 0; i < dspark_taps_n_; ++i)
+            if (dspark_tap_layers_[i] == il) {
+                kernels::hc_mean(r_, dspark_taps_ + (size_t) i * rows_ * n_embd_, n_embd_, m, st_);
+                break;
+            }
+    };
     const auto tail = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         dbg("ffn", il, fo_, n_embd_);
-        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, m); });
-        else layer_tail(L, il, m);
+        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, m); tap_after(il, m); });
+        else { layer_tail(L, il, m); tap_after(il, m); }
     };
 
     // A window's tokens, with experts on the CPU, go through the layers together or in two halves, one behind
