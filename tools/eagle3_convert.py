@@ -15,16 +15,16 @@ ALIGN = 32
 
 def w_str(out, s):
     b = s.encode("utf-8")
-    out.append(struct.pack("<Q", len(b)))
-    out.append(b)
+    out.extend(struct.pack("<Q", len(b)))
+    out.extend(b)
 
 def w_kv_value(out, t, v):
     if t == 4:
-        out.append(struct.pack("<I", v))
+        out.extend(struct.pack("<I", v))
     elif t == 7:
-        out.append(struct.pack("<B", 1 if v else 0))
+        out.extend(struct.pack("<B", 1 if v else 0))
     elif t == 10:
-        out.append(struct.pack("<Q", v))
+        out.extend(struct.pack("<Q", v))
     elif t == 8:
         w_str(out, v)
     else:
@@ -32,23 +32,23 @@ def w_kv_value(out, t, v):
 
 def w_kv(out, key, t, v):
     w_str(out, key)
-    out.append(struct.pack("<I", t))
+    out.extend(struct.pack("<I", t))
     if t == 4:
-        out.append(struct.pack("<I", v))
+        out.extend(struct.pack("<I", v))
     elif t == 6:
-        out.append(struct.pack("<f", v))
+        out.extend(struct.pack("<f", v))
     elif t == 7:
-        out.append(struct.pack("<B", 1 if v else 0))
+        out.extend(struct.pack("<B", 1 if v else 0))
     elif t == 8:
         w_str(out, v)
     elif t == 9:
         at, items = v
-        out.append(struct.pack("<I", at))
-        out.append(struct.pack("<Q", len(items)))
+        out.extend(struct.pack("<I", at))
+        out.extend(struct.pack("<Q", len(items)))
         for x in items:
             w_kv_value(out, at, x)
     elif t == 10:
-        out.append(struct.pack("<Q", v))
+        out.extend(struct.pack("<Q", v))
     else:
         raise SystemExit(f"kv type {t} not written")
 
