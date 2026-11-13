@@ -106,3 +106,25 @@ The drafter GGUF (unsloth's `dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf`, 10.9 GB) 
 twin: the 3 blocks reuse the kernels (the same tensor structure), no comp rows, no hash layers,
 plus the enc and the heads; the drafter's KV is a simple ring of 128. The VRAM ledger improved:
 the main model's expert cache gives up ~1.5-2 GB, not 2.5-3.
+
+
+## The engine pattern found: Glm5Next's draft virtuals
+
+The Engine base already virtualizes the draft block: `check_draft_block()`, `block_attend(pos, n)`,
+`block_rows(pos, n)` - Glm5Next (the glm5-next arch, 45 main layers + the draft block as the 46th in
+the same file) implements them, and `hc_mean` (kernels.hpp:48, the HC streams' mean per row - the
+taps primitive) already serves its output path.  The DSpark difference: the drafter is a **separate
+dflash file**, not an extra block in the main arch's naming - so the nextn-block approach (the
+engine reading `blk.43.nextn.*` as its own layer) cannot consume it.
+
+**The revised architecture**: a `DFlash` drafter class - not an Engine subclass, a small runner
+holding: the dflash file (Shards), the 3 blocks' weights, the enc (fc + norm), the heads, its own KV
+rings (3 layers, window 128, no compressed rows).  DeepSeek4's draft path constructs it when
+`--draft-model`'s file is dflash (its `general.architecture` says so), and the draft sequence runs:
+the taps (hc_mean of `r_` at the layers 40/41/42, per row) -> fc -> the 3 blocks -> the heads ->
+(the token, the confidence).  The verify windows, the policy and `Engine::draft`'s interface stay as
+they are.
+
+The tap capture rides the layer loop: after layer_tail at the tap layers, `hc_mean(r_, tap, n_embd_,
+rows, st_)` - inside the replayed lambda so the graphs bake it in; the taps buffer is 3 x rows x
+n_embd, per-row, rewritten every call.
