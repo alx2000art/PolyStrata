@@ -1028,6 +1028,8 @@ void Engine::load_shape() {
     draft_ = block_ && !tensor(n_layer_, "nextn.embed_tokens.weight") &&
              !tensor(n_layer_, "nextn.shared_head_head.weight");
     if (!draft_) block_ = nullptr;
+    std::fprintf(stderr, "strata-poly: the draft block %s\n",
+                 draft_ ? "runs: the decode guesses in windows" : "does not run: the decode goes a token a step");
     block_layer_ = draft_;
     n_embd_ = shape_i("embedding_length");
     // a file without the key has as many tokens as its token table
