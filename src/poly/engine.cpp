@@ -2270,7 +2270,7 @@ void Engine::alloc() {
     state_n_ = rec_n_ + (draft_ ? (size_t) n_embd_ : 0);
     const size_t state_floats = state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0);
     state_ = (float*) dmalloc(state_floats * sizeof(float), "the recurrent state");
-    if (draft_) {
+    if (draft_ || eagle3_) {
         hn_ = state_ + rec_n_;
         h_guess_ = (Likeliest*) hmalloc(sizeof(Likeliest), "pinned memory");   // likeliest() writes it
     }
