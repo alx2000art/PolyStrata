@@ -18,7 +18,7 @@
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
 #include "fattn.hpp"
-#include "strata/kernels/kernels::native_mmvq.hpp"
+#include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/rope_scaling.hpp"
 
 #include <cuda_fp16.h>

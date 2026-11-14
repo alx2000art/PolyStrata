@@ -4623,7 +4623,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         OnCard here(device_, split_);
         if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
         embed(token, eagle_emb_);
-        const float* logits = eagle3_->draft_logits(eagle_emb_, st_);
+        const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
         likeliest(logits, eagle3_->dvocab(), h_guess_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft");
         *prob = h_guess_->prob;

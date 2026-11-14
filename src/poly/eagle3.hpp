@@ -28,6 +28,7 @@ public:
     int dvocab() const { return dvocab_; }
     int32_t d2t(int32_t draft_id) const { return d2t_[(size_t) draft_id]; }
     bool ready() const { return loaded_; }
+    float* emb_dev() { return emb_dev_; }
 
 private:
     void midlayer(int64_t pos, int n, void* stream);   // the emb rides in emb_dev_
