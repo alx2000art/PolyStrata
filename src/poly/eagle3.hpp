@@ -68,6 +68,7 @@ private:
     float *scratch_ = nullptr;
     size_t scratch_floats_ = 0;
     std::vector<int64_t> d2t_;
+    int dbg_inj_ = 0, dbg_logits_ = 0;         // the one-shot debug prints left (2 of each)
     bool loaded_ = false;
 };
 

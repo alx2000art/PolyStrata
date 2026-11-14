@@ -24,6 +24,8 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <algorithm>
+#include <string>
 
 namespace strata::poly {
 
@@ -210,6 +212,22 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
     kernels::native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
     kernels::native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
+    if (dbg_inj_ < 2) {   // one-shot: sane taps in + sane fc out means the capture's layout, not the head
+        ++dbg_inj_;
+        std::vector<float> th(size_t(n) * 3 * n_embd_), hh(size_t(n) * n_embd_);
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync");
+        ck(cudaMemcpy(th.data(), taps_dev, th.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg taps");
+        ck(cudaMemcpy(hh.data(), hidden_, hh.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg hidden");
+        const auto st = [](const std::vector<float>& v) {
+            double s = 0; float mn = v[0], mx = v[0];
+            for (float x : v) { s += x; mn = std::min(mn, x); mx = std::max(mx, x); }
+            return std::string("mean=") + std::to_string(s / v.size()) + " min=" + std::to_string(mn) +
+                   " max=" + std::to_string(mx) + " head: " + std::to_string(v[0]) + " " +
+                   std::to_string(v[1]) + " " + std::to_string(v[2]);
+        };
+        std::fprintf(stderr, "[eagle] inject n=%d pos=%lld taps %s\n", n, (long long) pos, st(th).c_str());
+        std::fprintf(stderr, "[eagle] inject fc->hidden %s\n", st(hh).c_str());
+    }
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
 }
@@ -220,6 +238,15 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
     kernels::native_mmvq(kTypeQ8_0, lm_head_w_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
+    if (dbg_logits_ < 2) {   // one-shot: the logits' scale tells garbage (taps/fc/midlayer) from a broken d2t
+        ++dbg_logits_;
+        std::vector<float> lg((size_t) dvocab_);
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync2");
+        ck(cudaMemcpy(lg.data(), logits_, lg.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg logits");
+        double s = 0; float mx = lg[0];
+        for (float x : lg) { s += x; mx = std::max(mx, x); }
+        std::fprintf(stderr, "[eagle] logits mean=%.5f max=%.3f\n", s / lg.size(), mx);
+    }
     return logits_;
 }
 

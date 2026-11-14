@@ -878,6 +878,7 @@ protected:
     bool draft_is_eagle3_ = false;                 ///< the draft file is a dflash/eagle3 head - the
                                                    ///< Eagle3 drafter consumes it, not the nextn probe
     Eagle3* eagle3_ = nullptr;                     ///< the EAGLE-3 drafter (the head's weights, its KV)
+    int eagle_dbg_ = 0;                            ///< the draft() debug prints left (3 then silent)
     float* taps_host_ = nullptr;                   ///< the read's taps on the host (rows x 3 x n_embd)
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)
     void tap_capture(int il, int n);               ///< the hc_mean at a tap layer's tail (+ the read's D2H)

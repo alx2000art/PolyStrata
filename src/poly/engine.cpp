@@ -4632,6 +4632,12 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         likeliest(logits, eagle3_->dvocab(), h_guess_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft");
         *prob = h_guess_->prob;
+        if (eagle_dbg_ < 3) {   // the head's first verdicts: a p stuck near 0 names the logits, not the window
+            ++eagle_dbg_;
+            std::fprintf(stderr, "[eagle] draft %d/3: p=%.4f draft_id=%d -> target_id=%d (dvocab %d)\n",
+                         eagle_dbg_, *prob, (int) h_guess_->token, (int) eagle3_->d2t(h_guess_->token),
+                         eagle3_->dvocab());
+        }
         return eagle3_->d2t(h_guess_->token);
     }
     OnCard here(device_, split_);
