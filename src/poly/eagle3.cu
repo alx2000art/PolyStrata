@@ -200,6 +200,14 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
+    if (dbg_att_ < 2) {   // one-shot: the attention's own output, before the norms touch hidden_
+        ++dbg_att_;
+        float h[4] = {};
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncA");
+        ck(cudaMemcpy(h, o_, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg att");
+        std::fprintf(stderr, "[eagle] midlayer pos=%lld n=%d att->o: %.4f %.4f %.4f %.4f\n", (long long) pos, n,
+                     h[0], h[1], h[2], h[3]);
+    }
     // the residual + the norm (and its Q8_1, which nothing reads any more) in one launch
     kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
     linear(gate_w_, normed_, n_embd_, n_ff_, gate_out_, n, stream);
@@ -238,6 +246,13 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         }
     }
     midlayer(emb_dev, pos, n, stream);
+    if (dbg_inj_ <= 2) {   // the first two injects' midlayer output: where the nan first shows
+        float h[4] = {};
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncM");
+        ck(cudaMemcpy(h, normed_, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg normed");
+        std::fprintf(stderr, "[eagle] inject pos=%lld midlayer->normed: %.4f %.4f %.4f %.4f\n", (long long) pos,
+                     h[0], h[1], h[2], h[3]);
+    }
     cache_pos_ = pos + n;
 }
 

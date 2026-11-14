@@ -78,7 +78,7 @@ private:
     // the prompt batches' F32 view of one BF16 weight matrix at a time (the widest is n_ff x n_embd)
     float *wf_e_ = nullptr;
     std::vector<int64_t> d2t_;
-    int dbg_inj_ = 0, dbg_logits_ = 0;         // the one-shot debug prints left (2 of each)
+    int dbg_inj_ = 0, dbg_att_ = 0, dbg_logits_ = 0;   // the one-shot debug prints left (2 of each)
     bool loaded_ = false;
 };
 
