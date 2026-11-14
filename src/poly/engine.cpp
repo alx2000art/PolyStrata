@@ -2484,7 +2484,7 @@ void Engine::alloc() {
     if (dspark_taps_n_) dspark_taps_ = (float*) dmalloc(rows_ * size_t(dspark_taps_n_) * n_embd_ * sizeof(float),
                                                         "the dspark taps");
     if (eagle3_) {
-        eagle3_->begin(rows_, opt_.max_context);
+        eagle3_->begin(rows_, opt_.max_context, blas_);
         eagle_emb_ = (float*) hmalloc(n_embd_ * sizeof(float), "the eagle emb");
     }
     // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
@@ -4121,7 +4121,7 @@ void Engine::tap_capture(int il, int n) {
         if (dspark_tap_layers_[i] == il) {
             hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
             if (i == dspark_taps_n_ - 1 && in_read_ && taps_host_)
-                ck(cudaMemcpyAsync(taps_host_ + (size_t) pos_ * dspark_taps_n_ * n_embd_, dspark_taps_,
+                ck(cudaMemcpyAsync(taps_host_ + (size_t) (pos_ - taps_pos0_) * dspark_taps_n_ * n_embd_, dspark_taps_,
                                    size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost,
                                    cs(st_)),
                    "the taps to the host");
@@ -4184,16 +4184,13 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     in_read_ = true;   // the batches below count their routing into heat_ (moe_rows), for the read's staging
                        // and for the cache at the read's end
     // DSpark/EAGLE: the read's taps ride to the host (the layer-major order rewrites the device
-    // buffer per call); the read's end injects them in batches.
-    if (eagle3_) {
+    // buffer per call); the read's end injects them in batches.  The buffer indexes READ-RELATIVE
+    // rows: a prompt arrives in chunks, and pos_ inside the read is the chunk's absolute start.
+    if (eagle3_ && dspark_taps_n_) {
+        taps_pos0_ = pos_;
         taps_host_ = (float*) std::malloc(size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float));
         if (!taps_host_) throw std::runtime_error("the eagle3 taps' host buffer ran out of memory");
     }
-                       // and for the cache at the read's end
-    // DSpark/EAGLE: the read's taps ride to the host (the layer-major order rewrites the device
-    // buffer per call); the read's end injects them in batches.
-    if (eagle3_ && dspark_taps_n_)
-        taps_host_ = (float*) std::malloc(size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float));
     OnCard here(device_, split_);
     cover(pos_ + n);
     // On several cards, each reads through its own layers and hands the rows on, and `turn` hears of a card's
@@ -4412,7 +4409,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         if (!emb_stage) throw std::runtime_error("the eagle3 injection's staging ran out of memory");
         for (int64_t p = 0; p < n; p += rows_) {
             const int m = int(std::min<int64_t>(rows_, n - p));
-            ck(cudaMemcpyAsync(dspark_taps_, taps_host_ + (size_t) (pos0 + p) * dspark_taps_n_ * n_embd_,
+            ck(cudaMemcpyAsync(dspark_taps_, taps_host_ + (size_t) p * dspark_taps_n_ * n_embd_,
                                size_t(m) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyHostToDevice,
                                cs(st_)),
                "the taps back");

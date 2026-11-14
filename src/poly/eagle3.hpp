@@ -20,7 +20,7 @@ class Shards;
 class Eagle3 {
 public:
     void load(Shards& dg);                     // the geometry, the weights (Q8_0 on card), d2t
-    void begin(int rows, int64_t max_context); // the cache and the scratch (rows = the engine's)
+    void begin(int rows, int64_t max_context, void* blas);   // the caches and the attention's scratch
     // The call's rows: the taps (the device, rows x 3 x n_embd stacked) and the embeddings (the
     // device, rows x n_embd - the caller staged them) -> fc, the norms, the concat, the midlayer
     // -> the cache rows [pos, pos + n).  The last row's state stays as the draft's feature.
@@ -34,6 +34,8 @@ public:
     bool ready() const { return loaded_; }
     float* emb_dev() { return emb_dev_; }
 
+    static constexpr size_t kScoreFloats = size_t(16) << 20;   // the attention's score scratch
+
 private:
     void midlayer(float* emb_dev, int64_t pos, int n, void* stream);
     // the weights (Q8_0, the device) and the norms (F32)
@@ -44,10 +46,16 @@ private:
     int n_embd_ = 0, n_head_ = 0, n_kv_ = 0, head_dim_ = 0, n_ff_ = 0, dvocab_ = 0;
     float eps_ = 0;
     Rope rope_;
-    // the KV: a linear fp16 cache, k and v of kv_heads * head_dim halves a row
+    // the KV: a linear fp16 cache, k and v of kv_heads * head_dim halves a row - the row layout
+    // attend_batch() reads ([row x kv_heads x dim])
     uint16_t *k_cache_ = nullptr, *v_cache_ = nullptr;
     int64_t cache_cap_ = 0, cache_pos_ = 0;
     int rows_ = 0;
+    // the attention: the fork's generic attend_batch (the Qwen prompt path) - the head's 8 heads a
+    // group misses attend_batch's dim-64 fast path (it takes 4), so cuBLAS products on blas_, with
+    // score_ and work_ the scratch the path's chunking asks for
+    void* blas_ = nullptr;
+    float *score_ = nullptr, *work_ = nullptr;
     // the device scratch (rows a first dimension everywhere)
     float *hidden_ = nullptr;     // n_embd a row: the residual state, the last row is the draft's feature
     float *emb_dev_ = nullptr;    // n_embd a row: the embeddings (the host's ride in)
@@ -65,8 +73,6 @@ private:
     float *mlp_h_ = nullptr;      // n_ff a row: the swiglu's output
     float *logits_ = nullptr;     // dvocab a row: the lm_head's output (the draft steps)
     float *taps_q8_ = nullptr;    // 3 * n_embd a row: the taps' Q8_1 (the fc's input)
-    float *scratch_ = nullptr;
-    size_t scratch_floats_ = 0;
     std::vector<int64_t> d2t_;
     int dbg_inj_ = 0, dbg_logits_ = 0;         // the one-shot debug prints left (2 of each)
     bool loaded_ = false;

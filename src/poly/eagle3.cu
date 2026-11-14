@@ -10,14 +10,14 @@
 //   hidden = hidden + mlp;  logits = lm_head(norm(hidden))   (the draft steps only)
 //
 // Every norm+quantize and residual+norm+quantize rides kernels::native_add_rms_norm_q8_1(), the swiglu
-// rides kernels::native_swiglu_quantize_q8_1(), the attention is fdec_f16() (the GQA causal of the fork's
-// own kernels) - no kernel of this file's own.  The norms write contiguous halves and the two
-// Q8_1 halves are assembled into one strided input with two 2D copies.
+// rides kernels::native_swiglu_quantize_q8_1(), the attention is attend_batch() - the fork's generic
+// causal attention (the Qwen prompt path), whose cache layout this head's linear fp16 cache matches.
+// No kernel of this file's own.  The norms write contiguous halves and the two Q8_1 halves are
+// assembled into one strided input with two 2D copies.
 #include "eagle3.hpp"
 
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
-#include "fattn.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_fp16.h>
@@ -139,18 +139,17 @@ void Eagle3::load(Shards& dg) {
                  n_head_, head_dim_, dvocab_);
 }
 
-void Eagle3::begin(int rows, int64_t max_context) {
+void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     rows_ = rows;
     cache_cap_ = max_context;
+    blas_ = blas;
     ck(cudaMalloc(&k_cache_, size_t(cache_cap_) * n_kv_ * head_dim_ * 2), "the eagle3 k cache");
     ck(cudaMalloc(&v_cache_, size_t(cache_cap_) * n_kv_ * head_dim_ * 2), "the eagle3 v cache");
-    scratch_floats_ = 64u << 20 / sizeof(float);
-    ck(cudaMalloc(&scratch_, scratch_floats_ * sizeof(float)), "the eagle3 attention scratch");
-    if (!fdec_fits(head_dim_, n_head_, n_kv_, int(cache_cap_), scratch_floats_))
-        std::fprintf(stderr,
-                     "strata-poly: the eagle3 attention scratch is short for %lld cache rows - the draft's "
-                     "attention falls back shorter\n",
-                     (long long) cache_cap_);
+    // the attention's scratch: the score blocks and the grouped queries/results the cuBLAS path
+    // keeps there (attend_batch's doc)
+    ck(cudaMalloc(&score_, kScoreFloats * sizeof(float)), "the eagle3 attention score");
+    const size_t work_floats = size_t(rows_) * n_head_ * (head_dim_ + head_dim_ / 2 + 3) + 1;
+    ck(cudaMalloc(&work_, work_floats * sizeof(float)), "the eagle3 attention work");
     ck(cudaMalloc(&hidden_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 hidden");
     ck(cudaMalloc(&emb_dev_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 emb");
     ck(cudaMalloc(&e_norm_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 e norm");
@@ -195,9 +194,10 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
                        cudaMemcpyDeviceToDevice, cs(stream)), "eagle k store");
     ck(cudaMemcpyAsync(v_cache_ + size_t(pos) * n_kv_ * head_dim_, v_, size_t(n) * n_kv_ * head_dim_ * 2,
                        cudaMemcpyDeviceToDevice, cs(stream)), "eagle v store");
-    if (!fdec_f16(q_, k_cache_, v_cache_, pos, n, nullptr, 0, o_, head_dim_, n_head_, n_kv_,
-                  1.f / std::sqrt(float(head_dim_)), scratch_, scratch_floats_, stream))
-        throw std::runtime_error("the eagle3 attention does not fit its scratch");
+    // the causal attention over the whole linear cache (the head's 8 heads a group misses the
+    // dim-64 fast path's per == 4, so the cuBLAS path takes it)
+    attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
+                 n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
     // the residual + the norm + the quantize in one launch - the mlp's input ready
     kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
     kernels::native_mmvq(kTypeQ8_0, gate_w_, normed_q8_, gate_out_, n_embd_, n_ff_, n, stream);
