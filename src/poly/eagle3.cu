@@ -10,10 +10,11 @@
 //   hidden = hidden + mlp;  logits = lm_head(norm(hidden))   (the draft steps only)
 //
 // Every norm+quantize and residual+norm+quantize rides kernels::native_add_rms_norm_q8_1(), the swiglu
-// rides kernels::native_swiglu_quantize_q8_1(), the attention is attend_batch() - the fork's generic
-// causal attention (the Qwen prompt path), whose cache layout this head's linear fp16 cache matches.
-// No kernel of this file's own.  The norms write contiguous halves and the two Q8_1 halves are
-// assembled into one strided input with two 2D copies.
+// is kernels::swiglu_clamp() (the limit makes it the plain Llama one), the attention is attend_batch() -
+// the fork's generic causal attention (the Qwen prompt path), whose cache layout this head's linear
+// fp16 cache matches.  No kernel of this file's own.  The norms write contiguous halves and the two
+// fp32 halves are assembled into the concat with two 2D copies; the projections dispatch on the call's
+// rows (linear(): a prompt batch through Mmq, a few tokens through native_mmvq at 8 a launch).
 #include "eagle3.hpp"
 
 #include "runtime.hpp"
@@ -102,15 +103,17 @@ void Eagle3::load(Shards& dg) {
         for (const MetaValue& v : t->items) d2t_.push_back(int64_t(v.u));
     }
 
-    // the weights: BF16 mapped -> Q8_0 on card
+    // the weights: BF16 mapped -> Q8_0 on card.  kTail zero bytes follow every matrix the Mmq
+    // kernels may multiply: they read up to a step of 256 columns past a row's end.
     const auto w = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
         const size_t n_vals = t->elements();
         std::vector<uint8_t> q;
         bf16_to_q8_0(dg.data(*t), q, n_vals);
-        void* dev = nullptr; ck(cudaMalloc(&dev, q.size()), name);
+        void* dev = nullptr; ck(cudaMalloc(&dev, q.size() + kTail), name);
         ck(cudaMemcpy(dev, q.data(), q.size(), cudaMemcpyHostToDevice), "eagle weight");
+        ck(cudaMemsetAsync((char*) dev + q.size(), 0, kTail, nullptr), "eagle weight tail");
         return dev;
     };
     fc_w_ = w("fc.weight");
@@ -156,38 +159,63 @@ void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     ck(cudaMalloc(&f_norm_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 f norm");
     ck(cudaMalloc(&e_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 e q8_1");
     ck(cudaMalloc(&f_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 f q8_1");
-    ck(cudaMalloc(&cat_q8_, size_t(rows_) * kernels::native_q8_1_bytes(2 * n_embd_)), "the eagle3 cat q8_1");
     ck(cudaMalloc(&q_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 q");
     ck(cudaMalloc(&k_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 k");
     ck(cudaMalloc(&v_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 v");
     ck(cudaMalloc(&o_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 o");
-    ck(cudaMalloc(&o_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_head_ * head_dim_)), "the eagle3 o q8_1");
     ck(cudaMalloc(&normed_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 normed");
     ck(cudaMalloc(&normed_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 normed q8_1");
+    ck(cudaMalloc(&cat_f32_, size_t(rows_) * 2 * n_embd_ * sizeof(float)), "the eagle3 cat fp32");
+    ck(cudaMalloc(&cat_q8_, size_t(rows_) * kernels::native_q8_1_bytes(2 * n_embd_)), "the eagle3 cat q8_1");
     ck(cudaMalloc(&gate_out_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 gate");
     ck(cudaMalloc(&up_out_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 up");
     ck(cudaMalloc(&mlp_h_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 mlp");
+    ck(cudaMalloc(&mlp_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_ff_)), "the eagle3 mlp q8_1");
     ck(cudaMalloc(&logits_, size_t(rows_) * dvocab_ * sizeof(float)), "the eagle3 logits");
     ck(cudaMalloc(&taps_q8_, size_t(rows_) * kernels::native_q8_1_bytes(3 * n_embd_)), "the eagle3 taps q8_1");
+    // the prompt injects' batched projections: llama.cpp's MMQ over the Q8_0 weights, if the card
+    // has a tile for every shape the head multiplies
+    const int hd = n_head_ * head_dim_;
+    mq_fits_ = Mmq::fits(kTypeQ8_0, n_embd_, 3 * n_embd_) && Mmq::fits(kTypeQ8_0, hd, 2 * n_embd_) &&
+               Mmq::fits(kTypeQ8_0, n_kv_ * head_dim_, 2 * n_embd_) && Mmq::fits(kTypeQ8_0, n_ff_, n_embd_) &&
+               Mmq::fits(kTypeQ8_0, n_embd_, n_ff_);
+    ck(cudaMalloc(&mqx_, Mmq::q8_bytes(rows_, n_ff_)), "the eagle3 mmq x");
+    if (!mq_fits_)
+        std::fprintf(stderr, "strata-poly: the eagle3 head has no MMQ tile for a shape - its prompt "
+                             "injections fall back to the 8-row launches\n");
+}
+
+// One projection of n rows: a prompt batch (n >= kStageRows) through Mmq - llama.cpp's MMQ reads
+// the Q8_0 weights once for all the rows; a few tokens quantize x into xq and go through
+// native_mmvq, a launch taking 8 tokens at most, each coming out as it would alone.
+void Eagle3::linear(const void* w, const float* x, void* xq, int n_in, int n_out, float* y, int n, void* stream) {
+    if (n >= kStageRows && mq_fits_) {
+        Mmq::quantize(x, nullptr, mqx_, kTypeQ8_0, n_in, n_in, n, stream);
+        mq_.mul(w, kTypeQ8_0, n_out, n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, n_out, stream);
+        return;
+    }
+    kernels::native_quantize_q8_1(x, xq, n_in, n, stream);
+    const size_t token = kernels::native_q8_1_bytes(n_in);
+    for (int at = 0; at < n; at += 8)
+        kernels::native_mmvq(kTypeQ8_0, w, (const uint8_t*) xq + (size_t) at * token,
+                             y + (size_t) at * n_out, n_in, n_out, std::min(8, n - at), stream);
 }
 
 void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     const int hd = n_head_ * head_dim_;
-    // the two norms, each quantized into its own Q8_1 half; the second's x is the residual in
-    // place (the add is null, so hidden_ keeps itself) - the residual survives both launches
+    // the two norms, each also into its own Q8_1; the second's x is the residual in place (the add
+    // is null, so hidden_ keeps itself) - the residual survives both launches
     kernels::native_add_rms_norm_q8_1(emb_dev, nullptr, ln1_, e_norm_, e_q8_, n_embd_, n, eps_, 256, stream);
     kernels::native_add_rms_norm_q8_1(hidden_, nullptr, hnorm_, f_norm_, f_q8_, n_embd_, n, eps_, 256, stream);
-    // the halves assemble into one strided Q8_1 input the q/k/v projections read
-    ck(cudaMemcpy2DAsync(cat_q8_, kernels::native_q8_1_bytes(2 * n_embd_), e_q8_,
-                         kernels::native_q8_1_bytes(n_embd_), kernels::native_q8_1_bytes(n_embd_), n,
-                         cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat e");
-    ck(cudaMemcpy2DAsync((char*) cat_q8_ + kernels::native_q8_1_bytes(n_embd_),
-                         kernels::native_q8_1_bytes(2 * n_embd_), f_q8_, kernels::native_q8_1_bytes(n_embd_),
-                         kernels::native_q8_1_bytes(n_embd_), n, cudaMemcpyDeviceToDevice, cs(stream)),
-       "eagle cat f");
-    kernels::native_mmvq(kTypeQ8_0, q_w_, cat_q8_, q_, 2 * n_embd_, hd, n, stream);
-    kernels::native_mmvq(kTypeQ8_0, k_w_, cat_q8_, k_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
-    kernels::native_mmvq(kTypeQ8_0, v_w_, cat_q8_, v_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
+    // the halves assemble into [e | h] in fp32: the Q8_1 blocks of 32 lie inside one half or the
+    // other, so quantizing the concat gives the halves' own quantizes to the bit
+    ck(cudaMemcpy2DAsync(cat_f32_, 2 * n_embd_ * sizeof(float), e_norm_, n_embd_ * sizeof(float),
+                         n_embd_ * sizeof(float), n, cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat e");
+    ck(cudaMemcpy2DAsync(cat_f32_ + n_embd_, 2 * n_embd_ * sizeof(float), f_norm_, n_embd_ * sizeof(float),
+                         n_embd_ * sizeof(float), n, cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat f");
+    linear(q_w_, cat_f32_, cat_q8_, 2 * n_embd_, hd, q_, n, stream);
+    linear(k_w_, cat_f32_, cat_q8_, 2 * n_embd_, n_kv_ * head_dim_, k_, n, stream);
+    linear(v_w_, cat_f32_, cat_q8_, 2 * n_embd_, n_kv_ * head_dim_, v_, n, stream);
     dsv4_rope(q_, q_, head_dim_, n_head_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     dsv4_rope(k_, k_, head_dim_, n_kv_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     ck(cudaMemcpyAsync(k_cache_ + size_t(pos) * n_kv_ * head_dim_, k_, size_t(n) * n_kv_ * head_dim_ * 2,
@@ -198,20 +226,20 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
-    // the residual + the norm + the quantize in one launch - the mlp's input ready
+    // the residual + the norm (+ the quantize the few-token path's projections read) in one launch
     kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
-    kernels::native_mmvq(kTypeQ8_0, gate_w_, normed_q8_, gate_out_, n_embd_, n_ff_, n, stream);
-    kernels::native_mmvq(kTypeQ8_0, up_w_, normed_q8_, up_out_, n_embd_, n_ff_, n, stream);
-    kernels::native_swiglu_quantize_q8_1(gate_out_, up_out_, normed_q8_, n_ff_, n, stream);
-    kernels::native_mmvq(kTypeQ8_0, down_w_, normed_q8_, o_, n_ff_, n_embd_, n, stream);
-    // the residual + the final norm + the quantize in one launch - the lm_head's input ready
+    linear(gate_w_, normed_, normed_q8_, n_embd_, n_ff_, gate_out_, n, stream);
+    linear(up_w_, normed_, normed_q8_, n_embd_, n_ff_, up_out_, n, stream);
+    // silu(gate) x up in fp32 (the limit makes swiglu_clamp's min/clamp no-ops)
+    kernels::swiglu_clamp(gate_out_, up_out_, mlp_h_, size_t(n) * n_ff_, 1e30f, stream);
+    linear(down_w_, mlp_h_, mlp_q8_, n_ff_, n_embd_, o_, n, stream);
+    // the residual + the final norm (+ the quantize) in one launch - the lm_head's input ready
     kernels::native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
 }
 
 void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
-    kernels::native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
-    kernels::native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
+    linear(fc_w_, taps_dev, taps_q8_, 3 * n_embd_, n_embd_, hidden_, n, stream);
     if (dbg_inj_ < 2) {   // one-shot: sane taps in + sane fc out means the capture's layout, not the head
         ++dbg_inj_;
         std::vector<float> th(size_t(n) * 3 * n_embd_), hh(size_t(n) * n_embd_);
