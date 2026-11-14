@@ -1020,8 +1020,13 @@ void Engine::load_shape() {
     n_layer_ = shape_i("block_count") - (nextn ? (int) nextn->u : 0);
     if (opt_.draft && opt_.window != 1) {
         const std::string probe = blk(n_layer_, "nextn.eh_proj.weight");
+        // the EAGLE-3 head: its own architecture (eagle3 in the draft file), no nextn block - the
+        // drafter is the Engine's Eagle3 class, and the nextn probe does not apply to it
+        const MetaValue* darch = dg_ ? dg_->get("general.architecture") : nullptr;
+        const bool draft_eagle3 = darch && darch->type == MetaType::STRING && darch->s == "eagle3";
         if (nextn && nextn->u == 1 && gg_->find(probe)) block_ = gg_.get();
         else if (dg_ && dg_->find(probe)) block_ = dg_.get();
+        else if (dg_ && draft_eagle3) block_ = nullptr;   // the Eagle3 drafter, no nextn block
         else if (dg_)
             throw std::runtime_error(opt_.draft_model + " has no block that guesses ahead for this model: no tensor " +
                                      probe);
