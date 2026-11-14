@@ -200,13 +200,27 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
-    if (dbg_att_ < 14) {   // the attention's own output through the read's injects (13 of them)
+    if (dbg_att_ < 14) {   // the attention's own inputs and output through the read's injects
         ++dbg_att_;
         float h[4] = {};
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncA");
-        ck(cudaMemcpy(h, o_, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg att");
-        std::fprintf(stderr, "[eagle] midlayer pos=%lld n=%d att->o: %.4f %.4f %.4f %.4f\n", (long long) pos, n,
-                     h[0], h[1], h[2], h[3]);
+        const auto head4 = [&](const float* dev, const char* what) {
+            ck(cudaMemcpy(h, dev, 4 * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg att");
+            std::fprintf(stderr, "[eagle] midlayer pos=%lld n=%d %s: %.4f %.4f %.4f %.4f\n", (long long) pos, n,
+                         what, h[0], h[1], h[2], h[3]);
+        };
+        const auto head4h = [&](const void* dev, const char* what) {   // an fp16 row as floats
+            uint16_t hs[4];
+            ck(cudaMemcpy(hs, dev, sizeof hs, cudaMemcpyDeviceToHost), "eagle dbg atth");
+            std::fprintf(stderr, "[eagle] midlayer pos=%lld n=%d %s: %.4f %.4f %.4f %.4f\n", (long long) pos, n,
+                         what, __half2float(*(__half*) &hs[0]), __half2float(*(__half*) &hs[1]),
+                         __half2float(*(__half*) &hs[2]), __half2float(*(__half*) &hs[3]));
+        };
+        head4(q_, "q");
+        head4(k_, "k");
+        head4(v_, "v");
+        head4h(k_cache_, "cache k row0");
+        head4((const float*) o_, "att->o");
     }
     // the residual + the norm (and its Q8_1, which nothing reads any more) in one launch
     kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
