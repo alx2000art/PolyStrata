@@ -123,16 +123,13 @@ log "=== 3/4: рестарт на холодном пуле ==="
 stop_server
 if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.diag-$(date +%H%M%S)" || true; fi
 # the server spawns the engine with the config's env block, not the caller's: the [moe] lines need their
-# switch inside the config.  STRATA_POLY_SCORE_CONTEXT: the score stride covers the prompt's actual length
-# (chars/3 rounded up) instead of max_context - the score tensor's HBM traffic drops proportionally.
-EST_CTX=$(( (PROMPT_CHARS / 3 + 1023) / 1024 * 1024 + 1024 ))
-log "  score context: $EST_CTX (estimated from $PROMPT_CHARS chars)"
-python3 - "$CONFIG" "$EST_CTX" <<'PYEOF'
+# switch inside the config.  The rest of the env stays as the config carries it: the stage spec's default
+# (64) won its verdict, and SCORE_CONTEXT is a footgun - the chars/3 estimate undershoots Cyrillic, and a
+# stride shorter than the prompt corrupts the scores.
+python3 - "$CONFIG" <<'PYEOF'
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
-cfg.setdefault("env", {})["STRATA_POLY_STAGE_SPEC"] = "256"
-cfg.setdefault("env", {})["STRATA_POLY_SCORE_CONTEXT"] = sys.argv[2]
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
@@ -164,4 +161,6 @@ log "-- хвост чтения:"
 grep "reading the prompt" "$OUT_DIR/server.log.last" 2>/dev/null | tail -3 | sed 's/^/   /'
 log "-- done:"
 grep "\[strata\] done:" "$OUT_DIR/server.log.last" 2>/dev/null | tail -1 | sed 's/^/   /'
+log "-- промпт и ответ:"
+log "   промпт: $PROMPT_CHARS символов; ответ: $OUT_DIR/diag-run.txt"
 log "готово. ответ: $OUT_DIR/diag-run.txt, лог: $OUT_DIR/server.log.last"
