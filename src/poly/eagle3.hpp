@@ -8,9 +8,7 @@
 #pragma once
 
 #include "runtime.hpp"
-#include "mmq.hpp"
 #include "strata/poly/kernels.hpp"
-#include "strata/kernels/native_mmvq.hpp"
 
 #include <vector>
 
@@ -39,14 +37,14 @@ public:
 
 private:
     void midlayer(float* emb_dev, int64_t pos, int n, void* stream);
-    // One projection of n rows: a prompt batch goes through Mmq (llama.cpp's MMQ - the weights are
-    // read once for all the rows), a few tokens through native_mmvq (a launch takes 8 at most,
-    // quantizing x itself).  xq: the Q8_1 scratch the few-token path quantizes into.
-    void linear(const void* w, const float* x, void* xq, int n_in, int n_out, float* y, int n, void* stream);
-    // the weights (Q8_0, the device) and the norms (F32)
+    // One projection of n rows of BF16 weights: a prompt batch dequantizes the matrix to F32 once
+    // (the engine's own lin() does the same for its BF16 weights) and goes through cuBLAS; a few
+    // tokens through gemv_bf16.  The Q8_0 kernels NaN'd on this head's K of 12288: their weight view
+    // differs from the bytes (zero weights read 0.0, the real ones read nan, the bytes scan clean).
+    void linear(const void* w, const float* x, int n_in, int n_out, float* y, int n, void* stream);
+    // the weights (BF16, the device - the file's own bytes) and the norms (F32)
     void* fc_w_ = nullptr, *q_w_ = nullptr, *k_w_ = nullptr, *v_w_ = nullptr, *o_w_ = nullptr;
     void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_head_w_ = nullptr;
-    size_t fc_bytes_ = 0;          // the fc's Q8_0 bytes (the debug dumps walk its blocks)
     float *ln1_ = nullptr, *ln2_ = nullptr, *hnorm_ = nullptr, *out_norm_ = nullptr;
     // the geometry
     int n_embd_ = 0, n_head_ = 0, n_kv_ = 0, head_dim_ = 0, n_ff_ = 0, dvocab_ = 0;
@@ -72,18 +70,13 @@ private:
     float *v_ = nullptr;          // n_kv * head_dim a row: the values
     float *o_ = nullptr;          // n_head * head_dim a row: the attention's output, then the down's
     float *normed_ = nullptr;     // n_embd a row: the normed state (the mlp's and the lm_head's input)
-    void* normed_q8_ = nullptr;   // its Q8_1
-    float *cat_f32_ = nullptr;    // 2 * n_embd a row: [e | h] in fp32, the q/k/v's input for both paths
-    void* cat_q8_ = nullptr;      // its Q8_1 (the few-token path's mmvq input)
+    void* normed_q8_ = nullptr;   // its Q8_1 (the fused norm launches write it; nothing reads it now)
+    float *cat_f32_ = nullptr;    // 2 * n_embd a row: [e | h] in fp32, the q/k/v's input
     float *gate_out_ = nullptr, *up_out_ = nullptr;   // n_ff a row: the mlp's gate and up
-    float *mlp_h_ = nullptr;      // n_ff a row: the swiglu's output (fp32, both paths)
-    void* mlp_q8_ = nullptr;      // its Q8_1 (the down's few-token input)
-    float *logits_ = nullptr;     // dvocab a row: the lm_head's output (the draft steps)
-    float *taps_q8_ = nullptr;    // 3 * n_embd a row: the taps' Q8_1 (the fc's input)
-    // the batched projections (the prompt injects): Mmq over mqx_, the quantized rows
-    Mmq mq_;
-    bool mq_fits_ = false;        // Mmq::fits() of every weight the class multiplies
-    void* mqx_ = nullptr;         // Mmq::q8_bytes(rows_, n_ff_) - the widest quantize's rows
+    float *mlp_h_ = nullptr;      // n_ff a row: the swiglu's output (fp32)
+    float *logits_ = nullptr;     // dvocab floats: the lm_head's output (the draft steps, one row)
+    // the prompt batches' F32 view of one BF16 weight matrix at a time (the widest is n_ff x n_embd)
+    float *wf_e_ = nullptr;
     std::vector<int64_t> d2t_;
     int dbg_inj_ = 0, dbg_logits_ = 0;         // the one-shot debug prints left (2 of each)
     bool loaded_ = false;
