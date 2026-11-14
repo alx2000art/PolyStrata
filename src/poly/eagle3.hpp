@@ -46,6 +46,7 @@ private:
     // the weights (Q8_0, the device) and the norms (F32)
     void* fc_w_ = nullptr, *q_w_ = nullptr, *k_w_ = nullptr, *v_w_ = nullptr, *o_w_ = nullptr;
     void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_head_w_ = nullptr;
+    size_t fc_bytes_ = 0;          // the fc's Q8_0 bytes (the debug dumps walk its blocks)
     float *ln1_ = nullptr, *ln2_ = nullptr, *hnorm_ = nullptr, *out_norm_ = nullptr;
     // the geometry
     int n_embd_ = 0, n_head_ = 0, n_kv_ = 0, head_dim_ = 0, n_ff_ = 0, dvocab_ = 0;

@@ -117,6 +117,7 @@ void Eagle3::load(Shards& dg) {
         return dev;
     };
     fc_w_ = w("fc.weight");
+    fc_bytes_ = size_t(dg.find("fc.weight")->elements()) / 32 * 34;
     q_w_ = w("midlayer.self_attn.q_proj.weight");
     k_w_ = w("midlayer.self_attn.k_proj.weight");
     v_w_ = w("midlayer.self_attn.v_proj.weight");
@@ -278,6 +279,32 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         std::vector<float> oo(size_t(n) * n_embd_);
         ck(cudaMemcpy(oo.data(), o_, oo.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg o");
         std::fprintf(stderr, "[eagle] inject fc(mmvq) %s\n", st(oo).c_str());
+        // the fc's own Q8_0 blocks (start / middle / last): the fp16 scale and the int8 spread - an
+        // inf or nan scale here names the host quantizer, sane blocks name the activation side
+        const size_t blocks = fc_bytes_ / 34;
+        for (size_t which : {size_t(0), blocks / 2, blocks - 1}) {
+            uint8_t b34[34];
+            ck(cudaMemcpy(b34, (const char*) fc_w_ + which * 34, 34, cudaMemcpyDeviceToHost), "eagle dbg w");
+            uint16_t h;
+            std::memcpy(&h, b34, 2);
+            const float d = __half2float(*(__half*) &h);
+            int8_t mn = 127, mx = -128;
+            for (int i = 2; i < 34; ++i) {
+                mn = std::min(mn, (int8_t) b34[i]);
+                mx = std::max(mx, (int8_t) b34[i]);
+            }
+            std::fprintf(stderr, "[eagle] fc block@%zu/%zu: d=%.6f q8 [%d..%d]\n", which, blocks, d, (int) mn,
+                         (int) mx);
+        }
+        // the taps' first Q8_1 block as the native quantize wrote it: the scale and the original
+        // values' sum (ds.y) - a sum past 65504 turned inf by the sink-channel outliers would name
+        // the activation quantize
+        uint8_t b36[36];
+        ck(cudaMemcpy(b36, taps_q8_, 36, cudaMemcpyDeviceToHost), "eagle dbg x");
+        __half2 ds;
+        std::memcpy(&ds, b36, 4);
+        std::fprintf(stderr, "[eagle] taps q8_1 blk0: d=%.5f dsum=%.1f\n", __half2float(__low2half(ds)),
+                     __half2float(__high2half(ds)));
     }
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
