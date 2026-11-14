@@ -230,8 +230,9 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
     linear(gate_w_, normed_, normed_q8_, n_embd_, n_ff_, gate_out_, n, stream);
     linear(up_w_, normed_, normed_q8_, n_embd_, n_ff_, up_out_, n, stream);
-    // silu(gate) x up in fp32 (the limit makes swiglu_clamp's min/clamp no-ops)
-    kernels::swiglu_clamp(gate_out_, up_out_, mlp_h_, size_t(n) * n_ff_, 1e30f, stream);
+    // silu(gate) x up in fp32 (the limit makes swiglu_clamp's min/clamp no-ops) - the poly
+    // kernels live in strata::poly itself, no namespace step
+    swiglu_clamp(gate_out_, up_out_, mlp_h_, size_t(n) * n_ff_, 1e30f, stream);
     linear(down_w_, mlp_h_, mlp_q8_, n_ff_, n_embd_, o_, n, stream);
     // the residual + the final norm (+ the quantize) in one launch - the lm_head's input ready
     kernels::native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
