@@ -266,7 +266,13 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                    std::to_string(v[1]) + " " + std::to_string(v[2]);
         };
         std::fprintf(stderr, "[eagle] inject n=%d pos=%lld taps %s\n", n, (long long) pos, st(th).c_str());
-        std::fprintf(stderr, "[eagle] inject fc->hidden %s\n", st(hh).c_str());
+        {
+            size_t nan_rows = 0;
+            for (int r = 0; r < n; ++r)
+                for (int i = 0; i < n_embd_; ++i)
+                    if (!std::isfinite(hh[size_t(r) * n_embd_ + i])) { ++nan_rows; break; }
+            std::fprintf(stderr, "[eagle] inject fc->hidden %s (nan rows %zu/%d)\n", st(hh).c_str(), nan_rows, n);
+        }
         // the bisect: the same fc through the few-token path (mmvq, 8 rows a launch) into o_ - sane
         // here with NaN from Mmq names the batched chain, NaN in both names the weights
         for (int at = 0; at < n; at += 8) {
@@ -279,32 +285,36 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         std::vector<float> oo(size_t(n) * n_embd_);
         ck(cudaMemcpy(oo.data(), o_, oo.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg o");
         std::fprintf(stderr, "[eagle] inject fc(mmvq) %s\n", st(oo).c_str());
-        // the fc's own Q8_0 blocks (start / middle / last): the fp16 scale and the int8 spread - an
-        // inf or nan scale here names the host quantizer, sane blocks name the activation side
-        const size_t blocks = fc_bytes_ / 34;
-        for (size_t which : {size_t(0), blocks / 2, blocks - 1}) {
-            uint8_t b34[34];
-            ck(cudaMemcpy(b34, (const char*) fc_w_ + which * 34, 34, cudaMemcpyDeviceToHost), "eagle dbg w");
-            uint16_t h;
-            std::memcpy(&h, b34, 2);
-            const float d = __half2float(*(__half*) &h);
-            int8_t mn = 127, mx = -128;
-            for (int i = 2; i < 34; ++i) {
-                mn = std::min(mn, (int8_t) b34[i]);
-                mx = std::max(mx, (int8_t) b34[i]);
+        // the fc's every Q8_0 scale and the taps' every Q8_1 scale/sum, scanned on the host: an inf
+        // or zero scale names the quantizer, a clean scan names the kernels' launch for these shapes
+        {
+            std::vector<uint8_t> wb(fc_bytes_);
+            ck(cudaMemcpy(wb.data(), fc_w_, fc_bytes_, cudaMemcpyDeviceToHost), "eagle dbg wscan");
+            size_t inf_scales = 0, zero_scales = 0;
+            for (size_t bl = 0; bl + 34 <= fc_bytes_; bl += 34) {
+                uint16_t h;
+                std::memcpy(&h, wb.data() + bl, 2);
+                const float d = __half2float(*(__half*) &h);
+                if (!std::isfinite(d) || d > 6e4f) ++inf_scales;
+                if (d == 0.f) ++zero_scales;
             }
-            std::fprintf(stderr, "[eagle] fc block@%zu/%zu: d=%.6f q8 [%d..%d]\n", which, blocks, d, (int) mn,
-                         (int) mx);
+            std::fprintf(stderr, "[eagle] fc scan: %zu inf/huge, %zu zero of %zu blocks\n", inf_scales, zero_scales,
+                         fc_bytes_ / 34);
+            const size_t row_bytes = kernels::native_q8_1_bytes(3 * n_embd_);
+            std::vector<uint8_t> xb(8 * row_bytes);
+            ck(cudaMemcpy(xb.data(), taps_q8_, xb.size(), cudaMemcpyDeviceToHost), "eagle dbg xscan");
+            size_t inf_d = 0, inf_sum = 0, tot = 0;
+            for (size_t bl = 0; bl + 36 <= xb.size(); bl += 36) {
+                __half2 ds;
+                std::memcpy(&ds, xb.data() + bl, 4);
+                const float d = __half2float(__low2half(ds)), s = __half2float(__high2half(ds));
+                ++tot;
+                if (!std::isfinite(d) || d > 6e4f) ++inf_d;
+                if (!std::isfinite(s)) ++inf_sum;
+            }
+            std::fprintf(stderr, "[eagle] taps q8_1 scan: %zu inf/huge d, %zu inf sums of %zu blocks\n", inf_d,
+                         inf_sum, tot);
         }
-        // the taps' first Q8_1 block as the native quantize wrote it: the scale and the original
-        // values' sum (ds.y) - a sum past 65504 turned inf by the sink-channel outliers would name
-        // the activation quantize
-        uint8_t b36[36];
-        ck(cudaMemcpy(b36, taps_q8_, 36, cudaMemcpyDeviceToHost), "eagle dbg x");
-        __half2 ds;
-        std::memcpy(&ds, b36, 4);
-        std::fprintf(stderr, "[eagle] taps q8_1 blk0: d=%.5f dsum=%.1f\n", __half2float(__low2half(ds)),
-                     __half2float(__high2half(ds)));
     }
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
