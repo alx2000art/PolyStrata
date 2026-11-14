@@ -2007,12 +2007,14 @@ void Engine::load(const Options& o) {
     load_geometry();
     // DSpark/EAGLE: the tap layers.  A dflash draft file carries its own (eagle3.tap_layers - the
     // EAGLE-3 heads' low/mid/high spread); the main model's dspark_target_layer_ids serve the dspark
-    // drafter.  The capture only runs when a draft file is there to consume the taps.
+    // drafter.  The capture only runs when a draft file is there to consume the taps.  The draft
+    // file's keys are read RAW (get, not meta_in): meta_in searches under the file's architecture
+    // prefix, and this converter writes its keys unprefixed.
     if (dg_ && opt_.draft && opt_.window != 1) {
-        if (const MetaValue* a = meta_in(*dg_, "general.architecture");
+        if (const MetaValue* a = dg_->get("general.architecture");
             a && a->type == MetaType::STRING && a->s == "eagle3")
             draft_is_eagle3_ = true;
-        if (const MetaValue* t = meta_in(*dg_, "eagle3.tap_layers");
+        if (const MetaValue* t = dg_->get("eagle3.tap_layers");
             t && t->type == MetaType::ARRAY && t->items.size() == 3) {
             for (int i = 0; i < 3; ++i) dspark_tap_layers_[(size_t) i] = (int) t->items[(size_t) i].u;
             dspark_taps_n_ = 3;
