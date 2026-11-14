@@ -24,6 +24,7 @@
 #include <cuda_fp16.h>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
 #include <string>
@@ -81,6 +82,10 @@ static void bf16_to_q8_0(const uint8_t* src, std::vector<uint8_t>& dst, size_t n
 }
 
 void Eagle3::load(Shards& dg) {
+    // the head's K of 12288 takes the Q8_0 multi kernel's two-rows path (the engine's own linears
+    // are K=4096 and take the one-row one); STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K - the
+    // documented switch - and no-overwrite keeps the user's own setting
+    setenv("STRATA_NO_MMVQ_ROWS2", "1", 0);
     auto kv = [&dg](const char* k) { return dg.get(k); };
     n_embd_ = int(kv("eagle3.embedding_length")->u);
     n_head_ = int(kv("eagle3.attention.head_count")->u);
@@ -194,6 +199,14 @@ void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     if (!mq_fits_)
         std::fprintf(stderr, "strata-poly: the eagle3 head has no MMQ tile for a shape - its prompt "
                              "injections fall back to the 8-row launches\n");
+    // the Q8_1 scratch the projections' kernels read: the kernels may read a little past the rows a
+    // call quantized, and a fresh cudaMalloc is 0xff garbage that reads back as an fp16 nan - zero
+    // them once, a read past the written rows then finds a zero block (a zero contribution)
+    ck(cudaMemset(taps_q8_, 0, size_t(rows_) * kernels::native_q8_1_bytes(3 * n_embd_)), "the eagle3 taps q8 zero");
+    ck(cudaMemset(cat_q8_, 0, size_t(rows_) * kernels::native_q8_1_bytes(2 * n_embd_)), "the eagle3 cat q8 zero");
+    ck(cudaMemset(normed_q8_, 0, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 normed q8 zero");
+    ck(cudaMemset(mlp_q8_, 0, size_t(rows_) * kernels::native_q8_1_bytes(n_ff_)), "the eagle3 mlp q8 zero");
+    ck(cudaMemset(mqx_, 0, Mmq::q8_bytes(rows_, n_ff_)), "the eagle3 mmq x zero");
 }
 
 // One projection of n rows: a prompt batch (n >= kStageRows) through Mmq - llama.cpp's MMQ reads
