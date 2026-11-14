@@ -20,6 +20,7 @@
 
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
+#include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_fp16.h>
@@ -192,10 +193,11 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     linear(v_w_, cat_f32_, 2 * n_embd_, n_kv_ * head_dim_, v_, n, stream);
     dsv4_rope(q_, q_, head_dim_, n_head_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     dsv4_rope(k_, k_, head_dim_, n_kv_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
-    ck(cudaMemcpyAsync(k_cache_ + size_t(pos) * n_kv_ * head_dim_, k_, size_t(n) * n_kv_ * head_dim_ * 2,
-                       cudaMemcpyDeviceToDevice, cs(stream)), "eagle k store");
-    ck(cudaMemcpyAsync(v_cache_ + size_t(pos) * n_kv_ * head_dim_, v_, size_t(n) * n_kv_ * head_dim_ * 2,
-                       cudaMemcpyDeviceToDevice, cs(stream)), "eagle v store");
+    // the cache rows: the fp32 k_/v_ converted to the cache's fp16 (a byte copy would store the
+    // floats' low halves, which read back as wild fp16 values - inf among them, and the attention's
+    // softmax turned those into nan)
+    kernels::f32_to_f16_bulk(k_, k_cache_ + size_t(pos) * n_kv_ * head_dim_, size_t(n) * n_kv_ * head_dim_, stream);
+    kernels::f32_to_f16_bulk(v_, v_cache_ + size_t(pos) * n_kv_ * head_dim_, size_t(n) * n_kv_ * head_dim_, stream);
     // the causal attention over the whole linear cache (the head's 8 heads a group misses the
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
