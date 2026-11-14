@@ -200,7 +200,7 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
-    if (dbg_att_ < 2) {   // one-shot: the attention's own output, before the norms touch hidden_
+    if (dbg_att_ < 14) {   // the attention's own output through the read's injects (13 of them)
         ++dbg_att_;
         float h[4] = {};
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncA");
@@ -246,7 +246,7 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         }
     }
     midlayer(emb_dev, pos, n, stream);
-    if (dbg_inj_ <= 2) {   // the first two injects' midlayer output: where the nan first shows
+    if (dbg_inj_ <= 13) {   // every read inject's midlayer output: where the nan first shows
         float h[4] = {};
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncM");
         ck(cudaMemcpy(h, normed_, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg normed");
