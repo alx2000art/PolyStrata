@@ -246,11 +246,24 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
        "eagle draft emb");
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
-    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
-    if (dbg_logits_ < 2) {   // one-shot: the logits' scale tells garbage (taps/fc/midlayer) from a broken d2t
+    const bool dbg = dbg_logits_ < 2;
+    if (dbg) {   // one-shot, the draft step's stages: which of them turned the finite hidden into nan
         ++dbg_logits_;
-        std::vector<float> lg((size_t) dvocab_);
+        float h[4] = {};
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync2");
+        const auto head4 = [&](const float* dev, const char* what) {
+            ck(cudaMemcpy(h, dev, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg stage");
+            std::fprintf(stderr, "[eagle] draft %s: %.4f %.4f %.4f %.4f\n", what, h[0], h[1], h[2], h[3]);
+        };
+        head4(f_norm_, "f_norm");
+        head4(q_, "q(post-rope)");
+        head4(o_, "o(mlp out)");
+        head4(normed_, "normed");
+    }
+    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    if (dbg) {   // the logits' scale tells garbage (taps/fc/midlayer) from a broken d2t
+        std::vector<float> lg((size_t) dvocab_);
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync3");
         ck(cudaMemcpy(lg.data(), logits_, lg.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg logits");
         double s = 0; float mx = lg[0];
         for (float x : lg) { s += x; mx = std::max(mx, x); }
