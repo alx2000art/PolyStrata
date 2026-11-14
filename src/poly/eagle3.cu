@@ -104,7 +104,7 @@ void Eagle3::load(Shards& dg) {
     const auto w = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
-        const size_t n_vals = dg.file_of(*t).payload(*t) / 2;
+        const size_t n_vals = t->elements();
         std::vector<uint8_t> q;
         bf16_to_q8_0(dg.data(*t), q, n_vals);
         void* dev = nullptr; ck(cudaMalloc(&dev, q.size()), name);
@@ -123,8 +123,9 @@ void Eagle3::load(Shards& dg) {
     const auto f = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
-        float* dev = nullptr; ck(cudaMalloc(&dev, dg.file_of(*t).payload(*t)), name);
-        ck(cudaMemcpy(dev, dg.data(*t), dg.file_of(*t).payload(*t), cudaMemcpyHostToDevice), "eagle norm");
+        const size_t n_bytes = t->elements() / 32 * 34;
+        float* dev = nullptr; ck(cudaMalloc(&dev, n_bytes), name);
+        ck(cudaMemcpy(dev, dg.data(*t), n_bytes, cudaMemcpyHostToDevice), "eagle norm");
         return dev;
     };
     ln1_ = f("midlayer.input_layernorm.weight");
@@ -205,7 +206,7 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     kernels::native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
 }
 
-void Eagle3::inject(const float* taps_dev, const float* emb_dev, int64_t pos, int n, void* stream) {
+void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
     kernels::native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
     kernels::native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);

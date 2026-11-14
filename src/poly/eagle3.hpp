@@ -24,7 +24,7 @@ public:
     // The call's rows: the taps (the device, rows x 3 x n_embd stacked) and the embeddings (the
     // device, rows x n_embd - the caller staged them) -> fc, the norms, the concat, the midlayer
     // -> the cache rows [pos, pos + n).  The last row's state stays as the draft's feature.
-    void inject(const float* taps_dev, const float* emb_dev, int64_t pos, int n, void* stream);
+    void inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, void* stream);
     // One iterative step at cache_pos_: the main model's embedding of token (the host, n_embd
     // floats) rides in, the input [that embedding, the last hidden] -> the midlayer -> lm_head.
     // Returns the logits' device pointer; the caller does the likeliest and the d2t translation.
