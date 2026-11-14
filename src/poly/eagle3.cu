@@ -9,8 +9,8 @@
 //   h2 = post_attention_layernorm(hidden);  mlp = down(silu(gate(h2)) x up(h2))
 //   hidden = hidden + mlp;  logits = lm_head(norm(hidden))   (the draft steps only)
 //
-// Every norm+quantize and residual+norm+quantize rides native_add_rms_norm_q8_1(), the swiglu
-// rides native_swiglu_quantize_q8_1(), the attention is fdec_f16() (the GQA causal of the fork's
+// Every norm+quantize and residual+norm+quantize rides kernels::native_add_rms_norm_q8_1(), the swiglu
+// rides kernels::native_swiglu_quantize_q8_1(), the attention is fdec_f16() (the GQA causal of the fork's
 // own kernels) - no kernel of this file's own.  The norms write contiguous halves and the two
 // Q8_1 halves are assembled into one strided input with two 2D copies.
 #include "eagle3.hpp"
@@ -18,7 +18,7 @@
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
 #include "fattn.hpp"
-#include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/kernels::native_mmvq.hpp"
 #include "strata/kernels/rope_scaling.hpp"
 
 #include <cuda_fp16.h>
@@ -156,12 +156,12 @@ void Eagle3::begin(int rows, int64_t max_context) {
     taps_q8_ = (float*) dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(3 * n_embd_), "the eagle3 taps q8_1");
 }
 
-void Eagle3::midlayer(int64_t pos, int n, void* stream) {
+void Eagle3::midlayer(const float* emb_dev, int64_t pos, int n, void* stream) {
     const int hd = n_head_ * head_dim_;
     // the two norms, each quantized into its own Q8_1 half; the second's x is the residual in
     // place (the add is null, so hidden_ keeps itself) - the residual survives both launches
-    native_add_rms_norm_q8_1(emb_dev_, nullptr, ln1_, e_norm_, e_q8_, n_embd_, n, eps_, 256, stream);
-    native_add_rms_norm_q8_1(hidden_, nullptr, hnorm_, f_norm_, f_q8_, n_embd_, n, eps_, 256, stream);
+    kernels::native_add_rms_norm_q8_1(emb_dev, nullptr, ln1_, e_norm_, e_q8_, n_embd_, n, eps_, 256, stream);
+    kernels::native_add_rms_norm_q8_1(hidden_, nullptr, hnorm_, f_norm_, f_q8_, n_embd_, n, eps_, 256, stream);
     // the halves assemble into one strided Q8_1 input the q/k/v projections read
     ck(cudaMemcpy2DAsync(cat_q8_, kernels::native_q8_1_bytes(2 * n_embd_), e_q8_,
                          kernels::native_q8_1_bytes(n_embd_), kernels::native_q8_1_bytes(n_embd_), n,
@@ -170,9 +170,9 @@ void Eagle3::midlayer(int64_t pos, int n, void* stream) {
                          kernels::native_q8_1_bytes(2 * n_embd_), f_q8_, kernels::native_q8_1_bytes(n_embd_),
                          kernels::native_q8_1_bytes(n_embd_), n, cudaMemcpyDeviceToDevice, cs(stream)),
        "eagle cat f");
-    native_mmvq(kTypeQ8_0, q_w_, cat_q8_, q_, 2 * n_embd_, hd, n, stream);
-    native_mmvq(kTypeQ8_0, k_w_, cat_q8_, k_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
-    native_mmvq(kTypeQ8_0, v_w_, cat_q8_, v_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
+    kernels::native_mmvq(kTypeQ8_0, q_w_, cat_q8_, q_, 2 * n_embd_, hd, n, stream);
+    kernels::native_mmvq(kTypeQ8_0, k_w_, cat_q8_, k_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
+    kernels::native_mmvq(kTypeQ8_0, v_w_, cat_q8_, v_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
     dsv4_rope(q_, q_, head_dim_, n_head_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     dsv4_rope(k_, k_, head_dim_, n_kv_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     ck(cudaMemcpyAsync(k_cache_ + size_t(pos) * n_kv_ * head_dim_, k_, size_t(n) * n_kv_ * head_dim_ * 2,
@@ -183,19 +183,19 @@ void Eagle3::midlayer(int64_t pos, int n, void* stream) {
                   1.f / std::sqrt(float(head_dim_)), scratch_, scratch_floats_, stream))
         throw std::runtime_error("the eagle3 attention does not fit its scratch");
     // the residual + the norm + the quantize in one launch - the mlp's input ready
-    native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
-    native_mmvq(kTypeQ8_0, gate_w_, normed_q8_, gate_out_, n_embd_, n_ff_, n, stream);
-    native_mmvq(kTypeQ8_0, up_w_, normed_q8_, up_out_, n_embd_, n_ff_, n, stream);
-    native_swiglu_quantize_q8_1(gate_out_, up_out_, normed_q8_, n_ff_, n, stream);
-    native_mmvq(kTypeQ8_0, down_w_, normed_q8_, o_, n_ff_, n_embd_, n, stream);
+    kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
+    kernels::native_mmvq(kTypeQ8_0, gate_w_, normed_q8_, gate_out_, n_embd_, n_ff_, n, stream);
+    kernels::native_mmvq(kTypeQ8_0, up_w_, normed_q8_, up_out_, n_embd_, n_ff_, n, stream);
+    kernels::native_swiglu_quantize_q8_1(gate_out_, up_out_, normed_q8_, n_ff_, n, stream);
+    kernels::native_mmvq(kTypeQ8_0, down_w_, normed_q8_, o_, n_ff_, n_embd_, n, stream);
     // the residual + the final norm + the quantize in one launch - the lm_head's input ready
-    native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
+    kernels::native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
 }
 
 void Eagle3::inject(const float* taps_dev, const float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
-    native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
-    native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
+    kernels::native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
+    kernels::native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
 }
@@ -205,7 +205,7 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
        "eagle draft emb");
     midlayer(cache_pos_, 1, stream);
     cache_pos_ += 1;
-    native_mmvq(kTypeQ8_0, lm_head_w_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
+    kernels::native_mmvq(kTypeQ8_0, lm_head_w_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
     return logits_;
 }
 

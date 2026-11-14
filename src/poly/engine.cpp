@@ -22,6 +22,7 @@ static const bool g_pool_swap_ = [] {
     return !v || std::strcmp(v, "0") != 0;
 }();
 #include "qwen35.hpp"
+#include "eagle3.hpp"
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -2020,6 +2021,10 @@ void Engine::load(const Options& o) {
         }
     // a dflash draft file is not the nextn block the probe looks for, but the Eagle3 drafter still
     // reads it - the file stays loaded for it
+    if (draft_is_eagle3_) {
+        eagle3_ = new Eagle3();
+        eagle3_->load(*dg_);
+    }
     if (block_ != dg_.get() && !draft_is_eagle3_) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;
 
@@ -2471,6 +2476,10 @@ void Engine::alloc() {
     warm_heat_.assign(layers_.size() * n_expert_, 0);
     if (dspark_taps_n_) dspark_taps_ = (float*) dmalloc(rows_ * size_t(dspark_taps_n_) * n_embd_ * sizeof(float),
                                                         "the dspark taps");
+    if (eagle3_) {
+        eagle3_->begin(rows_, opt_.max_context);
+        eagle_emb_ = (float*) hmalloc(n_embd_ * sizeof(float), "the eagle emb");
+    }
     // STRATA_POLY_ROUTE_DUMP=<file>: moe()'s (layer, expert) stream goes there, uint16 codes behind an 8-byte
     // header, for pool_tune.py to replay the expert ladder over other pool sizes without the runs.  Here,
     // where layers_ and n_expert_ are final (alloc() runs after load_geometry()).
@@ -4166,6 +4175,13 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     }
     const int n_calls = (int) calls_.size();
     in_read_ = true;   // the batches below count their routing into heat_ (moe_rows), for the read's staging
+                       // and for the cache at the read's end
+    // DSpark/EAGLE: the read's taps ride to the host (the layer-major order rewrites the device
+    // buffer per call); the read's end injects them in batches.
+    if (eagle3_) {
+        taps_host_ = (float*) std::malloc(size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float));
+        if (!taps_host_) throw std::runtime_error("the eagle3 taps' host buffer ran out of memory");
+    }
                        // and for the cache at the read's end
     // DSpark/EAGLE: the read's taps ride to the host (the layer-major order rewrites the device
     // buffer per call); the read's end injects them in batches.
