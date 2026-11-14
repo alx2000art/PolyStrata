@@ -244,8 +244,6 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
     ck(cudaMemcpyAsync(emb_dev_, emb_host, n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle draft emb");
-    midlayer(emb_dev_, cache_pos_, 1, stream);
-    cache_pos_ += 1;
     const bool dbg = dbg_logits_ < 2;
     if (dbg) {   // one-shot, the draft step's stages: which of them turned the finite hidden into nan
         ++dbg_logits_;
@@ -255,11 +253,20 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
             ck(cudaMemcpy(h, dev, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg stage");
             std::fprintf(stderr, "[eagle] draft %s: %.4f %.4f %.4f %.4f\n", what, h[0], h[1], h[2], h[3]);
         };
+        head4(hidden_, "hidden(before)");
+        midlayer(emb_dev_, cache_pos_, 1, stream);
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync2b");
+        head4(e_norm_, "e_norm");
         head4(f_norm_, "f_norm");
         head4(q_, "q(post-rope)");
         head4(o_, "o(mlp out)");
         head4(normed_, "normed");
+        gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+        cache_pos_ += 1;
+        return logits_;
     }
+    midlayer(emb_dev_, cache_pos_, 1, stream);
+    cache_pos_ += 1;
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
     if (dbg) {   // the logits' scale tells garbage (taps/fc/midlayer) from a broken d2t
         std::vector<float> lg((size_t) dvocab_);
