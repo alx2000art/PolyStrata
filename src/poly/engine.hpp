@@ -880,6 +880,8 @@ protected:
     Eagle3* eagle3_ = nullptr;                     ///< the EAGLE-3 drafter (the head's weights, its KV)
     int eagle_dbg_ = 0;                            ///< the draft() debug prints left (3 then silent)
     float* taps_host_ = nullptr;                   ///< the read's taps on the host (rows x 3 x n_embd)
+    int64_t taps_pos0_ = 0;                        ///< the read's start position: the host buffer's rows are
+                                                   ///< read-relative, the prompt arrives in chunks
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)
     void tap_capture(int il, int n);               ///< the hc_mean at a tap layer's tail (+ the read's D2H)
 
