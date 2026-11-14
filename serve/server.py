@@ -5139,8 +5139,13 @@ class Service:
                             hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
                             if hit_msg and pcie_share:
                                 hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
+                            draft_msg = ""
+                            if last.get("drafts_offered"):
+                                draft_msg = (f", drafts {last.get('drafts_accepted')}/"
+                                             f"{last.get('drafts_offered')} accepted"
+                                             f" ({last.get('drafts_accepted') / last['drafts_offered']:.2f})")
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
-                                  f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
+                                  f"({finish}, cancel={cancel.is_set()}){draft_msg}{hit_msg}", flush=True)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
