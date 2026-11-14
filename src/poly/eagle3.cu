@@ -104,7 +104,7 @@ void Eagle3::load(Shards& dg) {
     const auto w = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
-        const size_t n_vals = dg.bytes(*t) / 2;
+        const size_t n_vals = dg.file_of(*t).payload(*t) / 2;
         std::vector<uint8_t> q;
         bf16_to_q8_0(dg.data(*t), q, n_vals);
         void* dev = nullptr; ck(cudaMalloc(&dev, q.size()), name);
@@ -123,8 +123,8 @@ void Eagle3::load(Shards& dg) {
     const auto f = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
-        float* dev = nullptr; ck(cudaMalloc(&dev, dg.bytes(*t)), name);
-        ck(cudaMemcpy(dev, dg.data(*t), dg.bytes(*t), cudaMemcpyHostToDevice), "eagle norm");
+        float* dev = nullptr; ck(cudaMalloc(&dev, dg.file_of(*t).payload(*t)), name);
+        ck(cudaMemcpy(dev, dg.data(*t), dg.file_of(*t).payload(*t), cudaMemcpyHostToDevice), "eagle norm");
         return dev;
     };
     ln1_ = f("midlayer.input_layernorm.weight");
@@ -169,7 +169,7 @@ void Eagle3::begin(int rows, int64_t max_context) {
     ck(cudaMalloc(&taps_q8_, size_t(rows_) * kernels::native_q8_1_bytes(3 * n_embd_)), "the eagle3 taps q8_1");
 }
 
-void Eagle3::midlayer(const float* emb_dev, int64_t pos, int n, void* stream) {
+void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     const int hd = n_head_ * head_dim_;
     // the two norms, each quantized into its own Q8_1 half; the second's x is the residual in
     // place (the add is null, so hidden_ keeps itself) - the residual survives both launches
