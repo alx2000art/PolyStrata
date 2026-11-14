@@ -328,6 +328,22 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
             std::fprintf(stderr, "[eagle] taps q8_1 scan: %zu inf/huge d, %zu inf sums of %zu blocks\n", inf_d,
                          inf_sum, tot);
         }
+        // the zero-weight bisect: the same fc with every weight byte zeroed.  A dot of zeros is 0.0,
+        // so a nan here means the kernel read something else (a packed-copy registry hit, or out of
+        // the allocation), not the data the scans saw
+        ck(cudaMemsetAsync(fc_w_, 0, fc_bytes_ + 1024, cs(stream)), "eagle dbg wzero");
+        linear(fc_w_, taps_dev, taps_q8_, 3 * n_embd_, n_embd_, hidden_, n, stream);
+        for (int at = 0; at < n; at += 8) {
+            const int c = std::min(8, n - at);
+            kernels::native_quantize_q8_1(taps_dev + size_t(at) * 3 * n_embd_, taps_q8_, 3 * n_embd_, c, stream);
+            kernels::native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, o_ + size_t(at) * n_embd_, 3 * n_embd_, n_embd_, c,
+                                 stream);
+        }
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync4");
+        ck(cudaMemcpy(hh.data(), hidden_, hh.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg hidden2");
+        std::fprintf(stderr, "[eagle] inject fc(mmq, zero w) %s\n", st(hh).c_str());
+        ck(cudaMemcpy(oo.data(), o_, oo.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg o2");
+        std::fprintf(stderr, "[eagle] inject fc(mmvq, zero w) %s\n", st(oo).c_str());
     }
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
