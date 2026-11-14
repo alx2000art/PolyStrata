@@ -105,8 +105,17 @@ PYEOF
 sectors() { awk '$3 ~ /^nvme[0-9]+n[0-9]+$/{s+=$6} END{print s+0}' /proc/diskstats; }
 
 log "=== 1/4: git pull ==="
+SELF="$(basename "$0")"
+BEFORE=$(git -C "$STRATA_DIR" hash-object "$STRATA_DIR/$SELF" 2>/dev/null || echo x)
 git -C "$STRATA_DIR" stash push -m "diag auto" >/dev/null 2>&1 || true
 git -C "$STRATA_DIR" pull --ff-only 2>&1 | tail -2
+# the pull may have rewritten THIS script - and bash reads it lazily, so a rewrite mid-run executes a
+# frankenstein of the two versions (the pull's own diff proves it happened once).  Restart fresh.
+AFTER=$(git -C "$STRATA_DIR" hash-object "$STRATA_DIR/$SELF" 2>/dev/null || echo y)
+if [[ "$BEFORE" != "$AFTER" ]]; then
+    log "  $SELF обновился при pull — перезапускаю себя целиком"
+    exec "$STRATA_DIR/$SELF" "$@"
+fi
 
 if [[ "${REBUILD:-0}" == 1 ]]; then
     log "=== 2/4: пересборка (setup.sh --rebuild-engine --no-start; лог: $OUT_DIR/build.log) ==="

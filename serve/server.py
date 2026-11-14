@@ -5140,10 +5140,9 @@ class Service:
                             if hit_msg and pcie_share:
                                 hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
                             draft_msg = ""
-                            if last.get("drafts_offered"):
-                                draft_msg = (f", drafts {last.get('drafts_accepted')}/"
-                                             f"{last.get('drafts_offered')} accepted"
-                                             f" ({last.get('drafts_accepted') / last['drafts_offered']:.2f})")
+                            if last.get("drafts_offered") is not None:
+                                a, o = last.get("drafts_accepted") or 0, last["drafts_offered"]
+                                draft_msg = f", drafts {a}/{o} accepted" + (f" ({a / o:.2f})" if o else "")
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                                   f"({finish}, cancel={cancel.is_set()}){draft_msg}{hit_msg}", flush=True)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
