@@ -7,7 +7,11 @@
 // the target reads them and rewritten at the draft positions by every step of draft_logits().
 #pragma once
 
-#include "engine.hpp"
+#include "runtime.hpp"
+#include "strata/poly/kernels.hpp"
+#include "strata/kernels/native_mmvq.hpp"
+
+#include <vector>
 
 namespace strata::poly {
 
@@ -31,7 +35,7 @@ public:
     float* emb_dev() { return emb_dev_; }
 
 private:
-    void midlayer(int64_t pos, int n, void* stream);   // the emb rides in emb_dev_
+    void midlayer(const float* emb_dev, int64_t pos, int n, void* stream);
     // the weights (Q8_0, the device) and the norms (F32)
     void* fc_w_ = nullptr, *q_w_ = nullptr, *k_w_ = nullptr, *v_w_ = nullptr, *o_w_ = nullptr;
     void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_head_w_ = nullptr;

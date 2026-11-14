@@ -19,7 +19,6 @@
 #include "strata/poly/kernels.hpp"
 #include "fattn.hpp"
 #include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/rope_scaling.hpp"
 
 #include <cuda_fp16.h>
 #include <cmath>
@@ -30,6 +29,24 @@ namespace strata::poly {
 
 namespace {
 constexpr int kTypeQ8_0 = 6;   // the ggml type id the mmvq kernels take (this fork passes the numbers)
+constexpr float kPi = 3.14159265358979323846f;
+
+// deepseek4.cpp's make_rope, mirrored: the head's rope is the main model's yarn with the head's
+// config's knobs (the corr dims in pair indices, the magnitude the yarn formula gives).
+Rope make_rope(float base, int n_rot, float freq_scale, float ext_factor, int n_ctx_orig, float beta_fast,
+               float beta_slow) {
+    Rope r;
+    r.theta_scale = powf(base, -2.0f / (float) n_rot);
+    r.freq_scale = freq_scale;
+    r.ext_factor = ext_factor;
+    r.attn_factor = ext_factor == 0.0f ? 1.0f : 1.0f / (1.0f + 0.1f * logf(1.0f / freq_scale));
+    const auto corr = [&](float rot) {
+        return (float) n_rot * logf((float) n_ctx_orig / (rot * 2 * kPi)) / (2 * logf(base));
+    };
+    r.corr0 = std::max(0.0f, floorf(corr(beta_fast)));
+    r.corr1 = std::min((float) (n_rot - 1), ceilf(corr(beta_slow)));
+    return r;
+}
 constexpr int ALIGN = 32;
 }
 
@@ -51,7 +68,7 @@ static void bf16_to_q8_0(const uint8_t* src, std::vector<uint8_t>& dst, size_t n
         }
         float d = mx / 127.f;
         if (d == 0.f) d = 1e-30f;
-        const _half2 dh = __floats2half2_rn(d, d);
+        const __half2 dh = __floats2half2_rn(d, d);
         std::memcpy(dst.data() + b / 32 * 34, &dh, 2);
         for (int i = 0; i < 32; ++i) {
             const int q = int(xs[i] / d + (xs[i] > 0.f ? 0.5f : -0.5f));
@@ -74,12 +91,8 @@ void Eagle3::load(Shards& dg) {
     const float base = float(kv("eagle3.rope.freq_base")->f);
     const float factor = float(kv("eagle3.rope.scaling.factor")->f);
     const int64_t orig = int64_t(kv("eagle3.rope.scaling.original_context_length")->u);
-    float corr0 = 0.f, corr1 = 0.f;
-    yarn_corr_dims(base, orig, 131072, 32.f, 1.f, corr0, corr1);
-    const bool yarn = factor > 1.f && corr1 > corr0;
+    const bool yarn = factor > 1.f;
     rope_ = make_rope(base, head_dim_, yarn ? 1.f / factor : 1.f, yarn ? 1.f : 0.f, orig, 32.f, 1.f);
-    rope_.corr0 = corr0;
-    rope_.corr1 = corr1;
 
     // the vocab mapping
     if (const MetaValue* t = kv("eagle3.d2t"); t && t->type == MetaType::ARRAY) {
@@ -94,7 +107,7 @@ void Eagle3::load(Shards& dg) {
         const size_t n_vals = dg.bytes(*t) / 2;
         std::vector<uint8_t> q;
         bf16_to_q8_0(dg.data(*t), q, n_vals);
-        void* dev = dmalloc(q.size(), name);
+        void* dev = nullptr; ck(cudaMalloc(&dev, q.size()), name);
         ck(cudaMemcpy(dev, q.data(), q.size(), cudaMemcpyHostToDevice), "eagle weight");
         return dev;
     };
@@ -110,8 +123,8 @@ void Eagle3::load(Shards& dg) {
     const auto f = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
-        float* dev = (float*) dmalloc(t->file_size(), name);
-        ck(cudaMemcpy(dev, dg.data(*t), t->file_size(), cudaMemcpyHostToDevice), "eagle norm");
+        float* dev = nullptr; ck(cudaMalloc(&dev, dg.bytes(*t)), name);
+        ck(cudaMemcpy(dev, dg.data(*t), dg.bytes(*t), cudaMemcpyHostToDevice), "eagle norm");
         return dev;
     };
     ln1_ = f("midlayer.input_layernorm.weight");
@@ -126,34 +139,34 @@ void Eagle3::load(Shards& dg) {
 void Eagle3::begin(int rows, int64_t max_context) {
     rows_ = rows;
     cache_cap_ = max_context;
-    k_cache_ = (uint16_t*) dmalloc(size_t(cache_cap_) * n_kv_ * head_dim_ * 2, "the eagle3 k cache");
-    v_cache_ = (uint16_t*) dmalloc(size_t(cache_cap_) * n_kv_ * head_dim_ * 2, "the eagle3 v cache");
+    ck(cudaMalloc(&k_cache_, size_t(cache_cap_) * n_kv_ * head_dim_ * 2), "the eagle3 k cache");
+    ck(cudaMalloc(&v_cache_, size_t(cache_cap_) * n_kv_ * head_dim_ * 2), "the eagle3 v cache");
     scratch_floats_ = 64u << 20 / sizeof(float);
-    scratch_ = (float*) dmalloc(scratch_floats_ * sizeof(float), "the eagle3 attention scratch");
+    ck(cudaMalloc(&scratch_, scratch_floats_ * sizeof(float)), "the eagle3 attention scratch");
     if (!fdec_fits(head_dim_, n_head_, n_kv_, int(cache_cap_), scratch_floats_))
         std::fprintf(stderr,
                      "strata-poly: the eagle3 attention scratch is short for %lld cache rows - the draft's "
                      "attention falls back shorter\n",
                      (long long) cache_cap_);
-    hidden_ = (float*) dmalloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 hidden");
-    emb_dev_ = (float*) dmalloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 emb");
-    e_norm_ = (float*) dmalloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 e norm");
-    f_norm_ = (float*) dmalloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 f norm");
-    e_q8_ = dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 e q8_1");
-    f_q8_ = dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 f q8_1");
-    cat_q8_ = dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(2 * n_embd_), "the eagle3 cat q8_1");
-    q_ = (float*) dmalloc(size_t(rows_) * n_head_ * head_dim_ * sizeof(float), "the eagle3 q");
-    k_ = (float*) dmalloc(size_t(rows_) * n_kv_ * head_dim_ * sizeof(float), "the eagle3 k");
-    v_ = (float*) dmalloc(size_t(rows_) * n_kv_ * head_dim_ * sizeof(float), "the eagle3 v");
-    o_ = (float*) dmalloc(size_t(rows_) * n_head_ * head_dim_ * sizeof(float), "the eagle3 o");
-    o_q8_ = dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(n_head_ * head_dim_), "the eagle3 o q8_1");
-    normed_ = (float*) dmalloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 normed");
-    normed_q8_ = dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 normed q8_1");
-    gate_out_ = (float*) dmalloc(size_t(rows_) * n_ff_ * sizeof(float), "the eagle3 gate");
-    up_out_ = (float*) dmalloc(size_t(rows_) * n_ff_ * sizeof(float), "the eagle3 up");
-    mlp_h_ = (float*) dmalloc(size_t(rows_) * n_ff_ * sizeof(float), "the eagle3 mlp");
-    logits_ = (float*) dmalloc(size_t(rows_) * dvocab_ * sizeof(float), "the eagle3 logits");
-    taps_q8_ = (float*) dmalloc(size_t(rows_) * kernels::native_q8_1_bytes(3 * n_embd_), "the eagle3 taps q8_1");
+    ck(cudaMalloc(&hidden_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 hidden");
+    ck(cudaMalloc(&emb_dev_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 emb");
+    ck(cudaMalloc(&e_norm_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 e norm");
+    ck(cudaMalloc(&f_norm_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 f norm");
+    ck(cudaMalloc(&e_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 e q8_1");
+    ck(cudaMalloc(&f_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 f q8_1");
+    ck(cudaMalloc(&cat_q8_, size_t(rows_) * kernels::native_q8_1_bytes(2 * n_embd_)), "the eagle3 cat q8_1");
+    ck(cudaMalloc(&q_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 q");
+    ck(cudaMalloc(&k_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 k");
+    ck(cudaMalloc(&v_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 v");
+    ck(cudaMalloc(&o_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 o");
+    ck(cudaMalloc(&o_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_head_ * head_dim_)), "the eagle3 o q8_1");
+    ck(cudaMalloc(&normed_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 normed");
+    ck(cudaMalloc(&normed_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 normed q8_1");
+    ck(cudaMalloc(&gate_out_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 gate");
+    ck(cudaMalloc(&up_out_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 up");
+    ck(cudaMalloc(&mlp_h_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 mlp");
+    ck(cudaMalloc(&logits_, size_t(rows_) * dvocab_ * sizeof(float)), "the eagle3 logits");
+    ck(cudaMalloc(&taps_q8_, size_t(rows_) * kernels::native_q8_1_bytes(3 * n_embd_)), "the eagle3 taps q8_1");
 }
 
 void Eagle3::midlayer(const float* emb_dev, int64_t pos, int n, void* stream) {
