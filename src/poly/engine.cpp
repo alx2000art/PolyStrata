@@ -4103,7 +4103,7 @@ void Engine::tap_capture(int il, int n) {
     if (!dspark_taps_) return;
     for (int i = 0; i < dspark_taps_n_; ++i)
         if (dspark_tap_layers_[i] == il) {
-            kernels::hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
+            hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
             if (i == dspark_taps_n_ - 1 && in_read_ && taps_host_)
                 ck(cudaMemcpyAsync(taps_host_ + (size_t) pos_ * dspark_taps_n_ * n_embd_, dspark_taps_,
                                    size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost,

@@ -34,6 +34,8 @@ class GgufFile;
 
 namespace strata::poly {
 
+class Eagle3;   // the EAGLE-3 draft head (eagle3.hpp) - the Engine's --draft-model drafter
+
 class Shards;
 struct Likeliest;
 
@@ -875,7 +877,6 @@ protected:
     int dspark_taps_n_ = 0;                        ///< the filled slots (0: the capture is off)
     bool draft_is_eagle3_ = false;                 ///< the draft file is a dflash/eagle3 head - the
                                                    ///< Eagle3 drafter consumes it, not the nextn probe
-    class Eagle3;
     Eagle3* eagle3_ = nullptr;                     ///< the EAGLE-3 drafter (the head's weights, its KV)
     float* taps_host_ = nullptr;                   ///< the read's taps on the host (rows x 3 x n_embd)
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)

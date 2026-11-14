@@ -17,6 +17,7 @@
 
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
+#include "fattn.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/rope_scaling.hpp"
 
@@ -28,6 +29,7 @@
 namespace strata::poly {
 
 namespace {
+constexpr int kTypeQ8_0 = 6;   // the ggml type id the mmvq kernels take (this fork passes the numbers)
 constexpr int ALIGN = 32;
 }
 
@@ -168,9 +170,9 @@ void Eagle3::midlayer(int64_t pos, int n, void* stream) {
                          kernels::native_q8_1_bytes(2 * n_embd_), f_q8_, kernels::native_q8_1_bytes(n_embd_),
                          kernels::native_q8_1_bytes(n_embd_), n, cudaMemcpyDeviceToDevice, cs(stream)),
        "eagle cat f");
-    native_mmvq(GGML_TYPE_Q8_0, q_w_, cat_q8_, q_, 2 * n_embd_, hd, n, stream);
-    native_mmvq(GGML_TYPE_Q8_0, k_w_, cat_q8_, k_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
-    native_mmvq(GGML_TYPE_Q8_0, v_w_, cat_q8_, v_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
+    native_mmvq(kTypeQ8_0, q_w_, cat_q8_, q_, 2 * n_embd_, hd, n, stream);
+    native_mmvq(kTypeQ8_0, k_w_, cat_q8_, k_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
+    native_mmvq(kTypeQ8_0, v_w_, cat_q8_, v_, 2 * n_embd_, n_kv_ * head_dim_, n, stream);
     dsv4_rope(q_, q_, head_dim_, n_head_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     dsv4_rope(k_, k_, head_dim_, n_kv_, 0, head_dim_, rope_, pos, 1, n, false, 0.f, false, stream, nullptr);
     ck(cudaMemcpyAsync(k_cache_ + size_t(pos) * n_kv_ * head_dim_, k_, size_t(n) * n_kv_ * head_dim_ * 2,
@@ -182,10 +184,10 @@ void Eagle3::midlayer(int64_t pos, int n, void* stream) {
         throw std::runtime_error("the eagle3 attention does not fit its scratch");
     // the residual + the norm + the quantize in one launch - the mlp's input ready
     native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
-    native_mmvq(GGML_TYPE_Q8_0, gate_w_, normed_q8_, gate_out_, n_embd_, n_ff_, n, stream);
-    native_mmvq(GGML_TYPE_Q8_0, up_w_, normed_q8_, up_out_, n_embd_, n_ff_, n, stream);
+    native_mmvq(kTypeQ8_0, gate_w_, normed_q8_, gate_out_, n_embd_, n_ff_, n, stream);
+    native_mmvq(kTypeQ8_0, up_w_, normed_q8_, up_out_, n_embd_, n_ff_, n, stream);
     native_swiglu_quantize_q8_1(gate_out_, up_out_, normed_q8_, n_ff_, n, stream);
-    native_mmvq(GGML_TYPE_Q8_0, down_w_, normed_q8_, o_, n_ff_, n_embd_, n, stream);
+    native_mmvq(kTypeQ8_0, down_w_, normed_q8_, o_, n_ff_, n_embd_, n, stream);
     // the residual + the final norm + the quantize in one launch - the lm_head's input ready
     native_add_rms_norm_q8_1(hidden_, o_, out_norm_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
 }
@@ -193,7 +195,7 @@ void Eagle3::midlayer(int64_t pos, int n, void* stream) {
 void Eagle3::inject(const float* taps_dev, const float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
     native_quantize_q8_1(taps_dev, taps_q8_, 3 * n_embd_, n, stream);
-    native_mmvq(GGML_TYPE_Q8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
+    native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, hidden_, 3 * n_embd_, n_embd_, n, stream);
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
 }
@@ -203,7 +205,7 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
        "eagle draft emb");
     midlayer(cache_pos_, 1, stream);
     cache_pos_ += 1;
-    native_mmvq(GGML_TYPE_Q8_0, lm_head_w_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
+    native_mmvq(kTypeQ8_0, lm_head_w_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
     return logits_;
 }
 
