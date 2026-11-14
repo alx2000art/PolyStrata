@@ -111,9 +111,9 @@ void Eagle3::load(Shards& dg) {
         const size_t n_vals = t->elements();
         std::vector<uint8_t> q;
         bf16_to_q8_0(dg.data(*t), q, n_vals);
-        void* dev = nullptr; ck(cudaMalloc(&dev, q.size() + kTail), name);
+        void* dev = nullptr; ck(cudaMalloc(&dev, q.size() + 1024), name);
         ck(cudaMemcpy(dev, q.data(), q.size(), cudaMemcpyHostToDevice), "eagle weight");
-        ck(cudaMemsetAsync((char*) dev + q.size(), 0, kTail, nullptr), "eagle weight tail");
+        ck(cudaMemsetAsync((char*) dev + q.size(), 0, 1024, nullptr), "eagle weight tail");
         return dev;
     };
     fc_w_ = w("fc.weight");
@@ -125,12 +125,22 @@ void Eagle3::load(Shards& dg) {
     up_w_ = w("midlayer.mlp.up_proj.weight");
     down_w_ = w("midlayer.mlp.down_proj.weight");
     lm_head_w_ = w("lm_head.weight");
+    // the norms: BF16 in the file, F32 on the card (the rms_norm kernels read floats) - each pair
+    // of bytes is the high half of the float
     const auto f = [&](const char* name) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
-        const size_t n_bytes = t->elements() / 32 * 34;
-        float* dev = nullptr; ck(cudaMalloc(&dev, n_bytes), name);
-        ck(cudaMemcpy(dev, dg.data(*t), n_bytes, cudaMemcpyHostToDevice), "eagle norm");
+        const size_t n_vals = t->elements();
+        std::vector<float> w(n_vals);
+        const uint8_t* src = dg.data(*t);
+        for (size_t i = 0; i < n_vals; ++i) {
+            uint16_t h;
+            std::memcpy(&h, src + i * 2, 2);
+            const uint32_t bits = uint32_t(h) << 16;
+            std::memcpy(&w[i], &bits, 4);
+        }
+        float* dev = nullptr; ck(cudaMalloc(&dev, n_vals * sizeof(float)), name);
+        ck(cudaMemcpy(dev, w.data(), n_vals * sizeof(float), cudaMemcpyHostToDevice), "eagle norm");
         return dev;
     };
     ln1_ = f("midlayer.input_layernorm.weight");
@@ -256,6 +266,18 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         };
         std::fprintf(stderr, "[eagle] inject n=%d pos=%lld taps %s\n", n, (long long) pos, st(th).c_str());
         std::fprintf(stderr, "[eagle] inject fc->hidden %s\n", st(hh).c_str());
+        // the bisect: the same fc through the few-token path (mmvq, 8 rows a launch) into o_ - sane
+        // here with NaN from Mmq names the batched chain, NaN in both names the weights
+        for (int at = 0; at < n; at += 8) {
+            const int c = std::min(8, n - at);
+            kernels::native_quantize_q8_1(taps_dev + size_t(at) * 3 * n_embd_, taps_q8_, 3 * n_embd_, c, stream);
+            kernels::native_mmvq(kTypeQ8_0, fc_w_, taps_q8_, o_ + size_t(at) * n_embd_, 3 * n_embd_, n_embd_, c,
+                                 stream);
+        }
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync3");
+        std::vector<float> oo(size_t(n) * n_embd_);
+        ck(cudaMemcpy(oo.data(), o_, oo.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg o");
+        std::fprintf(stderr, "[eagle] inject fc(mmvq) %s\n", st(oo).c_str());
     }
     midlayer(emb_dev, pos, n, stream);
     cache_pos_ = pos + n;
