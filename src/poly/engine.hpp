@@ -312,7 +312,7 @@ public:
     /// in the model's place.  p is the probability the block gives what it returns.  pos() + i must be inside the
     /// context.  logits() is left alone.  An architecture may guess with a small model of its own instead of a
     /// block (draft_step()); the calls are the same.
-    bool drafts() const { return next_ ? next_->drafts() : draft_; }
+    bool drafts() const { return next_ ? next_->drafts() : draft_ || eagle3_ != nullptr; }
     /// Test only: the calls read()'s layer-major path gave the draft block's rows (draft_rows()) on the card that has
     /// the block, since load.  Two or more in one read are back-to-back refills of its pinned input rows.
     int64_t read_draft_calls_for_test() const { return next_ ? next_->read_draft_calls_for_test() : read_draft_calls_; }
