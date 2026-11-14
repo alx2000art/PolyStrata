@@ -216,7 +216,7 @@ void Eagle3::inject(const float* taps_dev, const float* emb_dev, int64_t pos, in
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
     ck(cudaMemcpyAsync(emb_dev_, emb_host, n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle draft emb");
-    midlayer(cache_pos_, 1, stream);
+    midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
     kernels::native_mmvq(kTypeQ8_0, lm_head_w_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
     return logits_;
