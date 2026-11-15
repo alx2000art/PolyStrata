@@ -2016,7 +2016,11 @@ void Engine::load(const Options& o) {
             draft_is_eagle3_ = true;
         if (const MetaValue* t = dg_->get("eagle3.tap_layers");
             t && t->type == MetaType::ARRAY && t->items.size() == 3) {
-            for (int i = 0; i < 3; ++i) dspark_tap_layers_[(size_t) i] = (int) t->items[(size_t) i].u;
+            // the ids index the model's hidden_states, whose element i is the output of layer i-1
+            int shift = 1;
+            if (const char* v = std::getenv("STRATA_EAGLE_TAP_SHIFT")) shift = std::max(0, std::atoi(v));
+            for (int i = 0; i < 3; ++i)
+                dspark_tap_layers_[(size_t) i] = std::max(0, (int) t->items[(size_t) i].u - shift);
             dspark_taps_n_ = 3;
         }
     }
@@ -4117,17 +4121,20 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
 // one call's taps only, and the read's end injects them in batches from there.
 void Engine::tap_capture(int il, int n) {
     if (!dspark_taps_) return;
-    // STRATA_EAGLE_TAPS: which of the layer's state the drafter's taps carry.  mean (default): the
-    // hyper-connection streams averaged; s0..s3: one stream as it lies.  A tap is n_embd values a
-    // row either way (the head's fc takes exactly three of them a token).
+    // STRATA_EAGLE_TAPS: which of the layer's state the drafter's taps carry.  mix (the model's own
+    // collapse of its streams, as its hidden states are made); mean (the streams averaged); s0..s3
+    // (one stream as it lies).  A tap is n_embd values a row either way.
     if (eagle_taps_ < 0) {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
         eagle_taps_ = 0;
-        if (v && v[0] == 's' && v[1] >= '0' && v[1] <= char('0' + streams() - 1)) eagle_taps_ = 1 + (v[1] - '0');
+        if (v && (!strcmp(v, "mix") || !strcmp(v, "mean"))) eagle_taps_ = !strcmp(v, "mix") ? 5 : 0;
+        else if (v && v[0] == 's' && v[1] >= '0' && v[1] <= char('0' + streams() - 1)) eagle_taps_ = 1 + (v[1] - '0');
     }
     for (int i = 0; i < dspark_taps_n_; ++i)
         if (dspark_tap_layers_[i] == il) {
-            if (eagle_taps_ == 0)
+            if (eagle_taps_ == 5)
+                tap_state_mix(il, n, dspark_taps_ + size_t(i) * n_embd_, dspark_taps_n_ * n_embd_);
+            else if (eagle_taps_ == 0)
                 hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
             else   // the stream's own n_embd values, copied row by row out of the stacked streams
                 ck(cudaMemcpy2DAsync(dspark_taps_ + size_t(i) * n_embd_, size_t(dspark_taps_n_) * n_embd_ * 4,

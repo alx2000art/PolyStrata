@@ -20,7 +20,7 @@ PROMPT_LIMIT="${PROMPT_LIMIT:-40}"
 MAX_TOKENS="${MAX_TOKENS:-16}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 STOP_WAIT="${STOP_WAIT:-90}"
-VARIANTS="${VARIANTS:-mean s0 s1 s2 s3}"
+VARIANTS="${VARIANTS:-mean mix s0 s1 s2 s3}"
 CATS="${CATS:-eh he}"
 
 log() { printf '%s\n' "$*"; }

@@ -24,6 +24,7 @@ protected:
     void load_geometry() override;
     void load_layer(int il) override;
     void begin_pass() override;
+    void tap_state_mix(int il, int n, float* dst, int64_t dst_stride) override;
     size_t recurrent_floats() const override { return 0; }
     size_t extra_bytes() const override;
     void load_extra(const uint8_t* src, int64_t pos) override;

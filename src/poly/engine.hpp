@@ -884,7 +884,9 @@ protected:
     int64_t taps_pos0_ = 0;                        ///< the read's start position: the host buffer's rows are
                                                    ///< read-relative, the prompt arrives in chunks
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)
-    void tap_capture(int il, int n);               ///< the hc_mean at a tap layer's tail (+ the read's D2H)
+    void tap_capture(int il, int n);               ///< the tap state at a tap layer's tail (+ the read's D2H)
+    virtual void tap_state_mix(int, int, float*, int64_t) {}   ///< the architecture's own collapse of its
+                                                               ///< streams (DeepSeek4: the output head's mix)
 
     // STRATA_POLY_ROUTE_DUMP: moe()'s (layer, expert) stream, uint16 codes of il*n_expert+e behind an 8-byte
     // header { "PRTD", n_layers, n_expert } - pool_tune.py's replay of the ladder reads this.

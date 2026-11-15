@@ -76,6 +76,17 @@ void DeepSeek4::begin_pass() {
 
 int DeepSeek4::streams() const { return kHc; }
 
+// The layer's state the way the model itself presents a hidden state: the streams through the output
+// head's mix (the file's global output_hc_* weights - the same mix the final logits' rows read), no
+// norm: out_norm belongs to the model's last output alone.
+void DeepSeek4::tap_state_mix(int, int n, float* dst, int64_t dst_stride) {
+    hc_head(r_, fp(hc_head_fn_), fp(hc_head_scale_), fp(hc_head_base_), mix_, cur_, n_embd_, n, rms_eps_,
+            hc_eps_, st_);
+    ck(cudaMemcpy2DAsync(dst, (size_t) dst_stride * 4, cur_, (size_t) n_embd_ * 4, (size_t) n_embd_ * 4, n,
+                         cudaMemcpyDeviceToDevice, cs(st_)),
+       "the tap mix");
+}
+
 // The routed experts' sum goes back into the residual streams.
 void DeepSeek4::layer_tail(Layer&, int, int n) { hc_post(fo_, hcw_, r_, n_embd_, n, st_); }
 
