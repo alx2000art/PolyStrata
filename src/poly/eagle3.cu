@@ -263,6 +263,25 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                      s / th.size(), mn, mx);
     }
     midlayer(emb_dev, pos, n, stream);
+    // STRATA_EAGLE_DUMP=<file>: the first inject's last row's taps and its fc output, for the reference
+    // torch forward to be run on the same numbers (the dump is raw float32: taps 3*n_embd, then hidden)
+    if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && !dumped_ && n > 1) {
+        dumped_ = true;
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync");
+        FILE* f = std::fopen(dp, "wb");
+        if (f) {
+            std::vector<float> taps((size_t) 3 * n_embd_), hid((size_t) n_embd_);
+            ck(cudaMemcpy(taps.data(), taps_dev + size_t(n - 1) * 3 * n_embd_, taps.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost), "eagle dump taps");
+            ck(cudaMemcpy(hid.data(), hidden_ + size_t(n - 1) * n_embd_, hid.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost), "eagle dump hidden");
+            std::fwrite(taps.data(), sizeof(float), taps.size(), f);
+            std::fwrite(hid.data(), sizeof(float), hid.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] dumped the taps and the fc output to %s (pos %lld)\n", dp,
+                         (long long) (pos + n - 1));
+        }
+    }
     // the draft's feature is the call's LAST row (the token the drafter starts from): move it to row 0,
     // where a one-row midlayer finds it.  Without this the draft read row 0 - the chunk's FIRST token,
     // thousands of positions back - and its guesses were noise.
