@@ -4111,6 +4111,17 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
+    // EAGLE-3: the drafter's cache follows the model's own steps - without these rows it would attend a
+    // prompt with holes from the first generated token on
+    if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
+        for (int t = 0; t < n; ++t) {
+            embed(tokens[t], eagle_emb_);
+            ck(cudaMemcpyAsync(eagle3_->emb_dev(), eagle_emb_, (size_t) n_embd_ * sizeof(float),
+                               cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
+            ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
+            eagle3_->inject(dspark_taps_ + size_t(t) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(), pos_ + t, 1, st_);
+        }
+    }
     pos_ += n;
     stats_.tokens += n;
 }
@@ -4647,6 +4658,9 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // bookkeeping lives in the class, the embed and the likeliest here
         OnCard here(device_, split_);
         if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
+        // a round's first draft step starts where the model is: a rejected guess's rows stay in the
+        // cache but are written over, and the next round does not walk further into the context
+        if (i == 0) eagle3_->rewind(pos_);
         embed(token, eagle_emb_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
         const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);

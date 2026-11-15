@@ -28,6 +28,9 @@ public:
     // floats) rides in, the input [that embedding, the last hidden] -> the midlayer -> lm_head.
     // Returns the logits' device pointer; the caller does the likeliest and the d2t translation.
     const float* draft_logits(int32_t token, const float* emb_host, void* stream);
+    // The cache holds rows [0, pos) already; a round's rejected guesses leave theirs behind, so every
+    // round starts the draft steps at the model's own position again.
+    void rewind(int64_t pos) { cache_pos_ = pos; }
     int dvocab() const { return dvocab_; }
     int32_t d2t(int32_t draft_id) const { return d2t_[(size_t) draft_id]; }
     bool ready() const { return loaded_; }

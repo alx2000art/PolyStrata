@@ -263,6 +263,13 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                      s / th.size(), mn, mx);
     }
     midlayer(emb_dev, pos, n, stream);
+    // the draft's feature is the call's LAST row (the token the drafter starts from): move it to row 0,
+    // where a one-row midlayer finds it.  Without this the draft read row 0 - the chunk's FIRST token,
+    // thousands of positions back - and its guesses were noise.
+    if (n > 1)
+        ck(cudaMemcpyAsync(hidden_, hidden_ + size_t(n - 1) * n_embd_, size_t(n_embd_) * sizeof(float),
+                           cudaMemcpyDeviceToDevice, cs(stream)),
+           "the eagle's last hidden");
     cache_pos_ = pos + n;
 }
 
