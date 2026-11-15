@@ -344,10 +344,14 @@ inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
         v.elem = (MetaType)c.read<uint32_t>();
         v.count = c.read<uint64_t>();
         if (v.count > (1u << 24)) throw std::runtime_error("GGUF: implausible array length");
-        v.items.reserve((size_t)std::min<uint64_t>(v.count, 64));
+        // The tokenizer's lists are huge and only their count and a sample are ever read, so those keep
+        // 64 items.  A drafter's vocab map (d2t: one id per draft token) is read whole - clipped to 64 it
+        // would map every id but the first 64 to nothing.
+        const uint64_t keep = v.count <= (1u << 18) ? v.count : 64;
+        v.items.reserve((size_t) keep);
         for (uint64_t i = 0; i < v.count; ++i) {
             MetaValue e = read_value(c, v.elem, depth + 1);
-            if (i < 64) v.items.push_back(std::move(e)); // keep a sample; the count is what matters
+            if (i < keep) v.items.push_back(std::move(e)); // a sample past `keep`; the count is what matters
         }
         break;
     }
