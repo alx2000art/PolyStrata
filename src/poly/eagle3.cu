@@ -214,27 +214,13 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
-    if (dbg_att_ < 14) {   // the attention's own inputs and output through the read's injects
+    if (dbg_att_ < 1) {   // the first inject's attention output: finite means the cache and the softmax hold
         ++dbg_att_;
         float h[4] = {};
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncA");
-        const auto head4 = [&](const float* dev, const char* what) {
-            ck(cudaMemcpy(h, dev, 4 * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg att");
-            std::fprintf(stderr, "[eagle] midlayer pos=%lld n=%d %s: %.4f %.4f %.4f %.4f\n", (long long) pos, n,
-                         what, h[0], h[1], h[2], h[3]);
-        };
-        const auto head4h = [&](const void* dev, const char* what) {   // an fp16 row as floats
-            uint16_t hs[4];
-            ck(cudaMemcpy(hs, dev, sizeof hs, cudaMemcpyDeviceToHost), "eagle dbg atth");
-            std::fprintf(stderr, "[eagle] midlayer pos=%lld n=%d %s: %.4f %.4f %.4f %.4f\n", (long long) pos, n,
-                         what, __half2float(*(__half*) &hs[0]), __half2float(*(__half*) &hs[1]),
-                         __half2float(*(__half*) &hs[2]), __half2float(*(__half*) &hs[3]));
-        };
-        head4(q_, "q");
-        head4(k_, "k");
-        head4(v_, "v");
-        head4h(k_cache_, "cache k row0");
-        head4((const float*) o_, "att->o");
+        ck(cudaMemcpy(h, o_, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg att");
+        std::fprintf(stderr, "[eagle] att->o (pos %lld): %.4f %.4f %.4f %.4f\n", (long long) pos, h[0], h[1], h[2],
+                     h[3]);
     }
     // the residual + the norm (and its Q8_1, which nothing reads any more) in one launch
     kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
@@ -251,74 +237,27 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
 void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
     linear(fc_w_, taps_dev, 3 * n_embd_, n_embd_, hidden_, n, stream);
-    if (dbg_inj_ < 2) {   // one-shot: sane taps in + sane fc out means the capture's layout, not the head
+    if (dbg_inj_ < 1) {   // the first inject only: the taps' range as the head sees it
         ++dbg_inj_;
-        std::vector<float> th(size_t(n) * 3 * n_embd_), hh(size_t(n) * n_embd_);
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync");
+        std::vector<float> th((size_t) n * 3 * n_embd_);
         ck(cudaMemcpy(th.data(), taps_dev, th.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg taps");
-        ck(cudaMemcpy(hh.data(), hidden_, hh.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg hidden");
-        const auto st = [](const std::vector<float>& v) {
-            double s = 0; float mn = v[0], mx = v[0];
-            for (float x : v) { s += x; mn = std::min(mn, x); mx = std::max(mx, x); }
-            return std::string("mean=") + std::to_string(s / v.size()) + " min=" + std::to_string(mn) +
-                   " max=" + std::to_string(mx) + " head: " + std::to_string(v[0]) + " " +
-                   std::to_string(v[1]) + " " + std::to_string(v[2]);
-        };
-        std::fprintf(stderr, "[eagle] inject n=%d pos=%lld taps %s\n", n, (long long) pos, st(th).c_str());
-        {
-            size_t nan_rows = 0;
-            for (int r = 0; r < n; ++r)
-                for (int i = 0; i < n_embd_; ++i)
-                    if (!std::isfinite(hh[size_t(r) * n_embd_ + i])) { ++nan_rows; break; }
-            std::fprintf(stderr, "[eagle] inject fc->hidden %s (nan rows %zu/%d)\n", st(hh).c_str(), nan_rows, n);
-        }
+        double s = 0;
+        float mn = th[0], mx = th[0];
+        for (float x : th) { s += x; mn = std::min(mn, x); mx = std::max(mx, x); }
+        std::fprintf(stderr, "[eagle] inject n=%d pos=%lld taps mean=%.4f min=%.2f max=%.2f\n", n, (long long) pos,
+                     s / th.size(), mn, mx);
     }
     midlayer(emb_dev, pos, n, stream);
-    if (dbg_inj_ <= 13) {   // every read inject's midlayer output: where the nan first shows
-        float h[4] = {};
-        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncM");
-        ck(cudaMemcpy(h, normed_, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg normed");
-        std::fprintf(stderr, "[eagle] inject pos=%lld midlayer->normed: %.4f %.4f %.4f %.4f\n", (long long) pos,
-                     h[0], h[1], h[2], h[3]);
-    }
     cache_pos_ = pos + n;
 }
 
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
     ck(cudaMemcpyAsync(emb_dev_, emb_host, n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle draft emb");
-    const bool dbg = dbg_logits_ < 2;
-    if (dbg) {   // one-shot, the draft step's stages: which of them turned the finite hidden into nan
-        ++dbg_logits_;
-        float h[4] = {};
-        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync2");
-        const auto head4 = [&](const float* dev, const char* what) {
-            ck(cudaMemcpy(h, dev, sizeof h, cudaMemcpyDeviceToHost), "eagle dbg stage");
-            std::fprintf(stderr, "[eagle] draft %s: %.4f %.4f %.4f %.4f\n", what, h[0], h[1], h[2], h[3]);
-        };
-        head4(hidden_, "hidden(before)");
-        midlayer(emb_dev_, cache_pos_, 1, stream);
-        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync2b");
-        head4(e_norm_, "e_norm");
-        head4(f_norm_, "f_norm");
-        head4(q_, "q(post-rope)");
-        head4(o_, "o(mlp out)");
-        head4(normed_, "normed");
-        gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
-        cache_pos_ += 1;
-        return logits_;
-    }
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
-    if (dbg) {   // the logits' scale tells garbage (taps/fc/midlayer) from a broken d2t
-        std::vector<float> lg((size_t) dvocab_);
-        ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync3");
-        ck(cudaMemcpy(lg.data(), logits_, lg.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dbg logits");
-        double s = 0; float mx = lg[0];
-        for (float x : lg) { s += x; mx = std::max(mx, x); }
-        std::fprintf(stderr, "[eagle] logits mean=%.5f max=%.3f\n", s / lg.size(), mx);
-    }
     return logits_;
 }
 

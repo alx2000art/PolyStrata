@@ -875,6 +875,7 @@ protected:
     float* dspark_taps_ = nullptr;                 ///< dspark_taps_n_ slots of rows_ * n_embd_ floats
     int dspark_tap_layers_[3] = {-1, -1, -1};      ///< the layers the taps come from
     int dspark_taps_n_ = 0;                        ///< the filled slots (0: the capture is off)
+    int eagle_taps_ = -1;                          ///< STRATA_EAGLE_TAPS: 0 the streams' mean, 1..4 a stream
     bool draft_is_eagle3_ = false;                 ///< the draft file is a dflash/eagle3 head - the
                                                    ///< Eagle3 drafter consumes it, not the nextn probe
     Eagle3* eagle3_ = nullptr;                     ///< the EAGLE-3 drafter (the head's weights, its KV)

@@ -4117,9 +4117,23 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
 // one call's taps only, and the read's end injects them in batches from there.
 void Engine::tap_capture(int il, int n) {
     if (!dspark_taps_) return;
+    // STRATA_EAGLE_TAPS: which of the layer's state the drafter's taps carry.  mean (default): the
+    // hyper-connection streams averaged; s0..s3: one stream as it lies.  A tap is n_embd values a
+    // row either way (the head's fc takes exactly three of them a token).
+    if (eagle_taps_ < 0) {
+        const char* v = std::getenv("STRATA_EAGLE_TAPS");
+        eagle_taps_ = 0;
+        if (v && v[0] == 's' && v[1] >= '0' && v[1] <= char('0' + streams() - 1)) eagle_taps_ = 1 + (v[1] - '0');
+    }
     for (int i = 0; i < dspark_taps_n_; ++i)
         if (dspark_tap_layers_[i] == il) {
-            hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
+            if (eagle_taps_ == 0)
+                hc_mean(r_, dspark_taps_ + size_t(i) * n_embd_, n_embd_, n, dspark_taps_n_ * n_embd_, st_);
+            else   // the stream's own n_embd values, copied row by row out of the stacked streams
+                ck(cudaMemcpy2DAsync(dspark_taps_ + size_t(i) * n_embd_, size_t(dspark_taps_n_) * n_embd_ * 4,
+                                     r_ + size_t(eagle_taps_ - 1) * n_embd_, size_t(streams()) * n_embd_ * 4,
+                                     size_t(n_embd_) * 4, n, cudaMemcpyDeviceToDevice, cs(st_)),
+                   "a tap stream");
             if (i == dspark_taps_n_ - 1 && in_read_ && taps_host_)
                 ck(cudaMemcpyAsync(taps_host_ + (size_t) (pos_ - taps_pos0_) * dspark_taps_n_ * n_embd_, dspark_taps_,
                                    size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost,
