@@ -151,8 +151,19 @@ nvidia-smi dmon -s pucm -d 1 -o TD > "$OUT_DIR/gpu_diag.log" 2>/dev/null &
 DMON=$!
 b=$(sectors)
 log "=== 4/4: запрос ==="
+# the run's progress on the console as it happens: the server's own lines and the drafter's probes
+( tail -n0 -F "$OUT_DIR/server.log.last" 2>/dev/null \
+    | grep --line-buffered -E "reading the prompt|\[strata\] done:|error" ) &
+TAILPID=$!
+# the engine's own log carries the drafter's probes and the rope/taps lines
+if [[ -n "$LOG" && -f "$LOG" ]]; then
+    ( tail -n0 -F "$LOG" 2>/dev/null \
+        | grep --line-buffered -E "^\[eagle\]|draft block|first guess|probe:" ) &
+    TAILPID2=$!
+fi
 ask "$OUT_DIR/diag-run.txt"
 sleep 2
+kill "$TAILPID" "${TAILPID2:-0}" 2>/dev/null; wait "$TAILPID" "${TAILPID2:-0}" 2>/dev/null
 a=$(sectors)
 kill "$DMON" 2>/dev/null; wait "$DMON" 2>/dev/null
 
