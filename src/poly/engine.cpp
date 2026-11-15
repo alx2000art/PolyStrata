@@ -4139,7 +4139,8 @@ void Engine::tap_capture(int il, int n) {
     if (eagle_taps_ < 0) {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
         eagle_taps_ = 5;   // mix, the default: SGLang puts every captured state through the model's own hc_head
-        if (v && (!strcmp(v, "mix") || !strcmp(v, "ffn") || !strcmp(v, "attn")))
+        if (v && (!strcmp(v, "mix") || !strcmp(v, "ffn") || !strcmp(v, "attn") || !strcmp(v, "layerffn") ||
+                  !strcmp(v, "layerattn")))
             eagle_taps_ = 5;   // the architecture's own collapse (DeepSeek4 picks the weights by name)
         else if (v && !strcmp(v, "mean")) eagle_taps_ = 0;
         else if (v && v[0] == 's' && v[1] >= '0' && v[1] <= char('0' + streams() - 1)) eagle_taps_ = 1 + (v[1] - '0');

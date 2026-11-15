@@ -20,7 +20,7 @@ PROMPT_LIMIT="${PROMPT_LIMIT:-40}"
 MAX_TOKENS="${MAX_TOKENS:-32}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 STOP_WAIT="${STOP_WAIT:-90}"
-VARIANTS="${VARIANTS:-mean mix ffn attn s0}"
+VARIANTS="${VARIANTS:-mix layerffn layerattn}"
 CATS="${CATS:-eh he}"
 
 log() { printf '%s\n' "$*"; }

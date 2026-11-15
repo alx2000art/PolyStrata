@@ -104,13 +104,29 @@ void DeepSeek4::load_head_mix() {
 
 void DeepSeek4::tap_state_mix(int il, int n, float* dst, int64_t dst_stride) {
     load_head_mix();
-    // STRATA_EAGLE_TAPS=mix carries 5; the layer's own collapses are the names "ffn" and "attn"
+    // STRATA_EAGLE_TAPS=mix carries 5; "ffn"/"attn" run hc_pre with the block's weights; "layerffn" and
+    // "layerattn" run the SAME hc_head formula with the LAYER's own hc weights instead of the global
+    // output_hc_* (every block carries hc_attn_* and hc_ffn_* of its own)
     static const int mode = [] {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
         if (v && !strcmp(v, "ffn")) return 6;
         if (v && !strcmp(v, "attn")) return 7;
+        if (v && !strcmp(v, "layerffn")) return 8;
+        if (v && !strcmp(v, "layerattn")) return 9;
         return 5;
     }();
+    if (mode == 8 || mode == 9) {
+        Block& B = blocks_[(size_t) il];
+        const Dev fn = mode == 8 ? B.hc_ffn_fn : B.hc_attn_fn;
+        const Dev sc = mode == 8 ? B.hc_ffn_scale : B.hc_attn_scale;
+        const Dev bs = mode == 8 ? B.hc_ffn_base : B.hc_attn_base;
+        hc_mix(r_, fp(fn), mix_, n_embd_, n, kHc, st_);
+        hc_head(r_, fp(fn), fp(sc), fp(bs), mix_, cur_, n_embd_, n, rms_eps_, hc_eps_, st_);
+        ck(cudaMemcpy2DAsync(dst, (size_t) dst_stride * 4, cur_, (size_t) n_embd_ * 4, (size_t) n_embd_ * 4, n,
+                             cudaMemcpyDeviceToDevice, cs(st_)),
+           "the tap layer mix");
+        return;
+    }
     if (mode == 6 || mode == 7) {
         // the layer's own collapse: hc_pre with the block's weights - the state as the block itself
         // reads it (6: the FFN's weights, the end of the block; 7: the attention's)
