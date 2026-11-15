@@ -59,6 +59,8 @@ Rope make_rope(float base, int n_rot, float freq_scale, float ext_factor, int n_
 
 
 void Eagle3::load(Shards& dg) {
+    // STRATA_EAGLE_CAT=he: the midlayer's input written [hidden | embedding] instead of [embedding | hidden]
+    if (const char* v = std::getenv("STRATA_EAGLE_CAT")) cat_he_ = std::string(v) == "he";
     // the head's K of 12288 takes the Q8_0 multi kernel's two-rows path (the engine's own linears
     // are K=4096 and take the one-row one); STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K - the
     // documented switch - and no-overwrite keeps the user's own setting
@@ -77,7 +79,17 @@ void Eagle3::load(Shards& dg) {
     const float factor = float(kv("eagle3.rope.scaling.factor")->f);
     const int64_t orig = int64_t(kv("eagle3.rope.scaling.original_context_length")->u);
     const bool yarn = factor > 1.f;
-    rope_ = make_rope(base, head_dim_, yarn ? 1.f / factor : 1.f, yarn ? 1.f : 0.f, orig, 32.f, 1.f);
+    const auto beta = [&](const char* k, float dflt) {
+        const MetaValue* b = kv(k);
+        return b && b->f > 0.f ? float(b->f) : dflt;
+    };
+    rope_ = make_rope(base, head_dim_, yarn ? 1.f / factor : 1.f, yarn ? 1.f : 0.f, orig,
+                      beta("eagle3.rope.scaling.beta_fast", 32.f), beta("eagle3.rope.scaling.beta_slow", 1.f));
+    // the config's own mscale wins when it carries one: the head's yarn states 0.707, the formula's own
+    // factor-of-16 value is 0.783, and the trained rope is the one the file names
+    if (const MetaValue* m = kv("eagle3.rope.scaling.mscale"); m && m->f > 0.f) rope_.attn_factor = float(m->f);
+    std::fprintf(stderr, "strata-poly: the eagle3 rope: base %g, freq_scale %g, attn_factor %g\n", base,
+                 rope_.freq_scale, rope_.attn_factor);
 
     // the vocab mapping
     if (const MetaValue* t = kv("eagle3.d2t"); t && t->type == MetaType::ARRAY) {
@@ -194,12 +206,14 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // is null, so hidden_ keeps itself) - the residual survives both launches
     kernels::native_add_rms_norm_q8_1(emb_dev, nullptr, ln1_, e_norm_, e_q8_, n_embd_, n, eps_, 256, stream);
     kernels::native_add_rms_norm_q8_1(hidden_, nullptr, hnorm_, f_norm_, f_q8_, n_embd_, n, eps_, 256, stream);
-    // the halves assemble into [e | h] in fp32: the Q8_1 blocks of 32 lie inside one half or the
-    // other, so quantizing the concat gives the halves' own quantizes to the bit
-    ck(cudaMemcpy2DAsync(cat_f32_, 2 * n_embd_ * sizeof(float), e_norm_, n_embd_ * sizeof(float),
-                         n_embd_ * sizeof(float), n, cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat e");
-    ck(cudaMemcpy2DAsync(cat_f32_ + n_embd_, 2 * n_embd_ * sizeof(float), f_norm_, n_embd_ * sizeof(float),
-                         n_embd_ * sizeof(float), n, cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat f");
+    // the halves assemble into [e | h] in fp32 (STRATA_EAGLE_CAT=he: [h | e], which the trained head may
+    // expect instead - the order is the one thing about the concat that is not in the weights)
+    const float* lo = cat_he_ ? f_norm_ : e_norm_;
+    const float* hi = cat_he_ ? e_norm_ : f_norm_;
+    ck(cudaMemcpy2DAsync(cat_f32_, 2 * n_embd_ * sizeof(float), lo, n_embd_ * sizeof(float),
+                         n_embd_ * sizeof(float), n, cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat lo");
+    ck(cudaMemcpy2DAsync(cat_f32_ + n_embd_, 2 * n_embd_ * sizeof(float), hi, n_embd_ * sizeof(float),
+                         n_embd_ * sizeof(float), n, cudaMemcpyDeviceToDevice, cs(stream)), "eagle cat hi");
     linear(q_w_, cat_f32_, 2 * n_embd_, hd, q_, n, stream);
     linear(k_w_, cat_f32_, 2 * n_embd_, n_kv_ * head_dim_, k_, n, stream);
     linear(v_w_, cat_f32_, 2 * n_embd_, n_kv_ * head_dim_, v_, n, stream);
