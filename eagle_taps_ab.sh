@@ -17,10 +17,10 @@ STRATA_DIR="${STRATA_DIR:-$HOME/PolyStrata}"
 CONFIG="${CONFIG:-$STRATA_DIR/strata-dsv4-ud-iq2_xxs.json}"
 PROMPT_FILE="${PROMPT_FILE:-$HOME/prompts/doc-30k.txt}"
 PROMPT_LIMIT="${PROMPT_LIMIT:-40}"
-MAX_TOKENS="${MAX_TOKENS:-16}"
+MAX_TOKENS="${MAX_TOKENS:-32}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 STOP_WAIT="${STOP_WAIT:-90}"
-VARIANTS="${VARIANTS:-mean mix s0 s1 s2 s3}"
+VARIANTS="${VARIANTS:-mean mix ffn attn s0}"
 CATS="${CATS:-eh he}"
 
 log() { printf '%s\n' "$*"; }
