@@ -79,9 +79,28 @@ int DeepSeek4::streams() const { return kHc; }
 // The layer's state the way the model itself presents a hidden state: the streams through the output
 // head's mix (the file's global output_hc_* weights - the same mix the final logits' rows read), no
 // norm: out_norm belongs to the model's last output alone.
-void DeepSeek4::tap_state_mix(int, int n, float* dst, int64_t dst_stride) {
-    hc_head(r_, fp(hc_head_fn_), fp(hc_head_scale_), fp(hc_head_base_), mix_, cur_, n_embd_, n, rms_eps_,
-            hc_eps_, st_);
+void DeepSeek4::tap_state_mix(int il, int n, float* dst, int64_t dst_stride) {
+    // STRATA_EAGLE_TAPS=mix carries 5; the layer's own collapses are the names "ffn" and "attn"
+    static const int mode = [] {
+        const char* v = std::getenv("STRATA_EAGLE_TAPS");
+        if (v && !strcmp(v, "ffn")) return 6;
+        if (v && !strcmp(v, "attn")) return 7;
+        return 5;
+    }();
+    if (mode == 6 || mode == 7) {
+        // the layer's own collapse: hc_pre with the block's weights - the state as the block itself
+        // reads it (6: the FFN's weights, the end of the block; 7: the attention's)
+        Block& B = blocks_[(size_t) il];
+        if (mode == 6)
+            hc_pre(r_, fp(B.hc_ffn_fn), fp(B.hc_ffn_scale), fp(B.hc_ffn_base), mix_, hcw_, cur_, n_embd_, n,
+                   rms_eps_, hc_eps_, sinkhorn_, st_);
+        else
+            hc_pre(r_, fp(B.hc_attn_fn), fp(B.hc_attn_scale), fp(B.hc_attn_base), mix_, hcw_, cur_, n_embd_, n,
+                   rms_eps_, hc_eps_, sinkhorn_, st_);
+    } else {
+        hc_head(r_, fp(hc_head_fn_), fp(hc_head_scale_), fp(hc_head_base_), mix_, cur_, n_embd_, n, rms_eps_,
+                hc_eps_, st_);
+    }
     ck(cudaMemcpy2DAsync(dst, (size_t) dst_stride * 4, cur_, (size_t) n_embd_ * 4, (size_t) n_embd_ * 4, n,
                          cudaMemcpyDeviceToDevice, cs(st_)),
        "the tap mix");
