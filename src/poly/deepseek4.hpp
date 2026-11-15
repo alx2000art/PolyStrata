@@ -86,6 +86,7 @@ private:
     int q_rank_ = 0, o_groups_ = 0, o_rank_ = 0;
     int idx_heads_ = 0, idx_dim_ = 0, idx_top_k_ = 0;
     int sinkhorn_ = 0, hash_layers_ = 0;
+    int tap_rows_ = 0;   ///< STRATA_EAGLE_DUMP_R: tap-layer blocks written so far
     int raw_ring_ = 0;   ///< rows of a layer's raw ring: the window and a call's tokens
     float hc_eps_ = 0, w_scale_ = 1;
     bool w_norm_ = false;
