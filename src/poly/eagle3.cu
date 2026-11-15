@@ -296,7 +296,7 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
             put(f_norm_, e, (size_t) (n - 1), e);
             put(normed_, e, (size_t) (n - 1), e);
             std::fclose(f);
-            std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dp, (long long) (pos + n - 1));
+            std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dpath, (long long) (pos + n - 1));
         }
     }
     // the draft's feature is the call's LAST row (the token the drafter starts from): move it to row 0,
