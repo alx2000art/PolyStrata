@@ -142,6 +142,12 @@ void DeepSeek4::shift_rows(ptrdiff_t by) {
 
 // The model's output for `rows` tokens from row `first` of the call: the streams mixed by their own weights, normed.
 void DeepSeek4::output_rows(int first, int rows, float* h) {
+    if (!hc_head_fn_.p) {   // the last layer's load was replaced by the lazy one the taps share
+        auto top = [&](const char* nm, int64_t a, int64_t b = 1) { return upload(gg_->find(nm), nm, a, b, kF32); };
+        hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
+        hc_head_scale_ = top("output_hc_scale.weight", 1);
+        hc_head_base_ = top("output_hc_base.weight", kHc);
+    }
     hc_head(r_ + (size_t) first * kHc * n_embd_, fp(hc_head_fn_), fp(hc_head_scale_), fp(hc_head_base_), mix_, cur_,
             n_embd_, rows, rms_eps_, hc_eps_, st_);
     rms_norm(cur_, fp(out_norm_), h, n_embd_, rows, rms_eps_, st_);
