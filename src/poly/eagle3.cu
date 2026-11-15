@@ -323,6 +323,10 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
         ck(cudaMemcpy(lg.data(), logits_, lg.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dump logits");
         FILE* f = std::fopen(dp, "ab");
         if (f) {
+            // this step's own normed state first: the lm_head check must use the row the logits came from
+            std::vector<float> nm((size_t) n_embd_);
+            ck(cudaMemcpy(nm.data(), normed_, nm.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dump nm");
+            std::fwrite(nm.data(), sizeof(float), nm.size(), f);
             std::fwrite(lg.data(), sizeof(float), lg.size(), f);
             std::fclose(f);
             std::fprintf(stderr, "[eagle] dumped the draft step's logits too (%d)\n", dvocab_);

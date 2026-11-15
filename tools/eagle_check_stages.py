@@ -62,6 +62,8 @@ def main():
     e_norm = take(n_embd)
     f_norm = take(n_embd)
     normed = take(n_embd)
+    # the draft step appends its own normed row, then its logits - the lm_head check needs the pair
+    normed_step = take(n_embd) if len(d) >= off + n_embd + dvocab else None
     logits = take(dvocab) if len(d) >= off + dvocab else None
 
     print(f"dump: {len(d)} floats; logits {'yes' if logits is not None else 'no'}\n")
@@ -77,15 +79,19 @@ def main():
     scores.append(cmp("ln1(emb)", rmsnorm(emb, ln1, eps), e_norm))
     scores.append(cmp("hnorm(fc)", rmsnorm(fc_out, hn, eps), f_norm))
 
-    # 3. the lm_head on the final normed state
-    if logits is not None:
+    # 3. the lm_head on the draft step's own normed row
+    if logits is not None and normed_step is not None:
         wl, _ = load_tensor(f, base, hdr, "lm_head.weight")
-        lg = wl @ normed
-        scores.append(cmp("lm_head(normed)", lg, logits))
+        lg = wl @ normed_step
+        scores.append(cmp("lm_head(step)", lg, logits))
         got = int(np.argmax(lg))
         want = int(np.argmax(logits))
         print(f"  argmax: from the file {got}, the engine {want}  {'MATCH' if got == want else 'DIFFER'}")
-        # norm's own check: out_norm applied to nothing we can rebuild, but its weights are here
+        print(f"  step normed rms {np.sqrt((normed_step**2).mean()):.3f}")
+    elif logits is not None:
+        wl, _ = load_tensor(f, base, hdr, "lm_head.weight")
+        scores.append(cmp("lm_head(normed)", wl @ normed, logits))
+    if True:
         on, _ = load_tensor(f, base, hdr, "norm.weight")
         print(f"  norm.weight: mean {on.mean():.4f}, min {on.min():.4f}, max {on.max():.4f}")
         print(f"  normed stats: mean|.| {np.abs(normed).mean():.4f}, rms {np.sqrt((normed**2).mean()):.3f}")
