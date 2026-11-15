@@ -153,11 +153,15 @@ b=$(sectors)
 log "=== 4/4: запрос ==="
 # the run's progress on the console as it happens - ONE file: the engine's own log when the config names
 # one (it carries both the server's lines and the engine's), else the server log
+# leftovers from an interrupted run print every line twice more: they go first, and the trap takes
+# this one with us if the run is stopped
+pkill -f "tail -n0 -F" 2>/dev/null || true
 WATCH="$OUT_DIR/server.log.last"
 if [[ -n "$LOG" && -f "$LOG" ]]; then WATCH="$LOG"; fi
 ( tail -n0 -F "$WATCH" 2>/dev/null \
     | grep --line-buffered -E "reading the prompt|\[strata\] done:|error|\[eagle\]|draft block|first guess|probe:" ) &
 TAILPID=$!
+trap 'kill "$TAILPID" 2>/dev/null' EXIT INT TERM
 ask "$OUT_DIR/diag-run.txt"
 sleep 2
 kill "$TAILPID" 2>/dev/null; wait "$TAILPID" 2>/dev/null
