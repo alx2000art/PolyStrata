@@ -2016,8 +2016,9 @@ void Engine::load(const Options& o) {
             draft_is_eagle3_ = true;
         if (const MetaValue* t = dg_->get("eagle3.tap_layers");
             t && t->type == MetaType::ARRAY && t->items.size() == 3) {
-            // the ids index the model's hidden_states, whose element i is the output of layer i-1
-            int shift = 1;
+            // the ids are layer numbers as they are: SGLang's EAGLE3 capture takes the state before
+            // layer id+1, which is layer id's output (sglang PR #33344: [val + 1 for val in ids])
+            int shift = 0;
             if (const char* v = std::getenv("STRATA_EAGLE_TAP_SHIFT")) shift = std::max(0, std::atoi(v));
             for (int i = 0; i < 3; ++i)
                 dspark_tap_layers_[(size_t) i] = std::max(0, (int) t->items[(size_t) i].u - shift);
@@ -4137,7 +4138,7 @@ void Engine::tap_capture(int il, int n) {
     // (one stream as it lies).  A tap is n_embd values a row either way.
     if (eagle_taps_ < 0) {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
-        eagle_taps_ = 0;
+        eagle_taps_ = 5;   // mix, the default: SGLang puts every captured state through the model's own hc_head
         if (v && (!strcmp(v, "mix") || !strcmp(v, "mean"))) eagle_taps_ = !strcmp(v, "mix") ? 5 : 0;
         else if (v && v[0] == 's' && v[1] >= '0' && v[1] <= char('0' + streams() - 1)) eagle_taps_ = 1 + (v[1] - '0');
     }
