@@ -80,15 +80,24 @@ int DeepSeek4::streams() const { return kHc; }
 // The layer's state the way the model itself presents a hidden state: the streams through the output
 // head's mix (the file's global output_hc_* weights - the same mix the final logits' rows read), no
 // norm: out_norm belongs to the model's last output alone.
+// The output head's stream-mix weights (a few tens of KB): their own device buffers.  upload() writes
+// into the dense arena, which is already spent when the drafter's taps are first built.
+void DeepSeek4::load_head_mix() {
+    if (hc_head_fn_.p) return;
+    const auto one = [&](const char* nm, int64_t cnt, int n_in, int n_out) {
+        const TensorInfo* t = gg_->find(nm);
+        if (!t) throw std::runtime_error(std::string("the model has no ") + nm);
+        float* p = (float*) dmalloc(size_t(cnt) * sizeof(float), nm);
+        ck(cudaMemcpy(p, home(*t).data(*t), size_t(cnt) * sizeof(float), cudaMemcpyHostToDevice), nm);
+        return Dev{p, kTypeF32, n_in, n_out};
+    };
+    hc_head_fn_ = one("output_hc_fn.weight", (int64_t) kHc * n_embd_ * kHc, kHc * n_embd_, kHc);
+    hc_head_scale_ = one("output_hc_scale.weight", 1, 1, 1);
+    hc_head_base_ = one("output_hc_base.weight", kHc, 1, kHc);
+}
+
 void DeepSeek4::tap_state_mix(int il, int n, float* dst, int64_t dst_stride) {
-    // the output head's weights, the first time a tap is built (the last layer's own load is too late:
-    // layers 1, 20 and 39 are read before it)
-    if (!hc_head_fn_.p) {
-        auto top = [&](const char* nm, int64_t a, int64_t b = 1) { return upload(gg_->find(nm), nm, a, b, kF32); };
-        hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
-        hc_head_scale_ = top("output_hc_scale.weight", 1);
-        hc_head_base_ = top("output_hc_base.weight", kHc);
-    }
+    load_head_mix();
     // STRATA_EAGLE_TAPS=mix carries 5; the layer's own collapses are the names "ffn" and "attn"
     static const int mode = [] {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
@@ -142,12 +151,7 @@ void DeepSeek4::shift_rows(ptrdiff_t by) {
 
 // The model's output for `rows` tokens from row `first` of the call: the streams mixed by their own weights, normed.
 void DeepSeek4::output_rows(int first, int rows, float* h) {
-    if (!hc_head_fn_.p) {   // the last layer's load was replaced by the lazy one the taps share
-        auto top = [&](const char* nm, int64_t a, int64_t b = 1) { return upload(gg_->find(nm), nm, a, b, kF32); };
-        hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
-        hc_head_scale_ = top("output_hc_scale.weight", 1);
-        hc_head_base_ = top("output_hc_base.weight", kHc);
-    }
+    load_head_mix();
     hc_head(r_ + (size_t) first * kHc * n_embd_, fp(hc_head_fn_), fp(hc_head_scale_), fp(hc_head_base_), mix_, cur_,
             n_embd_, rows, rms_eps_, hc_eps_, st_);
     rms_norm(cur_, fp(out_norm_), h, n_embd_, rows, rms_eps_, st_);
