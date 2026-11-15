@@ -80,11 +80,22 @@ public:
         asked_ = 0;
         sure_ = tokens_ = 1.0;
         one_ = at_[1] ? ms_[1] : policy.cost_ms(1);   // a token alone is the measure, old or not
-        return blocks && (force() || gate.ask());
+        return blocks && (force() || one_draft() || gate.ask());
+    }
+
+    /// STRATA_EAGLE_ONE_DRAFT=1: one guess a round and nothing weighed - a measuring stick for the head's
+    /// own accuracy that costs one lm_head read a token instead of three.
+    static bool one_draft() {
+        static const bool on = [] {
+            const char* v = std::getenv("STRATA_EAGLE_ONE_DRAFT");
+            return v != nullptr && v[0] == '1';
+        }();
+        return on;
     }
 
     /// Whether the block is asked for a guess more, the window having n of them.
     bool wants(int n) {
+        if (one_draft()) return n < 1;
         if (force()) return n < 3;                    // the block's three guesses, the window's widest
         const int to = n + 2;   // the window's tokens with this guess
         more_ = knows(to) ? std::clamp((ms_[to] - round_ms(to - 1)) / one_, 0.2, 0.8) : kUnmeasured;
@@ -100,7 +111,7 @@ public:
         asked_at_ = round_;
         ++asked_;
         sure_ *= p;
-        if (force()) {
+        if (force() || one_draft()) {
             tokens_ += sure_;
             return true;
         }
