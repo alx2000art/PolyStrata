@@ -116,6 +116,9 @@ void DeepSeek4::tap_state_mix(int il, int n, float* dst, int64_t dst_stride) {
             hc_pre(r_, fp(B.hc_attn_fn), fp(B.hc_attn_scale), fp(B.hc_attn_base), mix_, hcw_, cur_, n_embd_, n,
                    rms_eps_, hc_eps_, sinkhorn_, st_);
     } else {
+        // hc_head reads each stream's score out of mix_: hc_mix fills them for these rows first (the final
+        // output's own mix_ comes from the last layer's hc_pre, which these layers have not run)
+        hc_mix(r_, fp(hc_head_fn_), mix_, n_embd_, n, kHc, st_);
         hc_head(r_, fp(hc_head_fn_), fp(hc_head_scale_), fp(hc_head_base_), mix_, cur_, n_embd_, n, rms_eps_,
                 hc_eps_, st_);
     }
