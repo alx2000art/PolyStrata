@@ -71,7 +71,8 @@ void ring_runs(int64_t pos, int keep, int ring, F&& f) {
 
 void DeepSeek4::begin_pass() {
     blocks_.assign(layers_.size(), Block{});
-    hc_head_fn_ = hc_head_scale_ = hc_head_base_ = Dev{};
+    // the output head's mix weights stay loaded: a pass's tap layers (1, 20, 39) run before the last
+    // layer loads them, and the drafter's taps are built with them
 }
 
 int DeepSeek4::streams() const { return kHc; }
@@ -196,6 +197,13 @@ void DeepSeek4::load_geometry() {
 
     clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_layer_);
     clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_layer_) : clamp_exp_;
+
+    // the output head's stream mix, loaded up front: the drafter's tap layers (1, 20, 39) are read before
+    // the last layer would have loaded it, and the taps are its output
+    auto top = [&](const char* n, int64_t a, int64_t b = 1) { return upload(gg_->find(n), n, a, b, kF32); };
+    hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
+    hc_head_scale_ = top("output_hc_scale.weight", 1);
+    hc_head_base_ = top("output_hc_base.weight", kHc);
 }
 
 void DeepSeek4::load_layer(int il) {
@@ -267,12 +275,8 @@ void DeepSeek4::load_layer(int il) {
             if (e < 0 || e >= n_expert_) throw std::runtime_error(t->name + " names an expert the layer has not");
     }
 
-    if (il == n_layer_ - 1) {   // the output's read of the streams, on the card that has the output
-        auto top = [&](const char* n, int64_t a, int64_t b = 1) { return upload(gg_->find(n), n, a, b, kF32); };
-        hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
-        hc_head_scale_ = top("output_hc_scale.weight", 1);
-        hc_head_base_ = top("output_hc_base.weight", kHc);
-    }
+    // The output head's stream-mix weights are loaded by load_geometry, not here: the drafter's tap
+    // layers (1, 20, 39) run before the last one, and their taps are built with this mix.
 }
 
 int DeepSeek4::widest() const {
