@@ -153,10 +153,10 @@ b=$(sectors)
 log "=== 4/4: запрос ==="
 # the run's progress on the console as it happens: the server's own lines and the drafter's probes
 ( tail -n0 -F "$OUT_DIR/server.log.last" 2>/dev/null \
-    | grep --line-buffered -E "reading the prompt|\[strata\] done:|error" ) &
+    | grep --line-buffered -E "reading the prompt|\[strata\] done:|error|^\[eagle\]|first guess|probe:" ) &
 TAILPID=$!
-# the engine's own log carries the drafter's probes and the rope/taps lines
-if [[ -n "$LOG" && -f "$LOG" ]]; then
+# the engine's own log carries the drafter's probes - only when it is not the server's own file
+if [[ -n "$LOG" && -f "$LOG" ]] && ! [[ "$LOG" -ef "$OUT_DIR/server.log.last" ]]; then
     ( tail -n0 -F "$LOG" 2>/dev/null \
         | grep --line-buffered -E "^\[eagle\]|draft block|first guess|probe:" ) &
     TAILPID2=$!
