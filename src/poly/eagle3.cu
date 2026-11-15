@@ -310,6 +310,14 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
 }
 
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
+    // DBG(eagle3): the draft step's own input - if these are the same for different tokens, the head never
+    // sees the embedding and every guess is the same word
+    if (dbg_logits_ < 3) {
+        ++dbg_logits_;
+        std::fprintf(stderr, "[eagle] draft step: token %d, emb %.4f %.4f %.4f %.4f, hidden %.4f %.4f %.4f\n",
+                     (int) token, (double) emb_host[0], (double) emb_host[1], (double) emb_host[2],
+                     (double) emb_host[3], (double) hidden_[0], (double) hidden_[1], (double) hidden_[2]);
+    }
     ck(cudaMemcpyAsync(emb_dev_, emb_host, n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle draft emb");
     midlayer(emb_dev_, cache_pos_, 1, stream);
