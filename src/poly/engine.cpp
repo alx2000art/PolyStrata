@@ -4152,11 +4152,22 @@ void Engine::tap_capture(int il, int n) {
                                      r_ + size_t(eagle_taps_ - 1) * n_embd_, size_t(streams()) * n_embd_ * 4,
                                      size_t(n_embd_) * 4, n, cudaMemcpyDeviceToDevice, cs(st_)),
                    "a tap stream");
-            if (i == dspark_taps_n_ - 1 && in_read_ && taps_host_)
-                ck(cudaMemcpyAsync(taps_host_ + (size_t) (pos_ - taps_pos0_) * dspark_taps_n_ * n_embd_, dspark_taps_,
-                                   size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost,
-                                   cs(st_)),
-                   "the taps to the host");
+            // The read walks the calls layer by layer, so this slot is right for the call in hand only:
+            // it goes to the host right away, into that call's rows of the tap's own plane.  pos_ is not
+            // trusted for the offset (a parked read restarts it) - a row count keeps the rows in order.
+            if (in_read_ && taps_host_) {
+                if (tap_row_slot_ != i) {   // the read has moved to the next tap layer: rows start over
+                    tap_row_slot_ = i;
+                    tap_row_ = 0;
+                }
+                const int64_t off = tap_row_;
+                if (off >= 0 && off + n <= taps_rows_)
+                    ck(cudaMemcpyAsync(taps_host_ + (size_t(i) * taps_rows_ + (size_t) off) * n_embd_,
+                                       dspark_taps_ + size_t(i) * n_embd_, size_t(n) * n_embd_ * sizeof(float),
+                                       cudaMemcpyDeviceToHost, cs(st_)),
+                       "the taps to the host");
+                tap_row_ += n;
+            }
             break;
         }
 }
@@ -4220,7 +4231,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     // rows: a prompt arrives in chunks, and pos_ inside the read is the chunk's absolute start.
     if (eagle3_ && dspark_taps_n_) {
         taps_pos0_ = pos_;
-        taps_host_ = (float*) std::malloc(size_t(n) * dspark_taps_n_ * n_embd_ * sizeof(float));
+        taps_rows_ = n;
+        tap_row_ = 0;
+        tap_row_slot_ = -1;
+        taps_host_ = (float*) std::malloc(size_t(dspark_taps_n_) * size_t(n) * n_embd_ * sizeof(float));
         if (!taps_host_) throw std::runtime_error("the eagle3 taps' host buffer ran out of memory");
     }
     OnCard here(device_, split_);
@@ -4439,11 +4453,17 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     if (eagle3_ && taps_host_) {
         float* emb_stage = (float*) std::malloc(size_t(rows_) * n_embd_ * sizeof(float));
         if (!emb_stage) throw std::runtime_error("the eagle3 injection's staging ran out of memory");
+        std::vector<float> taps_stage(size_t(rows_) * dspark_taps_n_ * n_embd_);
         for (int64_t p = 0; p < n; p += rows_) {
             const int m = int(std::min<int64_t>(rows_, n - p));
-            ck(cudaMemcpyAsync(dspark_taps_, taps_host_ + (size_t) p * dspark_taps_n_ * n_embd_,
-                               size_t(m) * dspark_taps_n_ * n_embd_ * sizeof(float), cudaMemcpyHostToDevice,
-                               cs(st_)),
+            // the host planes are per tap; the fc reads a row's taps back to back
+            for (int r = 0; r < m; ++r)
+                for (int tp = 0; tp < dspark_taps_n_; ++tp)
+                    std::memcpy(taps_stage.data() + (size_t(r) * dspark_taps_n_ + tp) * n_embd_,
+                                taps_host_ + ((size_t) tp * taps_rows_ + (size_t) (p + r)) * n_embd_,
+                                size_t(n_embd_) * sizeof(float));
+            ck(cudaMemcpyAsync(dspark_taps_, taps_stage.data(), size_t(m) * dspark_taps_n_ * n_embd_ * sizeof(float),
+                               cudaMemcpyHostToDevice, cs(st_)),
                "the taps back");
             for (int t = 0; t < m; ++t) embed(tokens[p + t], emb_stage + (size_t) t * n_embd_);
             ck(cudaMemcpyAsync(eagle3_->emb_dev(), emb_stage, size_t(m) * n_embd_ * sizeof(float),

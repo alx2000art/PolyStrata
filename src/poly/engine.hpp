@@ -880,9 +880,11 @@ protected:
                                                    ///< Eagle3 drafter consumes it, not the nextn probe
     Eagle3* eagle3_ = nullptr;                     ///< the EAGLE-3 drafter (the head's weights, its KV)
     int eagle_dbg_ = 0;                            ///< the draft() debug prints left (3 then silent)
-    float* taps_host_ = nullptr;                   ///< the read's taps on the host (rows x 3 x n_embd)
-    int64_t taps_pos0_ = 0;                        ///< the read's start position: the host buffer's rows are
-                                                   ///< read-relative, the prompt arrives in chunks
+    float* taps_host_ = nullptr;                   ///< the read's taps on the host, a plane a tap (tap x row)
+    int64_t taps_pos0_ = 0;                        ///< the read's start position (bookkeeping)
+    int64_t taps_rows_ = 0;                        ///< the rows taps_host_ holds
+    int64_t tap_row_ = 0;                          ///< the rows of the tap layer in hand written so far
+    int tap_row_slot_ = -1;                        ///< which tap layer tap_row_ counts
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)
     void tap_capture(int il, int n);               ///< the tap state at a tap layer's tail (+ the read's D2H)
     virtual void tap_state_mix(int, int, float*, int64_t) {}   ///< the architecture's own collapse of its
