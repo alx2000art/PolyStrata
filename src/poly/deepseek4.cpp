@@ -87,8 +87,14 @@ void DeepSeek4::load_head_mix() {
     const auto one = [&](const char* nm, int64_t cnt, int n_in, int n_out) {
         const TensorInfo* t = gg_->find(nm);
         if (!t) throw std::runtime_error(std::string("the model has no ") + nm);
+        // the file keeps them in its own type (BF16 in this model): convert the way the loader does
+        std::vector<float> f((size_t) cnt);
+        const ggml_to_float_t to_float = ggml_get_type_traits((ggml_type) t->type)->to_float;
+        const void* src = home(*t).data(*t);
+        if (to_float) to_float(src, f.data(), cnt);
+        else std::memcpy(f.data(), src, (size_t) cnt * sizeof(float));
         float* p = (float*) dmalloc(size_t(cnt) * sizeof(float), nm);
-        ck(cudaMemcpy(p, home(*t).data(*t), size_t(cnt) * sizeof(float), cudaMemcpyHostToDevice), nm);
+        ck(cudaMemcpy(p, f.data(), (size_t) cnt * sizeof(float), cudaMemcpyHostToDevice), nm);
         return Dev{p, kTypeF32, n_in, n_out};
     };
     hc_head_fn_ = one("output_hc_fn.weight", (int64_t) kHc * n_embd_ * kHc, kHc * n_embd_, kHc);
