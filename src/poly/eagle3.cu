@@ -263,13 +263,21 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         std::fprintf(stderr, "[eagle] inject n=%d pos=%lld taps mean=%.4f min=%.2f max=%.2f\n", n, (long long) pos,
                      s / th.size(), mn, mx);
     }
-    midlayer(emb_dev, pos, n, stream);
-    // DBG(eagle3) STRATA_EAGLE_DUMP=<file>: the first inject's last row's taps and its fc output, for the reference
-    // torch forward to be run on the same numbers (the dump is raw float32: taps 3*n_embd, then hidden)
-    if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && !dumped_ && n > 1) {
-        dumped_ = true;
+    // DBG(eagle3) STRATA_EAGLE_DUMP=<file>: the first inject's taps and its fc output BEFORE the midlayer
+    // touches hidden_ (after it, hidden_ is the residual's sum, not what fc produced)
+    const char* dpath = std::getenv("STRATA_EAGLE_DUMP");
+    const bool dumping = dpath && !dumped_ && n > 1;
+    std::vector<float> fc_dump;
+    if (dumping) {
         ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync");
-        FILE* f = std::fopen(dp, "wb");
+        fc_dump.assign((size_t) n_embd_, 0.f);
+        ck(cudaMemcpy(fc_dump.data(), hidden_ + (size_t) (n - 1) * n_embd_, fc_dump.size() * sizeof(float),
+                      cudaMemcpyDeviceToHost), "eagle dump fc");
+    }
+    midlayer(emb_dev, pos, n, stream);
+    if (dumping) {
+        dumped_ = true;
+        FILE* f = std::fopen(dpath, "wb");
         if (f) {
             // the stages in order: taps (3*n_embd), fc out, the embedding, ln1 out, hnorm out, the
             // final normed state, the lm_head's logits - a numpy forward can be run on each of them
@@ -282,7 +290,7 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                 std::fwrite(buf.data(), sizeof(float), cnt, f);
             };
             put(taps_dev, 3 * e, (size_t) (n - 1), 3 * e);
-            put(hidden_, e, (size_t) (n - 1), e);
+            std::fwrite(fc_dump.data(), sizeof(float), fc_dump.size(), f);
             put(emb_dev, e, (size_t) (n - 1), e);
             put(e_norm_, e, (size_t) (n - 1), e);
             put(f_norm_, e, (size_t) (n - 1), e);
