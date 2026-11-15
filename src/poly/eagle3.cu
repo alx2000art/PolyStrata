@@ -271,16 +271,24 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync");
         FILE* f = std::fopen(dp, "wb");
         if (f) {
-            std::vector<float> taps((size_t) 3 * n_embd_), hid((size_t) n_embd_);
-            ck(cudaMemcpy(taps.data(), taps_dev + size_t(n - 1) * 3 * n_embd_, taps.size() * sizeof(float),
-                          cudaMemcpyDeviceToHost), "eagle dump taps");
-            ck(cudaMemcpy(hid.data(), hidden_ + size_t(n - 1) * n_embd_, hid.size() * sizeof(float),
-                          cudaMemcpyDeviceToHost), "eagle dump hidden");
-            std::fwrite(taps.data(), sizeof(float), taps.size(), f);
-            std::fwrite(hid.data(), sizeof(float), hid.size(), f);
+            // the stages in order: taps (3*n_embd), fc out, the embedding, ln1 out, hnorm out, the
+            // final normed state, the lm_head's logits - a numpy forward can be run on each of them
+            const size_t e = (size_t) n_embd_;
+            std::vector<float> buf;
+            const auto put = [&](const float* dev, size_t cnt, size_t row, size_t stride) {
+                buf.assign(cnt, 0.f);
+                ck(cudaMemcpy(buf.data(), dev + row * stride, cnt * sizeof(float), cudaMemcpyDeviceToHost),
+                   "eagle dump");
+                std::fwrite(buf.data(), sizeof(float), cnt, f);
+            };
+            put(taps_dev, 3 * e, (size_t) (n - 1), 3 * e);
+            put(hidden_, e, (size_t) (n - 1), e);
+            put(emb_dev, e, (size_t) (n - 1), e);
+            put(e_norm_, e, (size_t) (n - 1), e);
+            put(f_norm_, e, (size_t) (n - 1), e);
+            put(normed_, e, (size_t) (n - 1), e);
             std::fclose(f);
-            std::fprintf(stderr, "[eagle] dumped the taps and the fc output to %s (pos %lld)\n", dp,
-                         (long long) (pos + n - 1));
+            std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dp, (long long) (pos + n - 1));
         }
     }
     // the draft's feature is the call's LAST row (the token the drafter starts from): move it to row 0,
@@ -299,6 +307,19 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    // the dump's last block: this step's logits, appended to what inject wrote
+    if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && dumped_ && !dumped_logits_) {
+        dumped_logits_ = true;
+        ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync2");
+        std::vector<float> lg((size_t) dvocab_);
+        ck(cudaMemcpy(lg.data(), logits_, lg.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle dump logits");
+        FILE* f = std::fopen(dp, "ab");
+        if (f) {
+            std::fwrite(lg.data(), sizeof(float), lg.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] dumped the draft step's logits too (%d)\n", dvocab_);
+        }
+    }
     return logits_;
 }
 

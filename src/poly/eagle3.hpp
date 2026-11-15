@@ -83,7 +83,8 @@ private:
     std::vector<int64_t> d2t_;
     int dbg_inj_ = 0, dbg_att_ = 0, dbg_logits_ = 0;   // the one-shot debug prints left (2 of each)
     bool cat_he_ = false;         // STRATA_EAGLE_CAT=he: the midlayer's input is [hidden | embedding]
-    bool dumped_ = false;         // STRATA_EAGLE_DUMP: the taps and the fc output are written once
+    bool dumped_ = false;         // STRATA_EAGLE_DUMP: the inject stages are written once
+    bool dumped_logits_ = false;  // their draft step's logits appended once
     bool loaded_ = false;
 };
 
