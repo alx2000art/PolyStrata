@@ -314,9 +314,11 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
     // sees the embedding and every guess is the same word
     if (dbg_logits_ < 3) {
         ++dbg_logits_;
+        float hh[4] = {};
+        ck(cudaMemcpy(hh, hidden_, sizeof hh, cudaMemcpyDeviceToHost), "eagle draft h");
         std::fprintf(stderr, "[eagle] draft step: token %d, emb %.4f %.4f %.4f %.4f, hidden %.4f %.4f %.4f\n",
                      (int) token, (double) emb_host[0], (double) emb_host[1], (double) emb_host[2],
-                     (double) emb_host[3], (double) hidden_[0], (double) hidden_[1], (double) hidden_[2]);
+                     (double) emb_host[3], (double) hh[0], (double) hh[1], (double) hh[2]);
     }
     ck(cudaMemcpyAsync(emb_dev_, emb_host, n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle draft emb");
