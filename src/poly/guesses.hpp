@@ -62,6 +62,16 @@ public:
 
     Gate gate;
 
+    /// STRATA_EAGLE_FORCE_GUESSES=1: every guess joins every window and no time is weighed.  A probe,
+    /// not a speed: the acceptance then says what the drafter's guesses are worth on their own.
+    static bool force() {
+        static const bool on = [] {
+            const char* v = std::getenv("STRATA_EAGLE_FORCE_GUESSES");
+            return v != nullptr && v[0] == '1';
+        }();
+        return on;
+    }
+
     /// A round begins.  `blocks`: the block may be asked in it.  Returns whether it is asked at all.
     bool begin(bool blocks, const spec::DraftPolicy& policy) {
         ++round_;
@@ -69,11 +79,12 @@ public:
         asked_ = 0;
         sure_ = tokens_ = 1.0;
         one_ = at_[1] ? ms_[1] : policy.cost_ms(1);   // a token alone is the measure, old or not
-        return blocks && gate.ask();
+        return blocks && (force() || gate.ask());
     }
 
     /// Whether the block is asked for a guess more, the window having n of them.
     bool wants(int n) {
+        if (force()) return n < 3;                    // the block's three guesses, the window's widest
         const int to = n + 2;   // the window's tokens with this guess
         more_ = knows(to) ? std::clamp((ms_[to] - round_ms(to - 1)) / one_, 0.2, 0.8) : kUnmeasured;
         // asking takes time too: not when a guess the block were sure of would not pay for it
@@ -88,6 +99,10 @@ public:
         asked_at_ = round_;
         ++asked_;
         sure_ *= p;
+        if (force()) {
+            tokens_ += sure_;
+            return true;
+        }
         if (sure_ * round_ms(n + 1) <= tokens_ * more_ * one_) return false;
         tokens_ += sure_;
         return true;
