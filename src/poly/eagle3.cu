@@ -84,6 +84,18 @@ void Eagle3::load(Shards& dg) {
         d2t_.reserve(t->items.size());
         for (const MetaValue& v : t->items) d2t_.push_back(int64_t(v.u));
     }
+    if (d2t_.size() < (size_t) dvocab_) {   // the file has no d2t: the draft ids are the target ids
+        std::fprintf(stderr,
+                     "strata-poly: the eagle3 head has %zu d2t entries for a %d draft vocab - the draft ids "
+                     "map to themselves\n",
+                     d2t_.size(), dvocab_);
+        d2t_.resize((size_t) dvocab_);
+        for (int i = 0; i < dvocab_; ++i) d2t_[(size_t) i] = i;
+    } else {
+        std::fprintf(stderr, "strata-poly: the eagle3 d2t: %zu entries, first %lld %lld %lld %lld\n",
+                     d2t_.size(), (long long) d2t_[0], (long long) d2t_[1], (long long) d2t_[2],
+                     (long long) d2t_[3]);
+    }
 
     // the weights: the file's own BF16 bytes on card, the projections read them through the engine's
     // BF16 paths (gemv_bf16, and bf16_to_f32 + cuBLAS for a prompt batch)
