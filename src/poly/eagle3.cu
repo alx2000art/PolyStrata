@@ -26,6 +26,7 @@
 #include <cuda_fp16.h>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
