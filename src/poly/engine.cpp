@@ -4133,7 +4133,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
 // one call's taps only, and the read's end injects them in batches from there.
 void Engine::tap_capture(int il, int n) {
     if (!dspark_taps_) return;
-    // STRATA_EAGLE_TAPS: which of the layer's state the drafter's taps carry.  mix (the model's own
+    // DBG(eagle3) STRATA_EAGLE_TAPS: which of the layer.s state the drafter's taps carry.  mix (the model's own
     // collapse of its streams, as its hidden states are made); mean (the streams averaged); s0..s3
     // (one stream as it lies).  A tap is n_embd values a row either way.
     if (eagle_taps_ < 0) {
@@ -4692,7 +4692,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         ck(cudaStreamSynchronize(cs(st_)), "draft after likeliest");
         ck(cudaStreamSynchronize(cs(st_)), "draft");
         *prob = h_guess_->prob;
-        // A drafter that answers with the token it was handed is predicting the NEXT token one step
+        // DBG(eagle3) A drafter that answers with the token it was handed is predicting the NEXT token one step
         // early: its input pair is (embedding of t, the hidden before t) instead of (t's own hidden).
         {
             static long long eq = 0, tot = 0;
@@ -4702,7 +4702,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                 std::fprintf(stderr, "[eagle] probe: the draft equals its own input token %lld of %lld (%.0f%%)\n",
                              eq, tot, 100.0 * double(eq) / double(tot));
         }
-        if (eagle_dbg_ < 3) {   // the head's first verdicts: a p stuck near 0 names the logits, not the window
+        if (eagle_dbg_ < 3) {   // DBG(eagle3) the head.s first verdicts: a p stuck near 0 names the logits, not the window
             ++eagle_dbg_;
             std::fprintf(stderr, "[eagle] draft %d/3: p=%.4f draft_id=%d -> target_id=%d (dvocab %d)\n",
                          eagle_dbg_, *prob, (int) h_guess_->token, (int) eagle3_->d2t(h_guess_->token),

@@ -58,7 +58,7 @@ using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
-// STRATA_EAGLE_STATS=1: the drafter's first guess is compared with the token the model itself picked,
+// DBG(eagle3) STRATA_EAGLE_STATS=1: the drafter.s first guess is compared with the token the model itself picked,
 // so the head's own top-1 accuracy is measured without the window or the policy in the way.
 const bool eagle_stats = [] {
     const char* v = std::getenv("STRATA_EAGLE_STATS");

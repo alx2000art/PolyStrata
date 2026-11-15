@@ -229,7 +229,7 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
-    if (dbg_att_ < 1) {   // the first inject's attention output: finite means the cache and the softmax hold
+    if (dbg_att_ < 1) {   // DBG(eagle3) the first inject.s attention output: finite means the cache and the softmax hold
         ++dbg_att_;
         float h[4] = {};
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg syncA");
@@ -252,7 +252,7 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
 void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, void* stream) {
     // the taps' stack [rows x 3 x n_embd] through the fc, the output lands in hidden_ (the residual)
     linear(fc_w_, taps_dev, 3 * n_embd_, n_embd_, hidden_, n, stream);
-    if (dbg_inj_ < 1) {   // the first inject only: the taps' range as the head sees it
+    if (dbg_inj_ < 1) {   // DBG(eagle3) the first inject only: the taps' range as the head sees it
         ++dbg_inj_;
         ck(cudaStreamSynchronize(cs(stream)), "eagle dbg sync");
         std::vector<float> th((size_t) n * 3 * n_embd_);
@@ -264,7 +264,7 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                      s / th.size(), mn, mx);
     }
     midlayer(emb_dev, pos, n, stream);
-    // STRATA_EAGLE_DUMP=<file>: the first inject's last row's taps and its fc output, for the reference
+    // DBG(eagle3) STRATA_EAGLE_DUMP=<file>: the first inject's last row's taps and its fc output, for the reference
     // torch forward to be run on the same numbers (the dump is raw float32: taps 3*n_embd, then hidden)
     if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && !dumped_ && n > 1) {
         dumped_ = true;
@@ -307,7 +307,7 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
-    // the dump's last block: this step's logits, appended to what inject wrote
+    // DBG(eagle3) the dump.s last block: this step.s logits, appended to what inject wrote
     if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && dumped_ && !dumped_logits_) {
         dumped_logits_ = true;
         ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync2");

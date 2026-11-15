@@ -104,7 +104,7 @@ void DeepSeek4::tap_state_mix(int il, int n, float* dst, int64_t dst_stride) {
     ck(cudaMemcpy2DAsync(dst, (size_t) dst_stride * 4, cur_, (size_t) n_embd_ * 4, (size_t) n_embd_ * 4, n,
                          cudaMemcpyDeviceToDevice, cs(st_)),
        "the tap mix");
-    // STRATA_EAGLE_DUMP_R=<file>: the tap layer's last row of streams (kHc * n_embd floats), so every
+    // DBG(eagle3) STRATA_EAGLE_DUMP_R=<file>: the tap layer's last row of streams (kHc * n_embd floats), so every
     // collapse the formula allows can be tried offline against one fc output
     static const char* rpath = std::getenv("STRATA_EAGLE_DUMP_R");
     if (rpath && tap_rows_ < 3) {   // the three tap layers of the first call

@@ -63,7 +63,7 @@ public:
 
     Gate gate;
 
-    /// STRATA_EAGLE_FORCE_GUESSES=1: every guess joins every window and no time is weighed.  A probe,
+    /// DBG(eagle3) STRATA_EAGLE_FORCE_GUESSES=1: every guess joins every window and no time is weighed.  A probe,
     /// not a speed: the acceptance then says what the drafter's guesses are worth on their own.
     static bool force() {
         static const bool on = [] {
@@ -83,7 +83,7 @@ public:
         return blocks && (force() || one_draft() || gate.ask());
     }
 
-    /// STRATA_EAGLE_ONE_DRAFT=1: one guess a round and nothing weighed - a measuring stick for the head's
+    /// DBG(eagle3) STRATA_EAGLE_ONE_DRAFT=1: one guess a round and nothing weighed - a measuring stick for the head's
     /// own accuracy that costs one lm_head read a token instead of three.
     static bool one_draft() {
         static const bool on = [] {
