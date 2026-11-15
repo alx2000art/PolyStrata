@@ -58,6 +58,13 @@ using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
+// STRATA_EAGLE_STATS=1: the drafter's first guess is compared with the token the model itself picked,
+// so the head's own top-1 accuracy is measured without the window or the policy in the way.
+const bool eagle_stats = [] {
+    const char* v = std::getenv("STRATA_EAGLE_STATS");
+    return v != nullptr && v[0] == '1';
+}();
+
 // serve() saves the experts' use after its first answer and then after an answer when the last save is this long
 // ago, and not only when it is told to quit: a server that is ended on Windows takes its engine with it at once.
 // A save is a file of some 40 KB and a rename.
@@ -369,6 +376,7 @@ struct Session {
         int64_t produced = 0, resume = 0, read = 0;
         int64_t gave_way = -1;   // where `between` stopped the read
         int64_t guessed = 0, guessed_right = 0;
+        long long eagle_hit = 0, eagle_tot = 0;   // STRATA_EAGLE_STATS: the first draft against the model's pick
         double prompt_ms = 0, decode_ms = 0;
         const char* finish = "length";
     };
@@ -543,6 +551,12 @@ struct Session {
                 int right = 0;
                 bool more = true;
                 t = pick(engine.logits_of(0));
+                // STRATA_EAGLE_STATS=1: how often the FIRST draft is what the model itself picked after the
+                // round's known token - the head's own top-1 accuracy, with no policy in the way
+                if (eagle_stats && use.t > 1) {
+                    ++r.eagle_tot;
+                    if (t == w[1]) ++r.eagle_hit;
+                }
                 while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) t = pick(engine.logits_of(++right));
                 engine.keep(right + 1);
                 kept.read(w, right + 1);
@@ -553,6 +567,9 @@ struct Session {
             }
         }
         r.decode_ms = ms_since(t0);
+        if (eagle_stats && r.eagle_tot > 0)
+            std::fprintf(stderr, "[eagle] the drafter's first guess was the model's pick %lld of %lld (%.1f%%)\n",
+                         r.eagle_hit, r.eagle_tot, 100.0 * double(r.eagle_hit) / double(r.eagle_tot));
         return r;
     }
 };
