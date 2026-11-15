@@ -21,6 +21,7 @@ MAX_TOKENS="${MAX_TOKENS:-16}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 STOP_WAIT="${STOP_WAIT:-90}"
 VARIANTS="${VARIANTS:-mean s0 s1 s2 s3}"
+CATS="${CATS:-eh he}"
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
@@ -43,8 +44,8 @@ stop_server() {
     pkill -KILL -f "engine-poly/strata-poly" 2>/dev/null || true
     sleep 2
 }
-set_taps() {   # $1 = mean | s0..s3
-    python3 - "$CONFIG" "$1" <<'PY'
+set_taps() {   # $1 = mean | s0..s3, $2 = eh | he
+    python3 - "$CONFIG" "$1" "$2" <<'PY'
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 e = cfg.setdefault("env", {})
@@ -52,6 +53,10 @@ if sys.argv[2] == "mean":
     e.pop("STRATA_EAGLE_TAPS", None)
 else:
     e["STRATA_EAGLE_TAPS"] = sys.argv[2]
+if sys.argv[3] == "he":
+    e["STRATA_EAGLE_CAT"] = "he"
+else:
+    e.pop("STRATA_EAGLE_CAT", None)
 tmp = sys.argv[1] + ".tmp"
 json.dump(cfg, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 os.replace(tmp, sys.argv[1])
@@ -76,16 +81,18 @@ except Exception as e:
 PY
 }
 
-log "=== A/B по представлению taps: $VARIANTS ==="
+log "=== A/B по представлению taps: $VARIANTS; порядок конката: $CATS ==="
 log "промпт: $PROMPT_FILE (первые $PROMPT_LIMIT строк), max_tokens $MAX_TOKENS"
 declare -A P
 for v in $VARIANTS; do
-    log "--- вариант: $v ---"
-    set_taps "$v"
+  for c in $CATS; do
+    label="$v/$c"
+    log "--- вариант: $label ---"
+    set_taps "$v" "$c"
     stop_server
-    if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.tapsab-$v-$(date +%H%M%S)" || true; fi
+    if [[ -n "$LOG" && -f "$LOG" ]]; then mv "$LOG" "$LOG.tapsab-${v}-${c}-$(date +%H%M%S)" || true; fi
     ( cd "$STRATA_DIR" && nohup "$STRATA_DIR/.venv/bin/python" "$STRATA_DIR/serve/server.py" \
-        --engine strata --config "$CONFIG" --port "$PORT" >> "$STRATA_DIR/diag_run/taps_ab_$v.log" 2>&1 & )
+        --engine strata --config "$CONFIG" --port "$PORT" >> "$STRATA_DIR/diag_run/taps_ab_${v}_${c}.log" 2>&1 & )
     ready=0
     for _ in $(seq 1 $((BOOT_TIMEOUT / 5))); do
         if port_open && curl -s -m 5 -H "Authorization: Bearer $API_KEY" "http://192.168.5.80:$PORT/health" \
@@ -96,12 +103,13 @@ for v in $VARIANTS; do
     ask >/dev/null
     p="$(grep -o 'draft 1/[0-9]*: p=[0-9.]*' "$LOG" 2>/dev/null | head -1 | grep -o '[0-9.]*$')"
     a="$(grep -o 'drafts [0-9]*/[0-9]*' "$LOG" 2>/dev/null | tail -1)"
-    P[$v]="${p:-?}"
+    P[$label]="${p:-?}"
     log "  p первого драфта: ${p:-нет}   ($a)"
+  done
 done
 stop_server
-set_taps mean
+set_taps mean eh
 log ""
 log "=== ИТОГ (p первого драфта; больше - лучше) ==="
-for v in $VARIANTS; do log "  $v: ${P[$v]:-?}"; done
-log "конфиг возвращён на mean; сервер остановлен - подними обычным пуском"
+for v in $VARIANTS; do for c in $CATS; do log "  $v/$c: ${P[$v/$c]:-?}"; done; done
+log "конфиг возвращён на mean/eh; сервер остановлен - подними обычным пуском"
