@@ -376,7 +376,8 @@ struct Session {
         int64_t produced = 0, resume = 0, read = 0;
         int64_t gave_way = -1;   // where `between` stopped the read
         int64_t guessed = 0, guessed_right = 0;
-        long long eagle_hit = 0, eagle_tot = 0;   // STRATA_EAGLE_STATS: the first draft against the model's pick
+        long long eagle_hit = 0, eagle_tot = 0;   // DBG(eagle3) STRATA_EAGLE_STATS: the first draft against the model's pick
+        long long eagle_seed_hit = 0, eagle_seed_tot = 0;   // DBG(eagle3) the x_n-seeded draft against x_{n+1}
         double prompt_ms = 0, decode_ms = 0;
         const char* finish = "length";
     };
@@ -527,11 +528,24 @@ struct Session {
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
                 if (ask) {
+                    // DBG(eagle3) STRATA_EAGLE_DRAFT_PREV=1 seeds the first draft with the token just
+                    // written (x_n) instead of the next one (x_{n+1}): the pair (embedding of x_n, h_n)
+                    // is what EAGLE is trained on, and the draft should then be x_{n+1} itself, which
+                    // the round already knows - a high hit rate names the scheme
+                    static const bool draft_prev = [] {
+                        const char* v = std::getenv("STRATA_EAGLE_DRAFT_PREV");
+                        return v != nullptr && v[0] == '1';
+                    }();
                     int n_d = 0;
-                    for (int32_t from = t; n_d < std::min(most, kBlockWindow) - 1 && guesses.wants(n_d); from = d[n_d++]) {
+                    for (int32_t from = (draft_prev && !history.empty()) ? history.back() : t;
+                         n_d < std::min(most, kBlockWindow) - 1 && guesses.wants(n_d); from = d[n_d++]) {
                         float p = 0.f;
                         const Clock::time_point asked_at = Clock::now();
                         d[n_d] = engine.draft(from, n_d, &p);
+                        if (draft_prev && n_d == 0) {
+                            ++r.eagle_seed_tot;
+                            if (d[0] == t) ++r.eagle_seed_hit;
+                        }
                         if (!guesses.takes(n_d, p, ms_since(asked_at))) break;
                     }
                     use = policy.choose(1 + n_d, k, match);
@@ -567,6 +581,10 @@ struct Session {
             }
         }
         r.decode_ms = ms_since(t0);
+        if (eagle_stats && r.eagle_seed_tot > 0)
+            std::fprintf(stderr, "[eagle] the x_n-seeded draft was x_{n+1} %lld of %lld (%.1f%%)\n",
+                         r.eagle_seed_hit, r.eagle_seed_tot,
+                         100.0 * double(r.eagle_seed_hit) / double(r.eagle_seed_tot));
         if (eagle_stats && r.eagle_tot > 0)
             std::fprintf(stderr, "[eagle] the drafter's first guess was the model's pick %lld of %lld (%.1f%%)\n",
                          r.eagle_hit, r.eagle_tot, 100.0 * double(r.eagle_hit) / double(r.eagle_tot));
