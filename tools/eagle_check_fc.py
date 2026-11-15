@@ -39,8 +39,14 @@ def main():
     ref = d[3 * n_embd : 3 * n_embd + n_embd]
     print(f"dump: taps {taps.shape}, engine fc out {ref.shape}")
 
-    def score(perm):
-        x = np.concatenate([taps[p] for p in perm]).astype(np.float32)
+    def score(perm, mode):
+        t = [taps[p].astype(np.float32) for p in perm]
+        if mode == "rms":      # each tap RMS-normed on its own (the model's states are ~unit scale)
+            t = [v / (np.sqrt((v * v).mean()) + 1e-6) for v in t]
+        elif mode == "rms-same":   # all three taps with one scale
+            s = np.sqrt(np.mean(np.concatenate(t) ** 2)) + 1e-6
+            t = [v / s for v in t]
+        x = np.concatenate(t).astype(np.float32)
         got = (w @ x).astype(np.float32)           # fc: out = W (out x in) . x
         diff = np.abs(got - ref).max()
         denom = np.linalg.norm(got) * np.linalg.norm(ref)
@@ -48,16 +54,21 @@ def main():
         rel = float(diff / (np.abs(ref).max() + 1e-9))
         return diff, rel, cos
 
+    print(f"taps stats: mean|.| {np.abs(taps).mean():.4f}, max|.| {np.abs(taps).max():.2f}, "
+          f"rms {np.sqrt((taps ** 2).mean()):.3f}; ref mean|.| {np.abs(ref).mean():.4f}, "
+          f"rms {np.sqrt((ref ** 2).mean()):.3f}")
     best = None
-    for perm in ((0, 1, 2), (2, 1, 0), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1)):
-        diff, rel, cos = score(perm)
-        tag = " <- tap order as the engine has it" if perm == (0, 1, 2) else ""
-        print(f"  taps {perm}: max|diff| {diff:.4f}, rel {rel:.3e}, cos {cos:.6f}{tag}")
-        if best is None or cos > best[1]:
-            best = (perm, cos)
-    print(f"best order {best[0]} (cos {best[1]:.6f})")
-    if best[1] < 0.99:
-        print("ВЕРДИКТ: fc не сходится ни при каком порядке taps - расходятся ВЕСА или сам taps (не порядок)")
+    for mode in ("raw", "rms", "rms-same"):
+        for perm in ((0, 1, 2), (2, 1, 0), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1)):
+            diff, rel, cos = score(perm, mode)
+            print(f"  {mode:8s} taps {perm}: max|diff| {diff:.4f}, rel {rel:.3e}, cos {cos:.6f}")
+            if best is None or cos > best[2]:
+                best = (mode, perm, cos)
+    print(f"best: {best[0]} order {best[1]} (cos {best[2]:.6f})")
+    if best[2] < 0.99:
+        print("ВЕРДИКТ: fc не сходится - расходятся сами taps (не порядок и не масштаб)")
+    else:
+        print("ВЕРДИКТ: fc сходится - вход (taps) надо брать так, как в лучшей строке")
 
 
 if __name__ == "__main__":
