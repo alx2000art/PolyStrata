@@ -18,6 +18,7 @@
 
 #include "strata/spec/draft_policy.hpp"
 
+#include <cstdlib>
 #include <algorithm>
 
 namespace strata::poly {
