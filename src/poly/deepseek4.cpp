@@ -81,6 +81,14 @@ int DeepSeek4::streams() const { return kHc; }
 // head's mix (the file's global output_hc_* weights - the same mix the final logits' rows read), no
 // norm: out_norm belongs to the model's last output alone.
 void DeepSeek4::tap_state_mix(int il, int n, float* dst, int64_t dst_stride) {
+    // the output head's weights, the first time a tap is built (the last layer's own load is too late:
+    // layers 1, 20 and 39 are read before it)
+    if (!hc_head_fn_.p) {
+        auto top = [&](const char* nm, int64_t a, int64_t b = 1) { return upload(gg_->find(nm), nm, a, b, kF32); };
+        hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
+        hc_head_scale_ = top("output_hc_scale.weight", 1);
+        hc_head_base_ = top("output_hc_base.weight", kHc);
+    }
     // STRATA_EAGLE_TAPS=mix carries 5; the layer's own collapses are the names "ffn" and "attn"
     static const int mode = [] {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
@@ -198,12 +206,8 @@ void DeepSeek4::load_geometry() {
     clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_layer_);
     clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_layer_) : clamp_exp_;
 
-    // the output head's stream mix, loaded up front: the drafter's tap layers (1, 20, 39) are read before
-    // the last layer would have loaded it, and the taps are its output
-    auto top = [&](const char* n, int64_t a, int64_t b = 1) { return upload(gg_->find(n), n, a, b, kF32); };
-    hc_head_fn_ = top("output_hc_fn.weight", kHc * n_embd_, kHc);
-    hc_head_scale_ = top("output_hc_scale.weight", 1);
-    hc_head_base_ = top("output_hc_base.weight", kHc);
+    // the output head's stream mix is loaded on first use (tap_state_mix): the drafter's tap layers
+    // (1, 20, 39) are read before the last layer would load it, and the taps are its output
 }
 
 void DeepSeek4::load_layer(int il) {
