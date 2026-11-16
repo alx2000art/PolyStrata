@@ -30,11 +30,38 @@ def main():
         w /= w.sum()
         out[h] = w @ v[:, kvh, :]
 
-    d = np.abs(out - o)
-    den = np.linalg.norm(out) * np.linalg.norm(o)
-    cos = float((out * o).sum() / den) if den > 0 else 0.0
+    def cos_of(hyp):
+        # every hypothesis compares against the engine's own o, so a matching alt names the layout
+        d = np.abs(hyp - o)
+        den = np.linalg.norm(hyp) * np.linalg.norm(o)
+        c = float((hyp * o).sum() / den) if den > 0 else 0.0
+        return d.max(), c
+
+    d, cos = cos_of(out)
     print(f"numpy attention vs engine: max|d| {d.max():.5f}, cos {cos:.6f}")
-    print("ВЕРДИКТ:", "внимание верно" if cos > 0.999 else "внимание РАСХОДИТСЯ")
+    verdict = "внимание верно" if cos > 0.999 else "внимание РАСХОДИТСЯ"
+    print("ВЕРДИКТ:", verdict)
+    if cos <= 0.999:   # the alternates, so one dump names the layout too
+        alt = np.zeros_like(out)
+        for h in range(nh):
+            kvh = h % nkv
+            s = (k[:, kvh, :] @ q[h]) * scale
+            s = s - s.max()
+            w = np.exp(s)
+            w /= w.sum()
+            alt[h] = w @ v[:, kvh, :]
+        d2, cos2 = cos_of(alt)
+        print(f"  alt: группы h%nkv  -> max|d| {d2:.5f}, cos {cos2:.6f}")
+        nos = np.zeros_like(out)
+        for h in range(nh):
+            kvh = h // per
+            s = k[:, kvh, :] @ q[h]
+            s = s - s.max()
+            w = np.exp(s)
+            w /= w.sum()
+            nos[h] = w @ v[:, kvh, :]
+        d3, cos3 = cos_of(nos)
+        print(f"  alt: без scale     -> max|d| {d3:.5f}, cos {cos3:.6f}")
 
 
 if __name__ == "__main__":

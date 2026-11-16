@@ -139,6 +139,14 @@ python3 - "$CONFIG" <<'PYEOF'
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
+# DBG(eagle3): EAGLE_* переменные вызова идут в конфиг как STRATA_EAGLE_* - движок берёт env из
+# конфига, не из вызывающего.  EAGLE_TEACH=<шаг>, EAGLE_DUMP_ATT=1 (путь по умолчанию), EAGLE_TAPS=...
+for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE_GUESSES", "ONE_DRAFT"):
+    val = os.environ.get("EAGLE_" + name)
+    if val:
+        if name == "DUMP_ATT" and val == "1":
+            val = os.path.expanduser("~/eagle_att.bin")
+        cfg.setdefault("env", {})["STRATA_EAGLE_" + name] = val
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
