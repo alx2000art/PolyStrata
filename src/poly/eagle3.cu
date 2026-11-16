@@ -330,8 +330,7 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
         FILE* f = std::fopen(apath, "wb");
         if (f) {
             const int rows = int(pos) + 1;
-            std::fprintf(f, "%d %d %d %d %d
-", (int) pos, n_head_, n_kv_, head_dim_, rows);
+            std::fprintf(f, "%d %d %d %d %d\n", (int) pos, n_head_, n_kv_, head_dim_, rows);
             std::vector<float> buf((size_t) n_head_ * head_dim_);
             ck(cudaMemcpy(buf.data(), q_ + (size_t) (head_dim_ * n_head_) * 0, buf.size() * sizeof(float),
                           cudaMemcpyDeviceToHost), "att dump q");
@@ -345,8 +344,7 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
             ck(cudaMemcpy(ob.data(), o_, ob.size() * sizeof(float), cudaMemcpyDeviceToHost), "att dump o");
             std::fwrite(ob.data(), sizeof(float), ob.size(), f);
             std::fclose(f);
-            std::fprintf(stderr, "[eagle] dumped the attention at pos %lld (rows %d)
-", (long long) pos, rows);
+            std::fprintf(stderr, "[eagle] dumped the attention at pos %lld (rows %d)\n", (long long) pos, rows);
         }
     }
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
