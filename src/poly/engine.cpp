@@ -4502,7 +4502,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                                            cudaMemcpyHostToDevice, cs(st_)),
                            "teach perm taps");
                     embed(tokens[p], eagle_emb_);
-                    const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+                    // the row (emb token_p, h_p) sits at position p - the same convention the prefill's
+                    // inject and the decode's use (row t of the call at position pos + t); p + 1 here put
+                    // every cached key one rope step out of phase and zeroed the metric
+                    const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p, st_);
                     likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
                     ck(cudaStreamSynchronize(cs(st_)), "teach perm run");
                     if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++ph[k];
@@ -4517,14 +4520,15 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                    "teach taps");
             // what EAGLE is trained on: the state at p with the embedding of the SAME token, naming p+1
             embed(tokens[p], eagle_emb_);
-            const float* lg_s = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+            const float* lg_s = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p, st_);
             likeliest(lg_s, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "teach self");
             ++tot;
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++self_hit;
-            // and the pair the draft rounds build now: the state at p with the NEXT token's embedding
+            // and the pair the draft rounds build now: the state at p with the NEXT token's embedding -
+            // the row sits at p + 1, where the round's own row would sit
             embed(tokens[p + 1], eagle_emb_);
-            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 2, st_);
+            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
             likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "teach");
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++hit;
@@ -4748,7 +4752,10 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         OnCard here(device_, split_);
         if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
         // a round's first draft step starts where the model is: a rejected guess's rows stay in the
-        // cache but are written over, and the next round does not walk further into the context
+        // cache but are written over, and the next round does not walk further into the context.
+        // The chain itself is cnets's: the injected row (the token's embedding over the fc of its
+        // taps, one layer pass) is the prefill's last row, and this step applies the layer once more
+        // with the sampled token's embedding - its normed state names the NEXT token.
         if (i == 0) eagle3_->rewind(pos_);
         embed(token, eagle_emb_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
