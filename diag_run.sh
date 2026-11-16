@@ -89,7 +89,7 @@ import json, sys, time, urllib.request
 base, key, model, out, mt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
 prompt = open(out + ".prompt", encoding="utf-8").read()
 body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
-                   "temperature": 0.9, "max_tokens": mt, "reasoning_budget_tokens": 150,
+                   "temperature": 0.0, "max_tokens": mt, "reasoning_budget_tokens": 150,
                    "stream": False}).encode("utf-8")
 req = urllib.request.Request(base + "/chat/completions", data=body,
                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
