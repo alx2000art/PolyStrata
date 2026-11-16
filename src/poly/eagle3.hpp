@@ -28,6 +28,11 @@ public:
     // floats) rides in, the input [that embedding, the last hidden] -> the midlayer -> lm_head.
     // Returns the logits' device pointer; the caller does the likeliest and the d2t translation.
     const float* draft_logits(int32_t token, const float* emb_host, void* stream);
+    // The round's FIRST guess: the injected anchor row's own normed state through the lm_head - no
+    // midlayer pass (the eval's injection already ran the layer on it), no cache write, exactly
+    // cnets's out_hidden[:, -1] -> lm_head(norm(...)).  draft_logits for the first guess would apply
+    // the layer a second time to the same row and poison the whole draft chain.
+    const float* peek_logits(void* stream);
     // The cache holds rows [0, pos) already; a round's rejected guesses leave theirs behind, so every
     // round starts the draft steps at the model's own position again.
     void rewind(int64_t pos) { cache_pos_ = pos; }

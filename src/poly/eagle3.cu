@@ -458,6 +458,11 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
     return logits_;
 }
 
+const float* Eagle3::peek_logits(void* stream) {
+    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    return logits_;
+}
+
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
     // DBG(eagle3): the draft step's own input - if these are the same for different tokens, the head never
     // sees the embedding and every guess is the same word

@@ -4767,15 +4767,19 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // bookkeeping lives in the class, the embed and the likeliest here
         OnCard here(device_, split_);
         if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
-        // a round's first draft step starts where the model is: a rejected guess's rows stay in the
-        // cache but are written over, and the next round does not walk further into the context.
-        // The chain itself is cnets's: the injected row (the token's embedding over the fc of its
-        // taps, one layer pass) is the prefill's last row, and this step applies the layer once more
-        // with the sampled token's embedding - its normed state names the NEXT token.
-        if (i == 0) eagle3_->rewind(pos_);
-        embed(token, eagle_emb_);
-        ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
-        const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
+        // a round's first guess is the injected anchor row's own: the eval's injection ran the head's
+        // midlayer on the row (the token's embedding, the fc of its taps), so peek_logits reads it with
+        // no extra pass and no cache write - cnets's out_hidden[:, -1] -> lm_head(norm(...)).  The
+        // recursion's rows (i >= 1) start from the previous GUESSES, as cnets's input_ids does.
+        // No rewind either: the injection re-anchors the draft's cache at pos_ + n every decode step.
+        const float* logits;
+        if (i == 0) {
+            logits = eagle3_->peek_logits(st_);
+        } else {
+            embed(token, eagle_emb_);
+            ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
+            logits = eagle3_->draft_logits(token, eagle_emb_, st_);
+        }
         ck(cudaStreamSynchronize(cs(st_)), "draft after draft_logits");
         likeliest(logits, eagle3_->dvocab(), h_guess_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after likeliest");
