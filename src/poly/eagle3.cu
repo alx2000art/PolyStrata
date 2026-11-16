@@ -203,15 +203,14 @@ void Eagle3::load(Shards& dg) {
     gate_w_ = w("midlayer.mlp.gate_proj.weight");
     up_w_ = w("midlayer.mlp.up_proj.weight");
     down_w_ = w("midlayer.mlp.down_proj.weight");
-    // the lm_head: Q8_0 by default - the draft step reads it whole every step (786 MB of BF16 a
-    // guess), and at its K of n_embd the mmvq kernels are the engine's own tested path (the Q8_0
-    // kernels' nan was this head's K of 12288 - the fc - which stays BF16).  The Q8_1 input the
-    // kernels read is the fused final norm's own product.
-    // DBG(eagle3) STRATA_EAGLE_LM_BF16=1: the file's own BF16 and the gemv path instead, to tell a
-    // broken quantize from a broken something else
+    // the lm_head: BF16 by default.  The Q8_0 path (STRATA_EAGLE_LM_Q8=1) reads 417 MB a draft step
+    // instead of 786 MB, but its logits came out degenerate (every guess p = 1.0): the same
+    // "the Q8_0 kernels' weight view differs from the bytes" mystery that once NaN'd the fc - the
+    // lm_head's own Q8_0 path was never validated apart from it.  At the K of n_embd the mmvq kernels
+    // are the engine's tested shapes; the Q8_1 input they read is the fused final norm's own product.
     lm_bf16_ = [] {
-        const char* v = std::getenv("STRATA_EAGLE_LM_BF16");
-        return v && v[0] == '1';
+        const char* v = std::getenv("STRATA_EAGLE_LM_Q8");
+        return !(v && v[0] == '1');
     }();
     if (lm_bf16_) {
         lm_head_w_ = w("lm_head.weight");
