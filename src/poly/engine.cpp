@@ -4512,10 +4512,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                                            cudaMemcpyHostToDevice, cs(st_)),
                            "teach perm taps");
                     embed(tokens[p], eagle_emb_);
-                    // the row (emb token_p, h_p) sits at position p - the same convention the prefill's
-                    // inject and the decode's use (row t of the call at position pos + t); p + 1 here put
-                    // every cached key one rope step out of phase and zeroed the metric
-                    const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p, st_);
+                    // the row sits at its ABSOLUTE position (taps_pos0_ + p): the draft cache holds the
+                    // read's rows at their absolute positions, and a chunk-local p here put every chunk
+                    // past the first one rope out of phase and clobbered a valid cache row
+                    const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, taps_pos0_ + p, st_);
                     likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
                     ck(cudaStreamSynchronize(cs(st_)), "teach perm run");
                     if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++ph[k];
@@ -4530,15 +4530,15 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                    "teach taps");
             // what EAGLE is trained on: the state at p with the embedding of the SAME token, naming p+1
             embed(tokens[p], eagle_emb_);
-            const float* lg_s = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p, st_);
+            const float* lg_s = eagle3_->teacher_step(dspark_taps_, eagle_emb_, taps_pos0_ + p, st_);
             likeliest(lg_s, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "teach self");
             ++tot;
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++self_hit;
             // and the pair the draft rounds build now: the state at p with the NEXT token's embedding -
-            // the row sits at p + 1, where the round's own row would sit
+            // the row sits at p + 1 (absolute), where the round's own row would sit
             embed(tokens[p + 1], eagle_emb_);
-            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, taps_pos0_ + p + 1, st_);
             likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "teach");
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++hit;
