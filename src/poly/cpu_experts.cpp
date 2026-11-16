@@ -306,16 +306,19 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 const int tok = experts[byp[i]].row;
                 const float* gj = gp + (size_t) tok * n_ff;
                 const float* uj = up2 + (size_t) tok * n_ff;
+                // h is indexed by the expert use (j = byp[i], as the vec_dot path's writes and the
+                // hq/down steps below read it) - writing at the token's row here overflowed the
+                // buffer whenever a row index passed the pair count, corrupting the heap
+                float* hrow = hp + (size_t) byp[i] * n_ff;
                 for (int r = 0; r < n_ff; ++r) {
                     const float pv = gj[r], uv = uj[r];
                     if (gelu) {
-                        hp[(size_t) tok * n_ff + r] =
+                        hrow[r] =
                             0.5f * pv * (1.f + std::tanh(0.7978845608f * pv * (1.f + 0.044715f * pv * pv))) * uv;
                         continue;
                     }
                     const float gc = std::min(pv, limit);
-                    hp[(size_t) tok * n_ff + r] =
-                        gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
+                    hrow[r] = gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
                 }
             }
         }
