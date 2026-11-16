@@ -4496,8 +4496,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             ++tot;
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++hit;
         }
-        std::fprintf(stderr, "[eagle] TEACH: the head named the token after next %lld of %lld (%.1f%%)
-", hit,
+        std::fprintf(stderr, "[eagle] TEACH: the head named the token after next %lld of %lld (%.1f%%)\n", hit,
                      tot, tot ? 100.0 * double(hit) / double(tot) : 0.0);
     }
     std::free(taps_host_);
