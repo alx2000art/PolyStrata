@@ -309,6 +309,17 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
     cache_pos_ = pos + n;
 }
 
+// DBG(eagle3) STRATA_EAGLE_TEACH: the head on a KNOWN position - the taps of the row the engine already
+// read and the embedding of the token that follows it; its guess is compared with the token after that.
+const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, int64_t pos, void* stream) {
+    linear(fc_w_, taps_row, 3 * n_embd_, n_embd_, hidden_, 1, stream);
+    ck(cudaMemcpyAsync(emb_dev_, emb_host, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
+       "eagle teach emb");
+    midlayer(emb_dev_, pos, 1, stream);
+    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    return logits_;
+}
+
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
     // DBG(eagle3): the draft step's own input - if these are the same for different tokens, the head never
     // sees the embedding and every guess is the same word

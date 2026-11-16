@@ -4476,6 +4476,30 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         }
         std::free(emb_stage);
     }
+    // DBG(eagle3) STRATA_EAGLE_TEACH=<stride>: the head is asked on positions whose answer the prompt
+    // already holds - state at p and the embedding of p+1 must name token p+2.  A real accuracy figure
+    // for the head, with no generation and no policy in the way.
+    if (const char* tv = std::getenv("STRATA_EAGLE_TEACH"); tv && eagle3_ && taps_host_) {
+        const int stride = std::max(1, std::atoi(tv));
+        const size_t e = (size_t) n_embd_;
+        long long hit = 0, tot = 0;
+        for (int64_t p = stride; p + 2 < n; p += stride) {
+            for (int tp = 0; tp < dspark_taps_n_; ++tp)
+                ck(cudaMemcpyAsync(dspark_taps_ + (size_t) tp * e,
+                                   taps_host_ + ((size_t) tp * taps_rows_ + (size_t) p) * e, e * sizeof(float),
+                                   cudaMemcpyHostToDevice, cs(st_)),
+                   "teach taps");
+            embed(tokens[p + 1], eagle_emb_);
+            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+            likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
+            ck(cudaStreamSynchronize(cs(st_)), "teach");
+            ++tot;
+            if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++hit;
+        }
+        std::fprintf(stderr, "[eagle] TEACH: the head named the token after next %lld of %lld (%.1f%%)
+", hit,
+                     tot, tot ? 100.0 * double(hit) / double(tot) : 0.0);
+    }
     std::free(taps_host_);
     taps_host_ = nullptr;
     r_ = r0;

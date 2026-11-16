@@ -35,6 +35,9 @@ public:
     int32_t d2t(int32_t draft_id) const { return d2t_[(size_t) draft_id]; }
     bool ready() const { return loaded_; }
     float* emb_dev() { return emb_dev_; }
+    // DBG(eagle3) one teacher-forced step: the taps of a row already on the device (3*n_embd) and the
+    // embedding of the next token ride in, fc + the midlayer run at pos, the logits come back
+    const float* teacher_step(const float* taps_row, const float* emb_host, int64_t pos, void* stream);
 
     static constexpr size_t kScoreFloats = size_t(16) << 20;   // the attention's score scratch
 
