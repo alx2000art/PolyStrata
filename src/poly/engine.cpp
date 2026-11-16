@@ -2036,10 +2036,13 @@ void Engine::load(const Options& o) {
     if (draft_is_eagle3_) {
         eagle3_ = new Eagle3();
         eagle3_->load(*dg_);
-        // the head's hc weights load here rather than lazily: with taps off (--window 1) their first
-        // use would be the decode's captured tail, where their cudaMalloc is rejected
-        eager_head_mix();
     }
+    // the model's own output collapse (the hc weights) loads here, not lazily: its first use lands in a
+    // captured decode tail or a recorded layer graph, where the pool's cudaMalloc is rejected with
+    // "operation not permitted when stream is capturing", and every request after it dies the same death.
+    // The eagle gate above must not cover this: with --window 1 the eagle is absent and the weights are
+    // still the model's own.
+    eager_head_mix();
     if (block_ != dg_.get() && !draft_is_eagle3_) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;
 
