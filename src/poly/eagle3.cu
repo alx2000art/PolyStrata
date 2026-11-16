@@ -31,12 +31,31 @@
 #include <stdexcept>
 #include <algorithm>
 #include <string>
+#include <thread>
+#include <chrono>
 
 namespace strata::poly {
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr int kTypeQ8_0 = 6;   // the ggml type id the mmvq kernels take (this fork passes the numbers)
+
+// The card's free VRAM wobbles for a second or two while the previous engine's context drains (the
+// server restarts this engine right after the last one), and the head's ~2.5 GB sit in the narrow
+// margin beside the model: every allocation retries through the wobble before it gives up.
+void* eagle_alloc(size_t bytes, const char* what) {
+    void* dev = nullptr;
+    cudaError_t e = cudaSuccess;
+    for (int a = 0; a < 5; ++a) {
+        e = cudaMalloc(&dev, bytes);
+        if (e == cudaSuccess) return dev;
+        std::fprintf(stderr, "strata-poly: the eagle3 head: %s: %s (retry %d/5)\n", what,
+                     cudaGetErrorString(e), a + 1);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    ck(e, what);
+    return dev;
+}
 
 // The BF16 weights quantize to Q8_0 on the host: a block of 32 values, the scale the max's / 127
 // in fp16, the values rounded - the GGML Q8_0 layout the mmvq kernels read.
@@ -82,10 +101,6 @@ Rope make_rope(float base, int n_rot, float freq_scale, float ext_factor, int n_
     return r;
 }
 }
-
-// The BF16 weights quantize to Q8_0 on the host: a block of 32 values, the scale the max's / 127
-// in fp16, the values rounded - the GGML Q8_0 layout the mmvq kernels read.
-
 
 // DBG(eagle3) STRATA_EAGLE_DUMP_ATT: the attention dump's gate - teacher_step arms it, midlayer takes
 // the dump right after attend_batch (o_ is overwritten by the down projection later in the call, so a
@@ -159,7 +174,7 @@ void Eagle3::load(Shards& dg) {
         const TensorInfo* t = dg.find(name);
         if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
         const size_t n_bytes = t->elements() * 2;
-        void* dev = nullptr; ck(cudaMalloc(&dev, n_bytes + 256), name);
+        void* dev = eagle_alloc(n_bytes + 256, name);
         ck(cudaMemcpy(dev, dg.data(*t), n_bytes, cudaMemcpyHostToDevice), "eagle weight");
         ck(cudaMemsetAsync((char*) dev + n_bytes, 0, 256, nullptr), "eagle weight tail");
         return dev;
@@ -190,8 +205,7 @@ void Eagle3::load(Shards& dg) {
                 std::memcpy(&buf[((size_t) h * hd + 2 * i) * n_in], a, n_in * 2);
                 std::memcpy(&buf[((size_t) h * hd + 2 * i + 1) * n_in], b, n_in * 2);
             }
-        void* dev = nullptr;
-        ck(cudaMalloc(&dev, buf.size() * 2 + 256), name);
+        void* dev = eagle_alloc(buf.size() * 2 + 256, name);
         ck(cudaMemcpy(dev, buf.data(), buf.size() * 2, cudaMemcpyHostToDevice), "eagle weight");
         ck(cudaMemsetAsync((char*) dev + buf.size() * 2, 0, 256, nullptr), "eagle weight tail");
         return dev;
@@ -219,7 +233,7 @@ void Eagle3::load(Shards& dg) {
         if (!t) throw std::runtime_error("the eagle3 head has no lm_head.weight");
         std::vector<uint8_t> q;
         bf16_to_q8_0(dg.data(*t), q, t->elements());
-        ck(cudaMalloc(&lm_q8_, q.size() + 256), "lm_head.weight");
+        lm_q8_ = eagle_alloc(q.size() + 256, "lm_head.weight");
         ck(cudaMemcpy(lm_q8_, q.data(), q.size(), cudaMemcpyHostToDevice), "eagle lm_head");
         ck(cudaMemsetAsync((char*) lm_q8_ + q.size(), 0, 256, nullptr), "eagle lm_head tail");
     }
@@ -237,7 +251,7 @@ void Eagle3::load(Shards& dg) {
             const uint32_t bits = uint32_t(h) << 16;
             std::memcpy(&w[i], &bits, 4);
         }
-        float* dev = nullptr; ck(cudaMalloc(&dev, n_vals * sizeof(float)), name);
+        float* dev = (float*) eagle_alloc(n_vals * sizeof(float), name);
         ck(cudaMemcpy(dev, w.data(), n_vals * sizeof(float), cudaMemcpyHostToDevice), "eagle norm");
         return dev;
     };
@@ -254,33 +268,33 @@ void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     rows_ = rows;
     cache_cap_ = max_context;
     blas_ = blas;
-    ck(cudaMalloc(&k_cache_, size_t(cache_cap_) * n_kv_ * head_dim_ * 2), "the eagle3 k cache");
-    ck(cudaMalloc(&v_cache_, size_t(cache_cap_) * n_kv_ * head_dim_ * 2), "the eagle3 v cache");
+    k_cache_ = (uint16_t*) eagle_alloc(size_t(cache_cap_) * n_kv_ * head_dim_ * 2, "the eagle3 k cache");
+    v_cache_ = (uint16_t*) eagle_alloc(size_t(cache_cap_) * n_kv_ * head_dim_ * 2, "the eagle3 v cache");
     // the attention's scratch: the score blocks and the grouped queries/results the cuBLAS path
     // keeps there (attend_batch's doc)
-    ck(cudaMalloc(&score_, kScoreFloats * sizeof(float)), "the eagle3 attention score");
+    score_ = (float*) eagle_alloc(kScoreFloats * sizeof(float), "the eagle3 attention score");
     const size_t work_floats = size_t(rows_) * n_head_ * (head_dim_ + head_dim_ / 2 + 3) + 1;
-    ck(cudaMalloc(&work_, work_floats * sizeof(float)), "the eagle3 attention work");
-    ck(cudaMalloc(&hidden_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 hidden");
-    ck(cudaMalloc(&emb_dev_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 emb");
-    ck(cudaMalloc(&e_norm_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 e norm");
-    ck(cudaMalloc(&f_norm_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 f norm");
-    ck(cudaMalloc(&e_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 e q8_1");
-    ck(cudaMalloc(&f_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 f q8_1");
-    ck(cudaMalloc(&q_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 q");
-    ck(cudaMalloc(&k_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 k");
-    ck(cudaMalloc(&v_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 v");
-    ck(cudaMalloc(&o_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 o");
-    ck(cudaMalloc(&o_out_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 o proj");
-    ck(cudaMalloc(&normed_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 normed");
-    ck(cudaMalloc(&normed_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 normed q8_1");
-    ck(cudaMalloc(&cat_f32_, size_t(rows_) * 2 * n_embd_ * sizeof(float)), "the eagle3 cat fp32");
-    ck(cudaMalloc(&gate_out_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 gate");
-    ck(cudaMalloc(&up_out_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 up");
-    ck(cudaMalloc(&mlp_h_, size_t(rows_) * n_ff_ * sizeof(float)), "the eagle3 mlp");
-    ck(cudaMalloc(&logits_, size_t(dvocab_) * sizeof(float)), "the eagle3 logits");
+    work_ = (float*) eagle_alloc(work_floats * sizeof(float), "the eagle3 attention work");
+    hidden_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 hidden");
+    emb_dev_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 emb");
+    e_norm_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 e norm");
+    f_norm_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 f norm");
+    e_q8_ = eagle_alloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 e q8_1");
+    f_q8_ = eagle_alloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 f q8_1");
+    q_ = (float*) eagle_alloc(size_t(rows_) * n_head_ * head_dim_ * sizeof(float), "the eagle3 q");
+    k_ = (float*) eagle_alloc(size_t(rows_) * n_kv_ * head_dim_ * sizeof(float), "the eagle3 k");
+    v_ = (float*) eagle_alloc(size_t(rows_) * n_kv_ * head_dim_ * sizeof(float), "the eagle3 v");
+    o_ = (float*) eagle_alloc(size_t(rows_) * n_head_ * head_dim_ * sizeof(float), "the eagle3 o");
+    o_out_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 o proj");
+    normed_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 normed");
+    normed_q8_ = eagle_alloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 normed q8_1");
+    cat_f32_ = (float*) eagle_alloc(size_t(rows_) * 2 * n_embd_ * sizeof(float), "the eagle3 cat fp32");
+    gate_out_ = (float*) eagle_alloc(size_t(rows_) * n_ff_ * sizeof(float), "the eagle3 gate");
+    up_out_ = (float*) eagle_alloc(size_t(rows_) * n_ff_ * sizeof(float), "the eagle3 up");
+    mlp_h_ = (float*) eagle_alloc(size_t(rows_) * n_ff_ * sizeof(float), "the eagle3 mlp");
+    logits_ = (float*) eagle_alloc(size_t(dvocab_) * sizeof(float), "the eagle3 logits");
     // the prompt batches' F32 view of one BF16 matrix: the widest the head dequantizes is n_ff x n_embd
-    ck(cudaMalloc(&wf_e_, size_t(n_ff_) * n_embd_ * sizeof(float)), "the eagle3 weight f32 view");
+    wf_e_ = (float*) eagle_alloc(size_t(n_ff_) * n_embd_ * sizeof(float), "the eagle3 weight f32 view");
 }
 
 // One projection of n rows of BF16 weights: a prompt batch dequantizes the matrix to F32 once (the
