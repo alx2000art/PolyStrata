@@ -37,6 +37,7 @@ public:
     // map the guess as pred_target = pred_draft + d2t[pred_draft].  Read as an absolute id it made
     // the metric and the acceptance compare against the wrong tokens - zero regardless of the head.
     int32_t d2t(int32_t draft_id) const { return int32_t((int64_t) draft_id + d2t_[(size_t) draft_id]); }
+    int64_t d2t_off(int32_t draft_id) const { return d2t_[(size_t) draft_id]; }
     bool ready() const { return loaded_; }
     float* emb_dev() { return emb_dev_; }
     // DBG(eagle3) one teacher-forced step: the taps of a row already on the device (3*n_embd) and the
@@ -52,10 +53,11 @@ private:
     // tokens through gemv_bf16.  The Q8_0 kernels NaN'd on this head's K of 12288: their weight view
     // differs from the bytes (zero weights read 0.0, the real ones read nan, the bytes scan clean).
     void linear(const void* w, const float* x, int n_in, int n_out, float* y, int n, void* stream);
-    // the weights (BF16, the device - the file's own bytes; the lm_head is Q8_0 - the draft step
-    // reads it whole every step, and at K = n_embd the mmvq kernels are the engine's tested path)
+    // the weights (BF16, the device - the file's own bytes; the lm_head is Q8_0 by default - the
+    // draft step reads it whole every step, and at K = n_embd the mmvq kernels are the engine's
+    // tested path; STRATA_EAGLE_LM_BF16=1 keeps the file's own BF16 and the gemv path)
     void* fc_w_ = nullptr, *q_w_ = nullptr, *k_w_ = nullptr, *v_w_ = nullptr, *o_w_ = nullptr;
-    void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_q8_ = nullptr;
+    void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_q8_ = nullptr, *lm_head_w_ = nullptr;
     float *ln1_ = nullptr, *ln2_ = nullptr, *hnorm_ = nullptr, *out_norm_ = nullptr;
     // the geometry
     int n_embd_ = 0, n_head_ = 0, n_kv_ = 0, head_dim_ = 0, n_ff_ = 0, dvocab_ = 0;
@@ -91,6 +93,7 @@ private:
     float *wf_e_ = nullptr;
     std::vector<int64_t> d2t_;
     int dbg_inj_ = 0, dbg_att_ = 0, dbg_logits_ = 0;   // the one-shot debug prints left (2 of each)
+    bool lm_bf16_ = false;        // STRATA_EAGLE_LM_BF16=1: the lm_head stays BF16 (the gemv path)
     bool cat_he_ = false;         // STRATA_EAGLE_CAT=he: the midlayer's input is [hidden | embedding]
     bool dumped_ = false;         // STRATA_EAGLE_DUMP: the inject stages are written once
     bool dumped_logits_ = false;  // their draft step's logits appended once

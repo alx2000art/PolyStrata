@@ -203,11 +203,19 @@ void Eagle3::load(Shards& dg) {
     gate_w_ = w("midlayer.mlp.gate_proj.weight");
     up_w_ = w("midlayer.mlp.up_proj.weight");
     down_w_ = w("midlayer.mlp.down_proj.weight");
-    // the lm_head in Q8_0: the draft step reads it whole every step (786 MB of BF16 a guess), and at
-    // its K of n_embd the mmvq kernels are the engine's own tested path (the Q8_0 kernels' nan was
-    // this head's K of 12288 - the fc - which stays BF16).  The Q8_1 input the kernels read is the
-    // fused final norm's own product.
-    {
+    // the lm_head: Q8_0 by default - the draft step reads it whole every step (786 MB of BF16 a
+    // guess), and at its K of n_embd the mmvq kernels are the engine's own tested path (the Q8_0
+    // kernels' nan was this head's K of 12288 - the fc - which stays BF16).  The Q8_1 input the
+    // kernels read is the fused final norm's own product.
+    // DBG(eagle3) STRATA_EAGLE_LM_BF16=1: the file's own BF16 and the gemv path instead, to tell a
+    // broken quantize from a broken something else
+    lm_bf16_ = [] {
+        const char* v = std::getenv("STRATA_EAGLE_LM_BF16");
+        return v && v[0] == '1';
+    }();
+    if (lm_bf16_) {
+        lm_head_w_ = w("lm_head.weight");
+    } else {
         const TensorInfo* t = dg.find("lm_head.weight");
         if (!t) throw std::runtime_error("the eagle3 head has no lm_head.weight");
         std::vector<uint8_t> q;
@@ -430,7 +438,10 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
     ck(cudaMemcpyAsync(emb_dev_, emb_host, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle teach emb");
     midlayer(emb_dev_, pos, 1, stream);
-    kernels::native_mmvq(kTypeQ8_0, lm_q8_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
+    if (lm_bf16_)
+        gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    else
+        kernels::native_mmvq(kTypeQ8_0, lm_q8_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
     return logits_;
 }
 
@@ -449,7 +460,25 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
        "eagle draft emb");
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
-    kernels::native_mmvq(kTypeQ8_0, lm_q8_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
+    if (lm_bf16_)
+        gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    else
+        kernels::native_mmvq(kTypeQ8_0, lm_q8_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
+    // DBG(eagle3) once per load: a nan in the logits would silently turn every guess into draft id 0 -
+    // named here, with the path that produced them
+    static bool nf_checked = false;
+    if (!nf_checked) {
+        nf_checked = true;
+        ck(cudaStreamSynchronize(cs(stream)), "eagle nf sync");
+        std::vector<float> lg((size_t) dvocab_);
+        ck(cudaMemcpy(lg.data(), logits_, lg.size() * sizeof(float), cudaMemcpyDeviceToHost), "eagle nf");
+        size_t bad = 0;
+        for (float x : lg)
+            if (!std::isfinite(x)) ++bad;
+        if (bad)
+            std::fprintf(stderr, "[eagle] the draft's logits hold %zu nonfinite values of %d (the lm_head's %s path)\n",
+                         bad, dvocab_, lm_bf16_ ? "bf16" : "q8_0");
+    }
     // DBG(eagle3) the dump.s last block: this step.s logits, appended to what inject wrote
     if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && dumped_ && !dumped_logits_) {
         dumped_logits_ = true;

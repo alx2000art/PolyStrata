@@ -4786,7 +4786,16 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                          eagle_dbg_, *prob, (int) h_guess_->token, (int) eagle3_->d2t(h_guess_->token),
                          eagle3_->dvocab());
         }
-        return eagle3_->d2t(h_guess_->token);
+        // the guess rides into the model's window: an id outside the vocabulary would have the model's
+        // embed read past its table and the window's logits come out nan - the #879 guard's "!!!" - so
+        // the range is checked here, where the offending draft id is still named
+        const int32_t target = eagle3_->d2t(h_guess_->token);
+        if (target < 0 || target >= n_vocab_)
+            throw std::runtime_error("the eagle3 drafter named the token " + std::to_string(target) +
+                                     " (draft id " + std::to_string(h_guess_->token) + ", the table's offset " +
+                                     std::to_string(eagle3_->d2t_off(h_guess_->token)) + ", the model's vocabulary " +
+                                     std::to_string(n_vocab_) + ")");
+        return target;
     }
     OnCard here(device_, split_);
     if (!draft_) throw std::logic_error("draft: this model has no block that guesses ahead");
