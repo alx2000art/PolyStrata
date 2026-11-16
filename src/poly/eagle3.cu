@@ -59,6 +59,13 @@ Rope make_rope(float base, int n_rot, float freq_scale, float ext_factor, int n_
 // in fp16, the values rounded - the GGML Q8_0 layout the mmvq kernels read.
 
 
+// DBG(eagle3) STRATA_EAGLE_DUMP_ATT: the attention dump's gate - teacher_step arms it, midlayer takes
+// the dump right after attend_batch (o_ is overwritten by the down projection later in the call, so a
+// dump taken at the end of the step holds the mlp's output, not the attention's)
+static const char* g_att_path = std::getenv("STRATA_EAGLE_DUMP_ATT");
+static bool g_att_armed = false;
+static bool g_att_done = false;
+
 void Eagle3::load(Shards& dg) {
     // STRATA_EAGLE_CAT=he: the midlayer's input written [hidden | embedding] instead of [embedding | hidden]
     if (const char* v = std::getenv("STRATA_EAGLE_CAT")) cat_he_ = std::string(v) == "he";
@@ -232,6 +239,27 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
+    if (g_att_path && g_att_armed && !g_att_done) {   // DBG(eagle3): o_ dies at the down projection - the dump
+        g_att_done = true;                            // must read it here, while it still holds the attention
+        ck(cudaStreamSynchronize(cs(stream)), "att dump sync");
+        FILE* f = std::fopen(g_att_path, "wb");
+        if (f) {
+            const int rows = int(pos) + 1;
+            std::fprintf(f, "%d %d %d %d %d\n", (int) pos, n_head_, n_kv_, head_dim_, rows);
+            std::vector<float> ob((size_t) n_head_ * head_dim_);
+            ck(cudaMemcpy(ob.data(), q_, ob.size() * sizeof(float), cudaMemcpyDeviceToHost), "att dump q");
+            std::fwrite(ob.data(), sizeof(float), ob.size(), f);
+            std::vector<uint16_t> kvh((size_t) rows * n_kv_ * head_dim_);
+            ck(cudaMemcpy(kvh.data(), k_cache_, kvh.size() * 2, cudaMemcpyDeviceToHost), "att dump k");
+            std::fwrite(kvh.data(), 2, kvh.size(), f);
+            ck(cudaMemcpy(kvh.data(), v_cache_, kvh.size() * 2, cudaMemcpyDeviceToHost), "att dump v");
+            std::fwrite(kvh.data(), 2, kvh.size(), f);
+            ck(cudaMemcpy(ob.data(), o_, ob.size() * sizeof(float), cudaMemcpyDeviceToHost), "att dump o");
+            std::fwrite(ob.data(), sizeof(float), ob.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] dumped the attention at pos %lld (rows %d)\n", (long long) pos, rows);
+        }
+    }
     if (dbg_att_ < 1) {   // DBG(eagle3) the first inject.s attention output: finite means the cache and the softmax hold
         ++dbg_att_;
         float h[4] = {};
@@ -318,35 +346,10 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
     linear(fc_w_, taps_row, 3 * n_embd_, n_embd_, hidden_, 1, stream);
     // DBG(eagle3) STRATA_EAGLE_DUMP_ATT=<file>: the first teacher step's attention, so a numpy softmax can
     // be run on the very q/k/v it used (pos, then q [n_head*dim], k and v [pos+1][n_kv*dim], then o)
-    static const char* apath = std::getenv("STRATA_EAGLE_DUMP_ATT");
-    static bool adone = false;
-    const bool datt = apath && !adone;
-    if (datt) adone = true;
+    g_att_armed = g_att_path && !g_att_done;
     ck(cudaMemcpyAsync(emb_dev_, emb_host, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle teach emb");
     midlayer(emb_dev_, pos, 1, stream);
-    if (datt) {
-        ck(cudaStreamSynchronize(cs(stream)), "att dump sync");
-        FILE* f = std::fopen(apath, "wb");
-        if (f) {
-            const int rows = int(pos) + 1;
-            std::fprintf(f, "%d %d %d %d %d\n", (int) pos, n_head_, n_kv_, head_dim_, rows);
-            std::vector<float> buf((size_t) n_head_ * head_dim_);
-            ck(cudaMemcpy(buf.data(), q_ + (size_t) (head_dim_ * n_head_) * 0, buf.size() * sizeof(float),
-                          cudaMemcpyDeviceToHost), "att dump q");
-            std::fwrite(buf.data(), sizeof(float), buf.size(), f);
-            std::vector<uint16_t> kvh((size_t) rows * n_kv_ * head_dim_);
-            ck(cudaMemcpy(kvh.data(), k_cache_, kvh.size() * 2, cudaMemcpyDeviceToHost), "att dump k");
-            std::fwrite(kvh.data(), 2, kvh.size(), f);
-            ck(cudaMemcpy(kvh.data(), v_cache_, kvh.size() * 2, cudaMemcpyDeviceToHost), "att dump v");
-            std::fwrite(kvh.data(), 2, kvh.size(), f);
-            std::vector<float> ob((size_t) n_head_ * head_dim_);
-            ck(cudaMemcpy(ob.data(), o_, ob.size() * sizeof(float), cudaMemcpyDeviceToHost), "att dump o");
-            std::fwrite(ob.data(), sizeof(float), ob.size(), f);
-            std::fclose(f);
-            std::fprintf(stderr, "[eagle] dumped the attention at pos %lld (rows %d)\n", (long long) pos, rows);
-        }
-    }
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
     return logits_;
 }
