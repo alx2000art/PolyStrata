@@ -100,8 +100,12 @@ fh = sum(1 for k in foreign if k in r)
 th = sum(1 for k in topic if k in r)
 cyr = sum(1 for c in r if '\u0400' <= c <= '\u04ff')
 lat = sum(1 for c in r if 'a' <= c <= 'z')
-v = "ЧИСТО" if (fh == 0 and th >= 2) else ("БРЕД" if fh else "НЕЯСНО")
-print(f"{v}  чужие_маркеры={fh} тема={th} кириллица/латиница={cyr}/{lat} ризонинг={len(r)} симв.")
+# the drift's own symptom: a long, rambling reasoning for a "кратко" request, usually in English
+long_ramble = len(r) > 3500 or (lat > cyr and len(r) > 1200)
+v = "ЧИСТО" if (fh == 0 and th >= 1 and cyr >= lat and len(r) <= 2500) else \
+    ("БРЕД" if (fh or long_ramble) else "НЕЯСНО")
+head = (m.get("reasoning_content") or "")[:110].replace("\n", " ")
+print(f"{v}  чужие_маркеры={fh} тема={th} кириллица/латиница={cyr}/{lat} ризонинг={len(r)} симв. | {head}")
 PYEOF
 }
 
