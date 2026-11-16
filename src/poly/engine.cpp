@@ -4166,9 +4166,14 @@ void Engine::tap_capture(int il, int n) {
                 }
                 const int64_t off = tap_row_;
                 if (off >= 0 && off + n <= taps_rows_)
-                    ck(cudaMemcpyAsync(taps_host_ + (size_t(i) * taps_rows_ + (size_t) off) * n_embd_,
-                                       dspark_taps_ + size_t(i) * n_embd_, size_t(n) * n_embd_ * sizeof(float),
-                                       cudaMemcpyDeviceToHost, cs(st_)),
+                    // the device buffer is [row][tap][n_embd]: tap i's rows sit a dspark_taps_n_ * n_embd
+                    // stride apart - a contiguous copy here would sweep the neighbouring taps and rows into
+                    // the plane (the read's calls are 2048 rows wide; the decode's 1-row calls never saw it)
+                    ck(cudaMemcpy2DAsync(taps_host_ + (size_t(i) * taps_rows_ + (size_t) off) * n_embd_,
+                                         size_t(n_embd_) * sizeof(float),
+                                         dspark_taps_ + size_t(i) * n_embd_,
+                                         size_t(dspark_taps_n_) * n_embd_ * sizeof(float),
+                                         size_t(n_embd_) * sizeof(float), n, cudaMemcpyDeviceToHost, cs(st_)),
                        "the taps to the host");
                 tap_row_ += n;
             }
