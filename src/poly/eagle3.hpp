@@ -32,7 +32,11 @@ public:
     // round starts the draft steps at the model's own position again.
     void rewind(int64_t pos) { cache_pos_ = pos; }
     int dvocab() const { return dvocab_; }
-    int32_t d2t(int32_t draft_id) const { return d2t_[(size_t) draft_id]; }
+    // The draft id's TARGET id: the file's table is the OFFSET from the draft id to the target id,
+    // not the target id itself - both references (SpecForge's eagle3 model and SafeAILab's cnets.py)
+    // map the guess as pred_target = pred_draft + d2t[pred_draft].  Read as an absolute id it made
+    // the metric and the acceptance compare against the wrong tokens - zero regardless of the head.
+    int32_t d2t(int32_t draft_id) const { return int32_t((int64_t) draft_id + d2t_[(size_t) draft_id]); }
     bool ready() const { return loaded_; }
     float* emb_dev() { return emb_dev_; }
     // DBG(eagle3) one teacher-forced step: the taps of a row already on the device (3*n_embd) and the
