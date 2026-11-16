@@ -75,6 +75,7 @@ private:
     float *k_ = nullptr;          // n_kv * head_dim a row: the keys, then the up's output
     float *v_ = nullptr;          // n_kv * head_dim a row: the values
     float *o_ = nullptr;          // n_head * head_dim a row: the attention's output, then the down's
+    float *o_out_ = nullptr;      // n_embd a row: the attention's output after the o_proj
     float *normed_ = nullptr;     // n_embd a row: the normed state (the mlp's and the lm_head's input)
     void* normed_q8_ = nullptr;   // its Q8_1 (the fused norm launches write it; nothing reads it now)
     float *cat_f32_ = nullptr;    // 2 * n_embd a row: [e | h] in fp32, the q/k/v's input

@@ -18,7 +18,9 @@ grep -rn "DBG(eagle3)" src/        # что удалять
 | `STRATA_EAGLE_DUMP_ATT` | пишет q/k/v/o внимания первого teacher-шага (`tools/eagle_check_attn.py`); дамп снимается в `midlayer` сразу после `attend_batch` — дальше `o_` перезаписывает down-проекция | удалить |
 | `STRATA_EAGLE_TEACH` | голова спрашивается на известных позициях (точность против реального следующего токена) | удалить |
 | `STRATA_EAGLE_TEACH_PERM` | TEACH на всех 6 порядках трёх taps | удалить |
-| `STRATA_EAGLE_ROPE_PLAIN` | отключает yarn-mscale головы (transformers применяет его только за 65536) | удалить (выбран plain) |
+| `STRATA_EAGLE_ROPE_PLAIN` | устарел: заменён на `STRATA_EAGLE_ROPE_SCALE` | удалён |
+| `STRATA_EAGLE_ROPE_SCALE` | величина cos/sin rope головы (эффективная): по умолчанию 1 — как у transformers 4.57 для `mscale == mscale_all_dim` | оставить 1 |
+| `STRATA_EAGLE_ROPE_NEOX` | `0` — строки q/k как в файле (пары-соседи, конвенция форка); по умолчанию 1 — перестановка под split-half (`rotate_half`) | оставить 1 |
 | `STRATA_EAGLE_CAT` | порядок полувходов конката: `eh` (по умолчанию) / `he` | удалить |
 | `STRATA_EAGLE_TAPS` | выбор свёртки потоков: mean/mix/ffn/attn/s0..s3 | оставить победителя, остальное вырезать |
 | `STRATA_EAGLE_TAP_SHIFT` | сдвиг номеров tap-слоёв | удалить (выбран 0) |

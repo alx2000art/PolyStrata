@@ -93,14 +93,19 @@ void Eagle3::load(Shards& dg) {
     };
     rope_ = make_rope(base, head_dim_, yarn ? 1.f / factor : 1.f, yarn ? 1.f : 0.f, orig,
                       beta("eagle3.rope.scaling.beta_fast", 32.f), beta("eagle3.rope.scaling.beta_slow", 1.f));
-    // the config's own mscale wins when it carries one: the head's yarn states 0.707, the formula's own
-    // factor-of-16 value is 0.783, and the trained rope is the one the file names
-    if (const MetaValue* m = kv("eagle3.rope.scaling.mscale"); m && m->f > 0.f) rope_.attn_factor = float(m->f);
-    // DBG(eagle3) STRATA_EAGLE_ROPE_PLAIN=1: no yarn magnitude factor - transformers applies mscale only
-    // past original_max_position_embeddings, and every position here is far below it
-    if (const char* rp = std::getenv("STRATA_EAGLE_ROPE_PLAIN"); rp && rp[0] == '1') rope_.attn_factor = 1.f;
-    std::fprintf(stderr, "strata-poly: the eagle3 rope: base %g, freq_scale %g, attn_factor %g\n", base,
-                 rope_.freq_scale, rope_.attn_factor);
+    // The rope's magnitude: transformers' yarn (4.57) computes attention_factor as
+    // get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim) - the head's config carries both
+    // and they are equal (0.707), so the ratio is 1 and the rope's cos and sin carry no magnitude.  The
+    // fork's yarn multiplies attn_factor by (1 + 0.1 ln s) inside the kernel, so the default attn_factor
+    // (1 / (1 + 0.1 ln s)) gives the effective 1 the reference has.  The file's mscale alone would have
+    // given 0.903 - the attention's logits 0.82 of what they should be.
+    // DBG(eagle3) STRATA_EAGLE_ROPE_SCALE=<effective>: the magnitude the reference would have used
+    if (const char* rs = std::getenv("STRATA_EAGLE_ROPE_SCALE"); rs && *rs) {
+        const float boost = 1.f + 0.1f * std::log(1.f / rope_.freq_scale);
+        rope_.attn_factor = float(std::atof(rs)) / boost;
+    }
+    std::fprintf(stderr, "strata-poly: the eagle3 rope: base %g, freq_scale %g, attn_factor %g, effective %g\n", base,
+                 rope_.freq_scale, rope_.attn_factor, rope_.attn_factor * (1.f + 0.1f * std::log(1.f / rope_.freq_scale)));
 
     // the vocab mapping
     if (const MetaValue* t = kv("eagle3.d2t"); t && t->type == MetaType::ARRAY) {
@@ -132,8 +137,39 @@ void Eagle3::load(Shards& dg) {
         return dev;
     };
     fc_w_ = w("fc.weight");
-    q_w_ = w("midlayer.self_attn.q_proj.weight");
-    k_w_ = w("midlayer.self_attn.k_proj.weight");
+    // The head's rope is transformers' Llama rope: rotate_half turns the dims (i, i + head_dim / 2)
+    // together, the pair's angle being base^(-2i/head_dim).  The fork's dsv4_rope turns the NEIGHBOURS
+    // (2i, 2i + 1) - so the head's q and k rows are permuted here and the neighbours become the pair
+    // (i, i + 32).  The angle, the ramp's dim and the pairing then all match the reference.  The values
+    // are not roped, so the o_proj keeps its order and the attention's output needs no undoing.
+    // DBG(eagle3) STRATA_EAGLE_ROPE_NEOX=0: the rows as they lie (the neighbours' pairing)
+    const bool neox = [] {
+        const char* v = std::getenv("STRATA_EAGLE_ROPE_NEOX");
+        return !(v && v[0] == '0');
+    }();
+    const auto w_rope = [&](const char* name, int n_out) {
+        if (!neox) return w(name);
+        const TensorInfo* t = dg.find(name);
+        if (!t) throw std::runtime_error(std::string("the eagle3 head has no ") + name);
+        const size_t n_in = t->elements() / size_t(n_out);
+        const uint16_t* src = (const uint16_t*) dg.data(*t);
+        std::vector<uint16_t> buf((size_t) n_out * n_in);
+        const int hd = head_dim_;
+        for (int h = 0; h < n_out / hd; ++h)
+            for (int i = 0; i < hd / 2; ++i) {
+                const uint16_t* a = src + ((size_t) h * hd + i) * n_in;
+                const uint16_t* b = src + ((size_t) h * hd + i + hd / 2) * n_in;
+                std::memcpy(&buf[((size_t) h * hd + 2 * i) * n_in], a, n_in * 2);
+                std::memcpy(&buf[((size_t) h * hd + 2 * i + 1) * n_in], b, n_in * 2);
+            }
+        void* dev = nullptr;
+        ck(cudaMalloc(&dev, buf.size() * 2 + 256), name);
+        ck(cudaMemcpy(dev, buf.data(), buf.size() * 2, cudaMemcpyHostToDevice), "eagle weight");
+        ck(cudaMemsetAsync((char*) dev + buf.size() * 2, 0, 256, nullptr), "eagle weight tail");
+        return dev;
+    };
+    q_w_ = w_rope("midlayer.self_attn.q_proj.weight", n_head_ * head_dim_);
+    k_w_ = w_rope("midlayer.self_attn.k_proj.weight", n_kv_ * head_dim_);
     v_w_ = w("midlayer.self_attn.v_proj.weight");
     o_w_ = w("midlayer.self_attn.o_proj.weight");
     gate_w_ = w("midlayer.mlp.gate_proj.weight");
@@ -188,6 +224,7 @@ void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     ck(cudaMalloc(&k_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 k");
     ck(cudaMalloc(&v_, size_t(rows_) * n_kv_ * head_dim_ * sizeof(float)), "the eagle3 v");
     ck(cudaMalloc(&o_, size_t(rows_) * n_head_ * head_dim_ * sizeof(float)), "the eagle3 o");
+    ck(cudaMalloc(&o_out_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 o proj");
     ck(cudaMalloc(&normed_, size_t(rows_) * n_embd_ * sizeof(float)), "the eagle3 normed");
     ck(cudaMalloc(&normed_q8_, size_t(rows_) * kernels::native_q8_1_bytes(n_embd_)), "the eagle3 normed q8_1");
     ck(cudaMalloc(&cat_f32_, size_t(rows_) * 2 * n_embd_ * sizeof(float)), "the eagle3 cat fp32");
@@ -268,8 +305,11 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
         std::fprintf(stderr, "[eagle] att->o (pos %lld): %.4f %.4f %.4f %.4f\n", (long long) pos, h[0], h[1], h[2],
                      h[3]);
     }
+    // the attention's output projection (the reference's o_proj: the head outputs x o_proj) - without
+    // it the raw head outputs went into the residual and the head's guess was noise
+    linear(o_w_, o_, n_head_ * head_dim_, n_embd_, o_out_, n, stream);
     // the residual + the norm (and its Q8_1, which nothing reads any more) in one launch
-    kernels::native_add_rms_norm_q8_1(hidden_, o_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
+    kernels::native_add_rms_norm_q8_1(hidden_, o_out_, ln2_, normed_, normed_q8_, n_embd_, n, eps_, 256, stream);
     linear(gate_w_, normed_, n_embd_, n_ff_, gate_out_, n, stream);
     linear(up_w_, normed_, n_embd_, n_ff_, up_out_, n, stream);
     // silu(gate) x up in fp32 (the limit makes swiglu_clamp's min/clamp no-ops) - the poly
