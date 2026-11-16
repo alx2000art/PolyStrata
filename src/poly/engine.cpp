@@ -4483,7 +4483,33 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         const int stride = std::max(1, std::atoi(tv));
         const size_t e = (size_t) n_embd_;
         long long hit = 0, tot = 0, self_hit = 0;
+        // DBG(eagle3) STRATA_EAGLE_TEACH_PERM=1: the three taps in every order, on the same positions -
+        // the only way to tell a wrong order from a wrong collapse (the fc self-check cannot)
+        const bool perms = std::getenv("STRATA_EAGLE_TEACH_PERM") != nullptr;
+        const int perms6[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+        long long ph[6] = {0, 0, 0, 0, 0, 0};
+        long long ptot = 0;
         for (int64_t p = stride; p + 2 < n; p += stride) {
+            if (perms) {
+                std::vector<float> one((size_t) 3 * e);
+                for (int tp = 0; tp < dspark_taps_n_; ++tp)
+                    std::memcpy(one.data() + (size_t) tp * e,
+                                taps_host_ + ((size_t) tp * taps_rows_ + (size_t) p) * e, e * sizeof(float));
+                for (int k = 0; k < 6; ++k) {
+                    for (int tp = 0; tp < 3; ++tp)
+                        ck(cudaMemcpyAsync(dspark_taps_ + (size_t) tp * e,
+                                           one.data() + (size_t) perms6[k][tp] * e, e * sizeof(float),
+                                           cudaMemcpyHostToDevice, cs(st_)),
+                           "teach perm taps");
+                    embed(tokens[p], eagle_emb_);
+                    const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+                    likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
+                    ck(cudaStreamSynchronize(cs(st_)), "teach perm run");
+                    if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++ph[k];
+                }
+                ++ptot;
+                continue;
+            }
             for (int tp = 0; tp < dspark_taps_n_; ++tp)
                 ck(cudaMemcpyAsync(dspark_taps_ + (size_t) tp * e,
                                    taps_host_ + ((size_t) tp * taps_rows_ + (size_t) p) * e, e * sizeof(float),
@@ -4502,6 +4528,13 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "teach");
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++hit;
+        }
+        if (perms) {
+            std::fprintf(stderr, "[eagle] TEACH PERM over %lld positions:", ptot);
+            for (int k = 0; k < 6; ++k)
+                std::fprintf(stderr, " %d%d%d=%.0f%%", perms6[k][0], perms6[k][1], perms6[k][2],
+                             ptot ? 100.0 * double(ph[k]) / double(ptot) : 0.0);
+            std::fprintf(stderr, "\n");
         }
         std::fprintf(stderr, "[eagle] TEACH: (emb p, h p) -> p+1 %lld of %lld (%.1f%%); (emb p+1, h p) -> p+2 "
                              "%lld of %lld (%.1f%%)\n",
