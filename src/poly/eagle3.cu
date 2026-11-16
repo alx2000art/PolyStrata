@@ -458,9 +458,11 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
     return logits_;
 }
 
-const float* Eagle3::peek_logits(void* stream) {
-    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
-    return logits_;
+void Eagle3::keep_state(int n, void* stream) {
+    if (n < 1) return;
+    ck(cudaMemcpyAsync(hidden_, hidden_ + size_t(n - 1) * n_embd_, size_t(n_embd_) * sizeof(float),
+                       cudaMemcpyDeviceToDevice, cs(stream)),
+       "the eagle's kept recursion state");
 }
 
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
