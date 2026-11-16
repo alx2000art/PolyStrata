@@ -84,6 +84,9 @@ int DeepSeek4::streams() const { return kHc; }
 // into the dense arena, which is already spent when the drafter's taps are first built.
 void DeepSeek4::load_head_mix() {
     if (hc_head_fn_.p) return;
+    // the load's print names WHEN the weights arrive: the setup's eager call prints at startup, a lazy
+    // first use inside a captured decode tail is the one the CUDA graph rules reject
+    std::fprintf(stderr, "strata-poly: the head's stream-mix weights load now (first use)\n");
     const auto one = [&](const char* nm, int64_t cnt, int n_in, int n_out) {
         const TensorInfo* t = gg_->find(nm);
         if (!t) throw std::runtime_error(std::string("the model has no ") + nm);

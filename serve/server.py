@@ -852,8 +852,11 @@ class StrataEngine:
             try:
                 self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
                                f"{' '.join(args)}\n")
+                bm = json.loads(Path(exe).parent.joinpath("BUILD.json").read_text(encoding="utf-8"))
+                self.log.write(f"[strata] the running build: src {bm.get('src', '?')} "
+                               f"{bm.get('version', '?')} (written {time.strftime('%H:%M:%S', time.localtime(Path(exe).stat().st_mtime))})\n")
                 self.log.flush()
-            except OSError:
+            except (OSError, ValueError, KeyError):
                 pass
         self.max_context = 0                             # before the new process is visible: never its predecessor's
         pin = {}
