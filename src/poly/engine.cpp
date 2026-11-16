@@ -4460,6 +4460,11 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     // DSpark/EAGLE: the read's rows' taps rode to the host (the layer-major order); the drafter's
     // cache rows fill in batches here - the decode's draft rounds then attend them.
     if (eagle3_ && taps_host_) {
+        // the D2H rides at the tap layers are async: everything below reads the planes on the host
+        // and the block is freed at the read's end - both need the copies landed.  A copy still in
+        // flight into a freed block is heap corruption, the "double free or corruption" class (the
+        // teach metric's own syncs masked this in the diag runs; the production, without them, hit it).
+        ck(cudaStreamSynchronize(cs(st_)), "the taps' ride");
         float* emb_stage = (float*) std::malloc(size_t(rows_) * n_embd_ * sizeof(float));
         if (!emb_stage) throw std::runtime_error("the eagle3 injection's staging ran out of memory");
         std::vector<float> taps_stage(size_t(rows_) * dspark_taps_n_ * n_embd_);
