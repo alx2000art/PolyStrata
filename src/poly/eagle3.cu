@@ -89,6 +89,9 @@ void Eagle3::load(Shards& dg) {
     // the config's own mscale wins when it carries one: the head's yarn states 0.707, the formula's own
     // factor-of-16 value is 0.783, and the trained rope is the one the file names
     if (const MetaValue* m = kv("eagle3.rope.scaling.mscale"); m && m->f > 0.f) rope_.attn_factor = float(m->f);
+    // DBG(eagle3) STRATA_EAGLE_ROPE_PLAIN=1: no yarn magnitude factor - transformers applies mscale only
+    // past original_max_position_embeddings, and every position here is far below it
+    if (const char* rp = std::getenv("STRATA_EAGLE_ROPE_PLAIN"); rp && rp[0] == '1') rope_.attn_factor = 1.f;
     std::fprintf(stderr, "strata-poly: the eagle3 rope: base %g, freq_scale %g, attn_factor %g\n", base,
                  rope_.freq_scale, rope_.attn_factor);
 
