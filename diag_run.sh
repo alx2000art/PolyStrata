@@ -193,6 +193,10 @@ log "-- done:"
 grep "\[strata\] done:" "$OUT_DIR/server.log.last" 2>/dev/null | tail -1 | sed 's/^/   /'
 log "-- промпт и ответ:"
 log "   промпт: $PROMPT_CHARS символов; ответ: $OUT_DIR/diag-run.txt"
-log "-- последняя строка ответа:"
-tail -n 1 "$OUT_DIR/diag-run.txt" 2>/dev/null | cut -c1-200 | sed 's/^/   /'
+log "-- последние две строки ответа (без [elapsed]):"
+if [[ "$(grep -v '^\[elapsed ' "$OUT_DIR/diag-run.txt" 2>/dev/null | grep -c .)" == "0" ]]; then
+    log "   ОТВЕТ ПУСТ — движок ничего не сгенерировал"
+else
+    grep -v '^\[elapsed ' "$OUT_DIR/diag-run.txt" | tail -2 | cut -c1-200 | sed 's/^/   /'
+fi
 log "готово. ответ: $OUT_DIR/diag-run.txt, лог: $OUT_DIR/server.log.last"
