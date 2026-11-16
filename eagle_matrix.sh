@@ -55,12 +55,12 @@ PYEOF
 }
 
 stop_server() {
-    pkill -f "$STRATA_DIR/serve/server.py" 2>/dev/null || true
+    pkill -f "serve/server.py" 2>/dev/null || true
     for _ in $(seq 1 15); do
-        pgrep -f "$STRATA_DIR/serve/server.py" >/dev/null || break
+        pgrep -f "serve/server.py" >/dev/null || break
         sleep 1
     done
-    pkill -KILL -f "$STRATA_DIR/serve/server.py" 2>/dev/null || true
+    pkill -KILL -f "serve/server.py" 2>/dev/null || true
     pkill -KILL -f "engine-poly/strata-poly" 2>/dev/null || true
     sleep 2
 }
@@ -74,11 +74,16 @@ start_server() {
     for _ in $(seq 1 120); do
         code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
                     "http://127.0.0.1:$PORT/v1/models" 2>/dev/null || true)
-        [[ "$code" == "200" ]] && { echo " ok"; return 0; }
+        # любой http-ответ означает живой процесс (у /v1/models свой код доступа), 000 - nobody home
+        if [[ -n "$code" && "$code" != "000" ]]; then
+            echo " ok (http $code)"
+            return 0
+        fi
         echo -n "."
         sleep 3
     done
-    echo " ТАЙМАУТ — смотри $OUT/matrix_server.log"
+    echo " ТАЙМАУТ — последние строки сервера:"
+    tail -8 "$OUT/matrix_server.log" | sed 's/^/     /'
     return 1
 }
 
