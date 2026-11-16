@@ -21,12 +21,32 @@ set -u
 STRATA_DIR="${STRATA_DIR:-$HOME/PolyStrata}"
 CONFIG="$STRATA_DIR/strata-dsv4-ud-iq2_xxs.json"
 OUT="$STRATA_DIR/diag_run"
-PORT="${PORT:-1524}"
-URL="http://127.0.0.1:$PORT/v1/chat/completions"
 KEY="${API_KEY:-llama_server_pflb1}"
 NREQ="${NREQ:-3}"
 CASES="${CASES:-clean park pcache window prod}"
 MAXTOK="${MAXTOK:-250}"
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-240}"
+
+# порт, адрес и имя модели — из конфига, как в bench_sweep.sh: 0.0.0.0 превращаем в 127.0.0.1
+PORT="$(python3 - "$CONFIG" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("port") or 8080)
+except Exception:
+    print(8080)
+PY
+)"
+HOST="${HOST:-$(python3 - "$CONFIG" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("host") or "127.0.0.1")
+except Exception:
+    print("127.0.0.1")
+PY
+)}"
+[[ "$HOST" == "0.0.0.0" || "$HOST" == "::" ]] && HOST="127.0.0.1"
+BASE_URL="${BASE_URL:-http://$HOST:$PORT/v1}"
+HEALTH_URL="${BASE_URL%/v1}/health"
 
 mkdir -p "$OUT"
 TALE="$OUT/mx_prompt.txt"
@@ -54,14 +74,15 @@ json.dump(cfg, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 PYEOF
 }
 
+port_open() { timeout 2 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; }
+
 stop_server() {
-    pkill -f "serve/server.py" 2>/dev/null || true
-    for _ in $(seq 1 15); do
-        pgrep -f "serve/server.py" >/dev/null || break
-        sleep 1
-    done
+    pkill -TERM -f "serve/server.py" 2>/dev/null || true
+    for _ in $(seq 1 20); do port_open || break; sleep 1; done
     pkill -KILL -f "serve/server.py" 2>/dev/null || true
     pkill -KILL -f "engine-poly/strata-poly" 2>/dev/null || true
+    pkill -KILL -f "strata-poly" 2>/dev/null || true
+    for _ in $(seq 1 20); do pgrep -f "strata-poly" >/dev/null 2>&1 || break; sleep 1; done
     sleep 2
 }
 
@@ -70,17 +91,26 @@ start_server() {
     ( cd "$STRATA_DIR" && nohup "$STRATA_DIR/.venv/bin/python" "$STRATA_DIR/serve/server.py" \
         --engine strata --config "$CONFIG" --port "$PORT" \
         >> "$OUT/matrix_server.log" 2>&1 & echo $! > "$OUT/matrix_server.pid" )
-    echo -n "   жду ready"
-    for _ in $(seq 1 120); do
-        code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" \
-                    "http://127.0.0.1:$PORT/v1/models" 2>/dev/null || true)
-        # любой http-ответ означает живой процесс (у /v1/models свой код доступа), 000 - nobody home
-        if [[ -n "$code" && "$code" != "000" ]]; then
-            echo " ok (http $code)"
+    echo -n "   жду ready ($HEALTH_URL)"
+    local deadline=$((SECONDS + BOOT_TIMEOUT)) code body
+    while (( SECONDS < deadline )); do
+        port_open || { echo -n "."; sleep 5; continue; }
+        body=$(curl -s -m 5 -H "Authorization: Bearer $KEY" "$HEALTH_URL" 2>/dev/null || true)
+        if printf '%s' "$body" | grep -q '"loaded"[[:space:]]*:[[:space:]]*true'; then
+            echo " модель загружена"
             return 0
         fi
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$HEALTH_URL" 2>/dev/null || true)
+        if [[ "${code:-000}" == "404" ]]; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Authorization: Bearer $KEY" \
+                        "$BASE_URL/models" 2>/dev/null || true)
+            if [[ "${code:-000}" == "200" ]]; then
+                echo " API отвечает"
+                return 0
+            fi
+        fi
         echo -n "."
-        sleep 3
+        sleep 5
     done
     echo " ТАЙМАУТ — последние строки сервера:"
     tail -8 "$OUT/matrix_server.log" | sed 's/^/     /'
@@ -129,7 +159,7 @@ for case in $CASES; do
         python3 -c "
 import json
 print(json.dumps({'messages':[{'role':'user','content':open('$TALE').read()}],'temperature':0,'max_tokens':$MAXTOK}))" > "$OUT/mx_body.json"
-        curl -sS -m 300 -o "$OUT/mx_${case}_${i}.json" "$URL" \
+        curl -sS -m 300 -o "$OUT/mx_${case}_${i}.json" "$BASE_URL/chat/completions" \
             -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
             -d @"$OUT/mx_body.json" || true
         echo -n "    $case[$i]: "
