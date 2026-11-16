@@ -889,6 +889,9 @@ protected:
     void tap_capture(int il, int n);               ///< the tap state at a tap layer's tail (+ the read's D2H)
     virtual void tap_state_mix(int, int, float*, int64_t) {}   ///< the architecture's own collapse of its
                                                                ///< streams (DeepSeek4: the output head's mix)
+    virtual void eager_head_mix() {}               ///< load the stream-mix weights at setup, before any
+                                                   ///< graph capture (a lazy load's cudaMalloc is illegal
+                                                   ///< inside a captured decode tail)
 
     // STRATA_POLY_ROUTE_DUMP: moe()'s (layer, expert) stream, uint16 codes of il*n_expert+e behind an 8-byte
     // header { "PRTD", n_layers, n_expert } - pool_tune.py's replay of the ladder reads this.

@@ -2036,6 +2036,9 @@ void Engine::load(const Options& o) {
     if (draft_is_eagle3_) {
         eagle3_ = new Eagle3();
         eagle3_->load(*dg_);
+        // the head's hc weights load here rather than lazily: with taps off (--window 1) their first
+        // use would be the decode's captured tail, where their cudaMalloc is rejected
+        eager_head_mix();
     }
     if (block_ != dg_.get() && !draft_is_eagle3_) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;

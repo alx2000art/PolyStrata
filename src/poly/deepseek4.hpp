@@ -25,6 +25,9 @@ protected:
     void load_layer(int il) override;
     void begin_pass() override;
     void tap_state_mix(int il, int n, float* dst, int64_t dst_stride) override;
+    void eager_head_mix() override { load_head_mix(); }   // the mix weights load at setup, not lazily:
+                                                          // a first-use cudaMalloc inside a captured decode
+                                                          // tail is rejected by the CUDA graph rules
     void load_head_mix();   // the output head's stream-mix weights, on first use
     size_t recurrent_floats() const override { return 0; }
     size_t extra_bytes() const override;
