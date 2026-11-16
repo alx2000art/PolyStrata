@@ -36,6 +36,34 @@ namespace strata::poly {
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
+constexpr int kTypeQ8_0 = 6;   // the ggml type id the mmvq kernels take (this fork passes the numbers)
+
+// The BF16 weights quantize to Q8_0 on the host: a block of 32 values, the scale the max's / 127
+// in fp16, the values rounded - the GGML Q8_0 layout the mmvq kernels read.
+void bf16_to_q8_0(const uint8_t* src, std::vector<uint8_t>& dst, size_t n_vals) {
+    dst.resize(n_vals / 32 * 34);
+    for (size_t b = 0; b + 32 <= n_vals; b += 32) {
+        float mx = 0.f;
+        float xs[32];
+        for (int i = 0; i < 32; ++i) {
+            uint16_t h;
+            std::memcpy(&h, src + (b + i) * 2, 2);
+            uint32_t bits = uint32_t(h) << 16;
+            float x;
+            std::memcpy(&x, &bits, 4);
+            xs[i] = x;
+            mx = std::max(mx, std::fabs(x));
+        }
+        float d = mx / 127.f;
+        if (d == 0.f) d = 1e-30f;
+        const __half2 dh = __floats2half2_rn(d, d);
+        std::memcpy(dst.data() + b / 32 * 34, &dh, 2);
+        for (int i = 0; i < 32; ++i) {
+            const int q = int(xs[i] / d + (xs[i] > 0.f ? 0.5f : -0.5f));
+            dst[b / 32 * 34 + 2 + i] = int8_t(std::clamp(q, -127, 127));
+        }
+    }
+}
 
 // deepseek4.cpp's make_rope, mirrored: the head's rope is the main model's yarn with the head's
 // config's knobs (the corr dims in pair indices, the magnitude the yarn formula gives).
@@ -175,7 +203,19 @@ void Eagle3::load(Shards& dg) {
     gate_w_ = w("midlayer.mlp.gate_proj.weight");
     up_w_ = w("midlayer.mlp.up_proj.weight");
     down_w_ = w("midlayer.mlp.down_proj.weight");
-    lm_head_w_ = w("lm_head.weight");
+    // the lm_head in Q8_0: the draft step reads it whole every step (786 MB of BF16 a guess), and at
+    // its K of n_embd the mmvq kernels are the engine's own tested path (the Q8_0 kernels' nan was
+    // this head's K of 12288 - the fc - which stays BF16).  The Q8_1 input the kernels read is the
+    // fused final norm's own product.
+    {
+        const TensorInfo* t = dg.find("lm_head.weight");
+        if (!t) throw std::runtime_error("the eagle3 head has no lm_head.weight");
+        std::vector<uint8_t> q;
+        bf16_to_q8_0(dg.data(*t), q, t->elements());
+        ck(cudaMalloc(&lm_q8_, q.size() + 256), "lm_head.weight");
+        ck(cudaMemcpy(lm_q8_, q.data(), q.size(), cudaMemcpyHostToDevice), "eagle lm_head");
+        ck(cudaMemsetAsync((char*) lm_q8_ + q.size(), 0, 256, nullptr), "eagle lm_head tail");
+    }
     // the norms: BF16 in the file, F32 on the card (the rms_norm kernels read floats) - each pair
     // of bytes is the high half of the float
     const auto f = [&](const char* name) {
@@ -390,7 +430,7 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
     ck(cudaMemcpyAsync(emb_dev_, emb_host, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle teach emb");
     midlayer(emb_dev_, pos, 1, stream);
-    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    kernels::native_mmvq(kTypeQ8_0, lm_q8_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
     return logits_;
 }
 
@@ -409,7 +449,7 @@ const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* st
        "eagle draft emb");
     midlayer(emb_dev_, cache_pos_, 1, stream);
     cache_pos_ += 1;
-    gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
+    kernels::native_mmvq(kTypeQ8_0, lm_q8_, normed_q8_, logits_, n_embd_, dvocab_, 1, stream);
     // DBG(eagle3) the dump.s last block: this step.s logits, appended to what inject wrote
     if (const char* dp = std::getenv("STRATA_EAGLE_DUMP"); dp && dumped_ && !dumped_logits_) {
         dumped_logits_ = true;

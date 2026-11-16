@@ -52,9 +52,10 @@ private:
     // tokens through gemv_bf16.  The Q8_0 kernels NaN'd on this head's K of 12288: their weight view
     // differs from the bytes (zero weights read 0.0, the real ones read nan, the bytes scan clean).
     void linear(const void* w, const float* x, int n_in, int n_out, float* y, int n, void* stream);
-    // the weights (BF16, the device - the file's own bytes) and the norms (F32)
+    // the weights (BF16, the device - the file's own bytes; the lm_head is Q8_0 - the draft step
+    // reads it whole every step, and at K = n_embd the mmvq kernels are the engine's tested path)
     void* fc_w_ = nullptr, *q_w_ = nullptr, *k_w_ = nullptr, *v_w_ = nullptr, *o_w_ = nullptr;
-    void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_head_w_ = nullptr;
+    void* gate_w_ = nullptr, *up_w_ = nullptr, *down_w_ = nullptr, *lm_q8_ = nullptr;
     float *ln1_ = nullptr, *ln2_ = nullptr, *hnorm_ = nullptr, *out_norm_ = nullptr;
     // the geometry
     int n_embd_ = 0, n_head_ = 0, n_kv_ = 0, head_dim_ = 0, n_ff_ = 0, dvocab_ = 0;

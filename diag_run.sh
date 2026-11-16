@@ -141,7 +141,8 @@ cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
 # DBG(eagle3): EAGLE_* переменные вызова идут в конфиг как STRATA_EAGLE_* - движок берёт env из
 # конфига, не из вызывающего.  EAGLE_TEACH=<шаг>, EAGLE_DUMP_ATT=1 (путь по умолчанию), EAGLE_TAPS=...
-for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE_GUESSES", "ONE_DRAFT"):
+for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE_GUESSES", "ONE_DRAFT",
+             "STATS", "DRAFT_PREV"):
     val = os.environ.get("EAGLE_" + name)
     if val:
         if name == "DUMP_ATT" and val == "1":
