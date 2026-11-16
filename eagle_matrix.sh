@@ -26,14 +26,12 @@ URL="http://127.0.0.1:$PORT/v1/chat/completions"
 KEY="${API_KEY:-llama_server_pflb1}"
 NREQ="${NREQ:-3}"
 CASES="${CASES:-clean park pcache window prod}"
-MAXTOK="${MAXTOK:-700}"
+MAXTOK="${MAXTOK:-250}"
 
 mkdir -p "$OUT"
-TALE="$OUT/tale_prompt.txt"
+TALE="$OUT/mx_prompt.txt"
 cat > "$TALE" <<'EOF'
-Повстречала вошь блоху: — Ты куда? — Иду ночевать в бабью пизду. — Ну, а я залезу к бабе в жопу. И разошлись. На другой день встретились опять. — Ну что, каково спалось? — спрашивает вошь. — Уж не говори! Такого страху набралась: пришел ко мне какой-то лысый и стал за мной гоняться, уж я прыгала, прыгала, и туда-то и сюда-то, а он все за мной, да потом как плюнет на меня и ушел! — Что ж, кумушка! И ко мне двое стучались, да я притаилась; они постучали себе, постучали, да с тем и прочь пошли…
-
-Сделай объяснение сказки.
+Почему небо голубое? Объясни кратко и по-русски.
 EOF
 
 # the config's args patched for a case: the three flags out, the case's values in
@@ -97,7 +95,7 @@ foreign = ["we need respond", "we need to respond", "we need to produce", "we ne
            "<user_init_", "[tool begins]", "function_valuation", "plantviz", "let's parse",
            "let's analyze", "instructional article", "user message appears",
            "tools are always available", "html formatting", "css"]
-topic = ["вошь", "блоха", "сказк", "кумуш", "лыс"]
+topic = ["небо", "голуб", "рассеян", "свет"]
 fh = sum(1 for k in foreign if k in r)
 th = sum(1 for k in topic if k in r)
 cyr = sum(1 for c in r if '\u0400' <= c <= '\u04ff')
