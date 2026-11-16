@@ -4482,22 +4482,31 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     if (const char* tv = std::getenv("STRATA_EAGLE_TEACH"); tv && eagle3_ && taps_host_) {
         const int stride = std::max(1, std::atoi(tv));
         const size_t e = (size_t) n_embd_;
-        long long hit = 0, tot = 0;
+        long long hit = 0, tot = 0, self_hit = 0;
         for (int64_t p = stride; p + 2 < n; p += stride) {
             for (int tp = 0; tp < dspark_taps_n_; ++tp)
                 ck(cudaMemcpyAsync(dspark_taps_ + (size_t) tp * e,
                                    taps_host_ + ((size_t) tp * taps_rows_ + (size_t) p) * e, e * sizeof(float),
                                    cudaMemcpyHostToDevice, cs(st_)),
                    "teach taps");
+            // what EAGLE is trained on: the state at p with the embedding of the SAME token, naming p+1
+            embed(tokens[p], eagle_emb_);
+            const float* lg_s = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+            likeliest(lg_s, eagle3_->dvocab(), h_guess_, st_);
+            ck(cudaStreamSynchronize(cs(st_)), "teach self");
+            ++tot;
+            if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++self_hit;
+            // and the pair the draft rounds build now: the state at p with the NEXT token's embedding
             embed(tokens[p + 1], eagle_emb_);
-            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 1, st_);
+            const float* lg = eagle3_->teacher_step(dspark_taps_, eagle_emb_, p + 2, st_);
             likeliest(lg, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "teach");
-            ++tot;
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++hit;
         }
-        std::fprintf(stderr, "[eagle] TEACH: the head named the token after next %lld of %lld (%.1f%%)\n", hit,
-                     tot, tot ? 100.0 * double(hit) / double(tot) : 0.0);
+        std::fprintf(stderr, "[eagle] TEACH: (emb p, h p) -> p+1 %lld of %lld (%.1f%%); (emb p+1, h p) -> p+2 "
+                             "%lld of %lld (%.1f%%)\n",
+                     self_hit, tot, tot ? 100.0 * double(self_hit) / double(tot) : 0.0, hit, tot,
+                     tot ? 100.0 * double(hit) / double(tot) : 0.0);
     }
     std::free(taps_host_);
     taps_host_ = nullptr;
