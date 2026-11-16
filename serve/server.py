@@ -855,6 +855,8 @@ class StrataEngine:
                 bm = json.loads(Path(exe).parent.joinpath("BUILD.json").read_text(encoding="utf-8"))
                 self.log.write(f"[strata] the running build: src {bm.get('src', '?')} "
                                f"{bm.get('version', '?')} (written {time.strftime('%H:%M:%S', time.localtime(Path(exe).stat().st_mtime))})\n")
+                print(f"[strata] the running build: src {bm.get('src', '?')} {bm.get('version', '?')} "
+                      f"(binary written {time.strftime('%H:%M:%S', time.localtime(Path(exe).stat().st_mtime))})", flush=True)
                 self.log.flush()
             except (OSError, ValueError, KeyError):
                 pass

@@ -4616,6 +4616,19 @@ void Engine::window(const int32_t* tokens, int t) {
     }
     windowed_ = false;
     snap_bits_ = 0;
+    // the drafter's cache rows for the window's tokens: the next round drafts from them - a window
+    // that leaves them un-injected lets the cache go stale past the last single-token eval, and the
+    // head's answers stop depending on the context (the rounds answered one and the same guess)
+    if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
+        for (int j = 0; j < t; ++j) {
+            embed(tokens[j], eagle_emb_);
+            ck(cudaMemcpyAsync(eagle3_->emb_dev(), eagle_emb_, (size_t) n_embd_ * sizeof(float),
+                               cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
+            ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
+            eagle3_->inject(dspark_taps_ + size_t(j) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(),
+                            pos_ + j, 1, st_);
+        }
+    }
     std::copy(tokens, tokens + t, win_tok_);
     if (next_) {   // a card's way is timed by its own layers
         hand_on(pos_, t, pass_rows(t));
