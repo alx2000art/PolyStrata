@@ -316,9 +316,39 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
 // read and the embedding of the token that follows it; its guess is compared with the token after that.
 const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, int64_t pos, void* stream) {
     linear(fc_w_, taps_row, 3 * n_embd_, n_embd_, hidden_, 1, stream);
+    // DBG(eagle3) STRATA_EAGLE_DUMP_ATT=<file>: the first teacher step's attention, so a numpy softmax can
+    // be run on the very q/k/v it used (pos, then q [n_head*dim], k and v [pos+1][n_kv*dim], then o)
+    static const char* apath = std::getenv("STRATA_EAGLE_DUMP_ATT");
+    static bool adone = false;
+    const bool datt = apath && !adone;
+    if (datt) adone = true;
     ck(cudaMemcpyAsync(emb_dev_, emb_host, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle teach emb");
     midlayer(emb_dev_, pos, 1, stream);
+    if (datt) {
+        ck(cudaStreamSynchronize(cs(stream)), "att dump sync");
+        FILE* f = std::fopen(apath, "wb");
+        if (f) {
+            const int rows = int(pos) + 1;
+            std::fprintf(f, "%d %d %d %d %d
+", (int) pos, n_head_, n_kv_, head_dim_, rows);
+            std::vector<float> buf((size_t) n_head_ * head_dim_);
+            ck(cudaMemcpy(buf.data(), q_ + (size_t) (head_dim_ * n_head_) * 0, buf.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost), "att dump q");
+            std::fwrite(buf.data(), sizeof(float), buf.size(), f);
+            std::vector<uint16_t> kvh((size_t) rows * n_kv_ * head_dim_);
+            ck(cudaMemcpy(kvh.data(), k_cache_, kvh.size() * 2, cudaMemcpyDeviceToHost), "att dump k");
+            std::fwrite(kvh.data(), 2, kvh.size(), f);
+            ck(cudaMemcpy(kvh.data(), v_cache_, kvh.size() * 2, cudaMemcpyDeviceToHost), "att dump v");
+            std::fwrite(kvh.data(), 2, kvh.size(), f);
+            std::vector<float> ob((size_t) n_head_ * head_dim_);
+            ck(cudaMemcpy(ob.data(), o_, ob.size() * sizeof(float), cudaMemcpyDeviceToHost), "att dump o");
+            std::fwrite(ob.data(), sizeof(float), ob.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] dumped the attention at pos %lld (rows %d)
+", (long long) pos, rows);
+        }
+    }
     gemv_bf16((const uint16_t*) lm_head_w_, normed_, logits_, n_embd_, dvocab_, dvocab_, 1, stream);
     return logits_;
 }
