@@ -38,7 +38,9 @@ namespace strata::poly {
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
-constexpr int kTypeQ8_0 = 6;   // the ggml type id the mmvq kernels take (this fork passes the numbers)
+// the type id native_mmvq.hpp numbers: Q8_0 is 8 (6 is Q5_0 - passing it made the kernels read the
+// head's 34-byte Q8_0 blocks as 22-byte Q5_0 ones: the old NaN / degenerate-logits "Q8_0 mystery")
+constexpr int kTypeQ8_0 = 8;
 
 // The card's free VRAM wobbles for a second or two while the previous engine's context drains (the
 // server restarts this engine right after the last one), and the head's ~2.5 GB sit in the narrow
@@ -218,10 +220,10 @@ void Eagle3::load(Shards& dg) {
     up_w_ = w("midlayer.mlp.up_proj.weight");
     down_w_ = w("midlayer.mlp.down_proj.weight");
     // the lm_head: BF16 by default.  The Q8_0 path (STRATA_EAGLE_LM_Q8=1) reads 417 MB a draft step
-    // instead of 786 MB, but its logits came out degenerate (every guess p = 1.0): the same
-    // "the Q8_0 kernels' weight view differs from the bytes" mystery that once NaN'd the fc - the
-    // lm_head's own Q8_0 path was never validated apart from it.  At the K of n_embd the mmvq kernels
-    // are the engine's tested shapes; the Q8_1 input they read is the fused final norm's own product.
+    // instead of 786 MB.  Its logits once came out degenerate (every guess p = 1.0) and the fc's NaN'd -
+    // the "the Q8_0 kernels' weight view differs from the bytes" mystery: the type id this file passed
+    // was 6, which native_mmvq.hpp numbers Q5_0 (22-byte blocks), so the kernels read the Q8_0 bytes
+    // (34-byte blocks) misaligned - zero weights read 0.0, real ones NaN.  Q8_0 is 8.
     lm_bf16_ = [] {
         const char* v = std::getenv("STRATA_EAGLE_LM_Q8");
         return !(v && v[0] == '1');
