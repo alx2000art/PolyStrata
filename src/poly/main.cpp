@@ -590,6 +590,7 @@ struct Session {
             }
         }
         r.decode_ms = ms_since(t0);
+        if (eagle_stats) guesses.dump();   // the rounds' measured shape: the window per size against a token alone
         if (eagle_stats && r.eagle_seed_tot > 0)
             std::fprintf(stderr, "[eagle] the x_n-seeded draft was x_{n+1} %lld of %lld (%.1f%%)\n",
                          r.eagle_seed_hit, r.eagle_seed_tot,

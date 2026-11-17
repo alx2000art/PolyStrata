@@ -19,6 +19,7 @@
 #include "strata/spec/draft_policy.hpp"
 
 #include <cstdlib>
+#include <cstdio>
 #include <algorithm>
 
 namespace strata::poly {
@@ -131,6 +132,19 @@ public:
         measured_ = true;
         if (blocks_) gate.saw(asked_ > 0, wrote, ms);
         return ms;
+    }
+
+    /// DBG(eagle3) STRATA_EAGLE_STATS: the rounds' measured shape - what a window of each size took, what
+    /// one ask of the block takes, and the gate's two rates.  The numbers the perf tuning is read from:
+    /// t1 is a token alone, t2 a window of two - the closer they are, the more a window pays per token.
+    void dump() const {
+        std::fprintf(stderr, "[eagle] rounds:");
+        for (int t = 1; t <= spec::DraftPolicy::kMaxT; ++t)
+            if (knows(t)) std::fprintf(stderr, " t%d=%.1fms", t, ms_[t]);
+        const double with = gate.ms[1] > 0 ? 1000.0 * gate.tokens[1] / gate.ms[1] : 0.0;
+        const double without = gate.ms[0] > 0 ? 1000.0 * gate.tokens[0] / gate.ms[0] : 0.0;
+        std::fprintf(stderr, " ask=%.2fms gate tok/s with=%.1f without=%.1f pays=%d\n", ask_ms_, with, without,
+                     (int) gate.pays);
     }
 
 private:
