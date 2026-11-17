@@ -350,24 +350,27 @@ def main() -> int:
                 x_embs = torch.from_numpy(embs_b[start:start + length]).to(device)
                 x_taps = torch.from_numpy(taps_b[start:start + length]).to(device)
                 pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
-                logits = model(x_embs, x_taps, pos)                  # [n, dvocab]
-                lab_np = np.asarray(tokens_b[start + 1:start + length + 1])
-            if tgt2draft is not None:
-                lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)   # -100: вне draft-словаря
-                keep = (lab_d >= 0)
-                lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
-                loss = F.cross_entropy(logits.float(), lab_d, ignore_index=-100,
-                                       reduction="sum") / max(int(keep.sum()), 1)
-            else:
-                lab = torch.from_numpy(lab_np.astype(np.int64)).to(device)
-                loss = F.cross_entropy(logits.float(), lab, reduction="mean")
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            steps += 1
-            tot_loss += float(loss) * length
-            tot_rows += length
+                # bf16-автокаст: веса в fp32, матмулы в bf16 - активации и логиты вдвое меньше
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                    logits = model(x_embs, x_taps, pos)              # [n, dvocab]
+                    if tgt2draft is not None:
+                        lab_np = np.asarray(tokens_b[start + 1:start + length + 1])
+                        lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)  # -100: вне словаря
+                        keep = (lab_d >= 0)
+                        lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
+                        loss = F.cross_entropy(logits.float(), lab_d, ignore_index=-100,
+                                               reduction="sum") / max(int(keep.sum()), 1)
+                    else:
+                        lab = torch.from_numpy(
+                            np.asarray(tokens_b[start + 1:start + length + 1]).astype(np.int64)).to(device)
+                        loss = F.cross_entropy(logits.float(), lab, reduction="mean")
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                steps += 1
+                tot_loss += float(loss.detach()) * length
+                tot_rows += length
             if steps % 20 == 0:
                 print(f"  epoch {epoch + 1} step {steps}: loss {tot_loss / max(tot_rows, 1):.3f} "
                       f"({tot_rows} строк)", flush=True)
