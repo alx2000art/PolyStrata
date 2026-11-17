@@ -4791,6 +4791,25 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
         const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after draft_logits");
+        {   // DBG(eagle3): the head's top-5 for the first drafts - the model's pick (the next round's
+            // "draft step: token" line) shows whether the signal is absent or just mis-ranked
+            static int top_probes = 0;
+            if (top_probes < 10) {
+                ++top_probes;
+                std::vector<float> lg((size_t) eagle3_->dvocab());
+                ck(cudaMemcpy(lg.data(), logits, lg.size() * sizeof(float), cudaMemcpyDeviceToHost),
+                   "eagle top5");
+                std::vector<int> idx(lg.size());
+                for (size_t j = 0; j < idx.size(); ++j) idx[j] = (int) j;
+                std::partial_sort(idx.begin(), idx.begin() + 5, idx.end(),
+                                  [&](int a, int b) { return lg[(size_t) a] > lg[(size_t) b]; });
+                std::fprintf(stderr, "[eagle] top5:");
+                for (int j = 0; j < 5; ++j)
+                    std::fprintf(stderr, " %d/%.2f", (int) eagle3_->d2t(idx[(size_t) j]),
+                                 lg[(size_t) idx[(size_t) j]]);
+                std::fprintf(stderr, "\n");
+            }
+        }
         likeliest(logits, eagle3_->dvocab(), h_guess_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after likeliest");
         ck(cudaStreamSynchronize(cs(st_)), "draft");
