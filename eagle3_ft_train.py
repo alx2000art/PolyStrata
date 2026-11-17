@@ -305,7 +305,10 @@ def main() -> int:
                 tgt2draft[tgt] = draft_i
         print(f"d2t: {int((tgt2draft >= 0).sum())} target-токенов имеют draft-id")
 
-    files = sorted(glob.glob(os.path.join(args.dump, "taps-*.bin")))
+    if os.path.isfile(os.path.expanduser(args.dump)):
+        files = [os.path.expanduser(args.dump)]        # задан сам файл дампа - берём его
+    else:
+        files = sorted(glob.glob(os.path.join(args.dump, "taps-*.bin")))
     blocks, _, _ = scan_blocks(files)
     if not blocks:
         print("нет блоков дампа", file=sys.stderr)
