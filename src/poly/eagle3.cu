@@ -219,14 +219,12 @@ void Eagle3::load(Shards& dg) {
     gate_w_ = w("midlayer.mlp.gate_proj.weight");
     up_w_ = w("midlayer.mlp.up_proj.weight");
     down_w_ = w("midlayer.mlp.down_proj.weight");
-    // the lm_head: BF16 by default.  The Q8_0 path (STRATA_EAGLE_LM_Q8=1) reads 417 MB a draft step
-    // instead of 786 MB.  Its logits once came out degenerate (every guess p = 1.0) and the fc's NaN'd -
-    // the "the Q8_0 kernels' weight view differs from the bytes" mystery: the type id this file passed
-    // was 6, which native_mmvq.hpp numbers Q5_0 (22-byte blocks), so the kernels read the Q8_0 bytes
-    // (34-byte blocks) misaligned - zero weights read 0.0, real ones NaN.  Q8_0 is 8.
+    // the lm_head: Q8_0 by default (417 MB of reads a draft step; the type id is 8 now).  The TEACH
+    // metric reads the same path and matched the BF16 build's numbers bit for bit when the id was fixed
+    // (X 40.2/39.1 against 40.2/38.4).  STRATA_EAGLE_LM_Q8=0 keeps the BF16 copy (786 MB).
     lm_bf16_ = [] {
         const char* v = std::getenv("STRATA_EAGLE_LM_Q8");
-        return !(v && v[0] == '1');
+        return v && v[0] == '0';
     }();
     if (lm_bf16_) {
         lm_head_w_ = w("lm_head.weight");

@@ -4829,15 +4829,16 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // a round's first draft step starts where the model is: a rejected guess's rows stay in the
         // cache but are written over, and the next round does not walk further into the context.
         // The recursion input (hidden_) is the last KEPT row's draft state - keep() points it there.
-        // DBG(eagle3): the per-phase probes reset on every read (eagle_reads_), so a continuation's
-        // rounds get their own six; the anchor is read BEFORE the step overwrites it
+        // DBG(eagle3): the per-phase probes (STRATA_EAGLE_TOP5) reset on every read (eagle_reads_), so a
+        // continuation's rounds get their own six; the anchor is read BEFORE the step overwrites it
+        static const bool top5_on = std::getenv("STRATA_EAGLE_TOP5") != nullptr;
         static int64_t seen_reads = -1;
         static int probes = 0;
         if (seen_reads != eagle_reads_) {
             seen_reads = eagle_reads_;
             probes = 0;
         }
-        const bool probe = i == 0 && probes < 6;
+        const bool probe = top5_on && i == 0 && probes < 6;
         float hh0[4] = {};
         if (probe) {   // the anchor must be settled before the blocking read (the staging rode on st_)
             ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor sync");
