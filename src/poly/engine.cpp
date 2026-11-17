@@ -4541,6 +4541,15 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             ck(cudaStreamSynchronize(cs(st_)), "teach self");
             ++tot;
             if (eagle3_->d2t(h_guess_->token) == tokens[p + 1]) ++self_hit;
+            // and the draft's OWN recursion, the chain the decode rounds run: the self-pair's residual
+            // (hidden_, left by its teacher_step) feeds the row (emb tokens[p+1], h_draft) at p+1, which
+            // must name p+2 - the second pair below uses the TARGET's state instead of h_draft, so the
+            // two numbers name whether the recursion itself carries the signal
+            eagle3_->rewind(taps_pos0_ + p + 1);
+            const float* lg_r = eagle3_->draft_logits(tokens[p + 1], eagle_emb_, st_);
+            likeliest(lg_r, eagle3_->dvocab(), h_guess_, st_);
+            ck(cudaStreamSynchronize(cs(st_)), "teach recursion");
+            if (eagle3_->d2t(h_guess_->token) == tokens[p + 2]) ++rec_hit;
             // and the pair the draft rounds build now: the state at p with the NEXT token's embedding -
             // the row sits at p + 1 (absolute), where the round's own row would sit
             embed(tokens[p + 1], eagle_emb_);
