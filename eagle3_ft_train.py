@@ -70,6 +70,7 @@ def load_block(path: str, off: int, n: int, n_embd: int, taps_n: int):
     with open(path, "rb") as f:
         f.seek(off)
         f.read(12)
+        pos0 = struct.unpack("<QI", f.read(12))[0]
         tokens = np.frombuffer(f.read(4 * n), dtype="<i4")
         rows = np.frombuffer(f.read(2 * n * (taps_n + 1) * n_embd), dtype="<u2")             .reshape(n, taps_n + 1, n_embd)
     embs = _bf16_to_f32(rows[:, 0, :]).astype(np.float32)
