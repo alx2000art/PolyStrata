@@ -361,8 +361,18 @@ def main() -> int:
                         lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)  # -100: вне словаря
                         keep = (lab_d >= 0)
                         lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
-                        loss = F.cross_entropy(logits.float(), lab_d, ignore_index=-100,
-                                               reduction="sum") / max(int(keep.sum()), 1)
+                        # чанковый CE: fp32-временники логитов держим по куску строк, не целиком
+                        csum, ckeep = 0.0, 0
+                        for cs in range(0, length, 256):
+                            ce = cs + 256
+                            part = logits[cs:ce].float()
+                            lab_p = lab_d[cs:ce]
+                            kp = (lab_d[cs:ce] >= 0)
+                            csum = csum + F.cross_entropy(part, torch.where(kp, lab_p,
+                                                                            torch.zeros_like(lab_p)),
+                                                          ignore_index=-100, reduction="sum")
+                            ckeep += int(kp.sum())
+                        loss = csum / max(ckeep, 1)
                     else:
                         lab = torch.from_numpy(
                             np.asarray(tokens_b[start + 1:start + length + 1]).astype(np.int64)).to(device)
