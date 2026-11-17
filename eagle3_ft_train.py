@@ -271,6 +271,8 @@ def main() -> int:
     ap.add_argument("--out", default="eagle3-ft.safetensors")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--opt8", action="store_true",
+                    help="8-битный Adam (bitsandbytes): состояния ~0.8 ГБ вместо ~6.3")
     ap.add_argument("--max-rows", type=int, default=1024, help="строк блока за шаг (хвост отбрасывается)")
     ap.add_argument("--coverage", action="store_true", help="только отчёт по покрытию d2t и выход")
     ap.add_argument("--cpu", action="store_true")
@@ -331,7 +333,12 @@ def main() -> int:
               f"это потолок top-1 головы на этом корпусе")
         return 0
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    if args.opt8:
+        import bitsandbytes as bnb
+        opt = bnb.optim.AdamW8bit(model.parameters(), lr=args.lr, weight_decay=0.01)
+        print("оптимизатор: AdamW8bit")
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     rng = random.Random(42)
     steps = 0
     for epoch in range(args.epochs):
