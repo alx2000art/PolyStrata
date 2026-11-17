@@ -275,6 +275,9 @@ def main() -> int:
                     help="8-битный Adam (bitsandbytes): состояния ~0.8 ГБ вместо ~6.3")
     ap.add_argument("--max-rows", type=int, default=1024, help="строк блока за шаг (хвост отбрасывается)")
     ap.add_argument("--coverage", action="store_true", help="только отчёт по покрытию d2t и выход")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="без обучения: top-1/рекурсия головы на дампах - как TEACH движка; "
+                         "сверка форварда тренера с движком")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
 
@@ -331,6 +334,46 @@ def main() -> int:
             tot += len(lab)
         print(f"покрытие d2t: {cov} из {tot} позиций ({100 * cov / max(tot, 1):.1f}%) — "
               f"это потолок top-1 головы на этом корпусе")
+        return 0
+
+    if args.eval_only:
+        # та же метрика, что TEACH движка: (emb p, h p) -> p+1 и (emb p+1, h p) -> p+2.
+        # top-1 считается по позициям, чья метка есть в draft-словаре (иначе позиция не измерима)
+        tot1 = hit1 = tot2 = hit2 = 0
+        with torch.no_grad():
+            for path, off, pos0, n_rows, _tokens_meta in blocks:
+                pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
+                                                              meta["n_embd"], meta["taps_n"])
+                for start in range(0, n_rows - 2, args.max_rows):
+                    length = min(args.max_rows, n_rows - 2 - start)
+                    if length < 8:
+                        break
+                    pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                        # нога 1: (emb p, h p) -> p+1 - строка p несёт и embs[p], и taps[p]
+                        logits = model(torch.from_numpy(embs_b[start:start + length]).to(device),
+                                       torch.from_numpy(taps_b[start:start + length]).to(device), pos)
+                    lab1 = (tgt2draft[np.asarray(tokens_b[start + 1:start + length + 1])]
+                            if tgt2draft is not None else
+                            np.asarray(tokens_b[start + 1:start + length + 1]).astype(np.int64))
+                    pred = logits.argmax(-1).cpu().numpy()
+                    ok = (lab1 >= 0) & (pred == lab1)
+                    tot1 += int((lab1 >= 0).sum())
+                    hit1 += int(ok.sum())
+                    # нога 2: (emb p+1, h p) -> p+2 - эмбеддинг следующей строки при taps текущей
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                        logits2 = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
+                                        torch.from_numpy(taps_b[start:start + length]).to(device), pos)
+                    lab2 = (tgt2draft[np.asarray(tokens_b[start + 2:start + length + 2])]
+                            if tgt2draft is not None else
+                            np.asarray(tokens_b[start + 2:start + length + 2]).astype(np.int64))
+                    pred2 = logits2.argmax(-1).cpu().numpy()
+                    ok2 = (lab2 >= 0) & (pred2 == lab2)
+                    tot2 += int((lab2 >= 0).sum())
+                    hit2 += int(ok2.sum())
+        print(f"eval-only (top-1 среди покрытых d2t): "
+              f"(emb p, h p) -> p+1: {hit1} из {tot1} ({100 * hit1 / max(tot1, 1):.1f}%), "
+              f"(emb p+1, h p) -> p+2: {hit2} из {tot2} ({100 * hit2 / max(tot2, 1):.1f}%)")
         return 0
 
     if args.opt8:
