@@ -4119,7 +4119,8 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
     // EAGLE-3: the drafter's cache follows the model's own steps - without these rows it would attend a
-    // prompt with holes from the first generated token on
+    // prompt with holes from the first generated token on.  Each row's state is staged where
+    // keep_state(n) will read it (the per-row injects leave theirs in hidden_[0]).
     if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
         for (int t = 0; t < n; ++t) {
             embed(tokens[t], eagle_emb_);
@@ -4127,6 +4128,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
             ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
             eagle3_->inject(dspark_taps_ + size_t(t) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(), pos_ + t, 1, st_);
+            eagle3_->stage_state(t, st_);
         }
     }
     pos_ += n;
@@ -4648,7 +4650,10 @@ void Engine::window(const int32_t* tokens, int t) {
     snap_bits_ = 0;
     // the drafter's cache rows for the window's tokens: the next round drafts from them - a window
     // that leaves them un-injected lets the cache go stale past the last single-token eval, and the
-    // head's answers stop depending on the context (the rounds answered one and the same guess)
+    // head's answers stop depending on the context (the rounds answered one and the same guess).
+    // The per-row injects each leave their state in hidden_[0]; stage each row's where keep_state(n)
+    // will read it - otherwise hidden_[1..] kept the read's last batch's prompt rows, and every round
+    // that accepted two or more drafts started from a state thousands of positions back.
     if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
         for (int j = 0; j < t; ++j) {
             embed(tokens[j], eagle_emb_);
@@ -4657,6 +4662,7 @@ void Engine::window(const int32_t* tokens, int t) {
             ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
             eagle3_->inject(dspark_taps_ + size_t(j) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(),
                             pos_ + j, 1, st_);
+            eagle3_->stage_state(j, st_);
         }
     }
     std::copy(tokens, tokens + t, win_tok_);

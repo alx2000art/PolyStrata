@@ -32,6 +32,12 @@ public:
     // tokens were kept: the recursion state for the next round is the LAST KEPT row's, not the last
     // injected one (a rejected guess's).  Copies hidden_[n-1] over hidden_[0].
     void keep_state(int n, void* stream);
+    // The row-by-row injection of a window (inject() one row at a time) leaves every row's state in
+    // hidden_[0] - each call overwrites it.  This stores the row's state where keep_state(n) will
+    // look for it (hidden_[slot], slot >= 1).  Without it hidden_[1..] kept the READ's last batch's
+    // rows - prompt tokens thousands of positions back - and every round that accepted two or more
+    // drafts started from a mid-prompt state (the decode's answers stopped depending on the context).
+    void stage_state(int slot, void* stream);
     // The cache holds rows [0, pos) already; a round's rejected guesses leave theirs behind, so every
     // round starts the draft steps at the model's own position again.
     void rewind(int64_t pos) { cache_pos_ = pos; }

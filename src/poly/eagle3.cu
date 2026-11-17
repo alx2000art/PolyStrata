@@ -465,6 +465,13 @@ void Eagle3::keep_state(int n, void* stream) {
        "the eagle's kept recursion state");
 }
 
+void Eagle3::stage_state(int slot, void* stream) {
+    if (slot < 1) return;   // row 0's state is already where it is
+    ck(cudaMemcpyAsync(hidden_ + size_t(slot) * n_embd_, hidden_, size_t(n_embd_) * sizeof(float),
+                       cudaMemcpyDeviceToDevice, cs(stream)),
+       "the eagle's staged row state");
+}
+
 const float* Eagle3::draft_logits(int32_t token, const float* emb_host, void* stream) {
     // DBG(eagle3): the draft step's own input - if these are the same for different tokens, the head never
     // sees the embedding and every guess is the same word
