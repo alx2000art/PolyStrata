@@ -6537,6 +6537,13 @@ def make_handler(svc: Service):
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
             self._no_local_images(messages)
+            # STRATA_NO_TOOLS: the model's template/training speaks another tool-call format than the pack's
+            # renderer (DeepSeek-V4's DSML against the Qwen-style <tool_call><function=...>): the definitions
+            # push the model into a call it can only mangle ([Tool]</invoke></｜DSML｜tool_calls>), and the
+            # answer becomes noise.  Offering no tools keeps the reply a reply.
+            if os.environ.get("STRATA_NO_TOOLS") and tools:
+                print("[strata] STRATA_NO_TOOLS: the request's tools are not offered to the model", flush=True)
+                tools = None
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
             force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
@@ -6547,6 +6554,8 @@ def make_handler(svc: Service):
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
             bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
+            if os.environ.get("STRATA_NO_TOOLS"):
+                use_mcp = False                       # MCP tools reach the model the same way (see _openai)
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
                 if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
@@ -6623,6 +6632,8 @@ def make_handler(svc: Service):
             cancel = self.cancel                             # watched since _post() (#430 #431 #1999)
             try:
                 ids, thinking, tools, max_new, asm, validator, req = self._responses_prepare(req, cancel)
+                if os.environ.get("STRATA_NO_TOOLS"):   # the model's tool format is not the pack's (see _openai)
+                    tools = None
             except ClientGone:
                 self._note(outcome="disconnected")
                 return
@@ -6781,6 +6792,9 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             self._no_local_images(messages)
+            if os.environ.get("STRATA_NO_TOOLS") and tools:   # the model's tool format is not the pack's (see _openai)
+                print("[strata] STRATA_NO_TOOLS: the request's tools are not offered to the model", flush=True)
+                tools = None
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
                 tools = None
             force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
