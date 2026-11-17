@@ -336,19 +336,22 @@ def main() -> int:
         rng.shuffle(order)
         tot_loss, tot_rows = 0.0, 0
         for bi in order:
-            path, off, pos0, n_rows, tokens = blocks[bi]
-            n = min(n_rows - 1, args.max_rows)
-            if n < 8:
-                continue
-            pos0, tokens_b, embs, taps = load_block(path, off, min(n_rows, args.max_rows + 1),
-                                                    meta["n_embd"], meta["taps_n"])
-            tokens = tokens_b
-            n = min(len(tokens) - 1, args.max_rows)
-            x_embs = torch.from_numpy(embs[:n]).to(device)
-            x_taps = torch.from_numpy(taps[:n]).to(device)
-            pos = torch.arange(pos0, pos0 + n, device=device)
-            logits = model(x_embs, x_taps, pos)                      # [n, dvocab]
-            lab_np = np.asarray(tokens[1:n + 1])
+            path, off, pos0, n_rows, tokens_meta = blocks[bi]
+            # блок целиком в CPU f32 (одна загрузка с диска), нарезается на шаги по max_rows строк:
+            # память шага ограничена, а данные используются полностью.  Каждая нарезка - каузальная
+            # последовательность со своими абсолютными позициями (срез учится на локальном контексте,
+            # как и в штатном обучении EAGLE на последовательностях ограниченной длины)
+            pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
+                                                          meta["n_embd"], meta["taps_n"])
+            for start in range(0, n_rows - 1, args.max_rows):
+                length = min(args.max_rows, n_rows - 1 - start)
+                if length < 8:
+                    break
+                x_embs = torch.from_numpy(embs_b[start:start + length]).to(device)
+                x_taps = torch.from_numpy(taps_b[start:start + length]).to(device)
+                pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
+                logits = model(x_embs, x_taps, pos)                  # [n, dvocab]
+                lab_np = np.asarray(tokens_b[start + 1:start + length + 1])
             if tgt2draft is not None:
                 lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)   # -100: вне draft-словаря
                 keep = (lab_d >= 0)
