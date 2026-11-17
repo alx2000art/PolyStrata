@@ -366,8 +366,8 @@ def main() -> int:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             steps += 1
-            tot_loss += float(loss) * n
-            tot_rows += n
+            tot_loss += float(loss) * length
+            tot_rows += length
             if steps % 20 == 0:
                 print(f"  epoch {epoch + 1} step {steps}: loss {tot_loss / max(tot_rows, 1):.3f} "
                       f"({tot_rows} строк)", flush=True)
