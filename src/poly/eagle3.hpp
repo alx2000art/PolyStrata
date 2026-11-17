@@ -50,6 +50,9 @@ public:
     int64_t d2t_off(int32_t draft_id) const { return d2t_[(size_t) draft_id]; }
     bool ready() const { return loaded_; }
     float* emb_dev() { return emb_dev_; }
+    // DBG(eagle3): the recursion state (row 0: the round's anchor) and the cache cursor, for the probe
+    const float* hidden_dev() const { return hidden_; }
+    int64_t cache_pos() const { return cache_pos_; }
     // DBG(eagle3) one teacher-forced step: the taps of a row already on the device (3*n_embd) and the
     // embedding of the next token ride in, fc + the midlayer run at pos, the logits come back
     const float* teacher_step(const float* taps_row, const float* emb_host, int64_t pos, void* stream);

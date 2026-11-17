@@ -509,6 +509,7 @@ struct Session {
         if (max_new > 0) {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
             int32_t t = pick(engine.logits());   // picked, and not shown yet
+            int dbg_round = 0;   // DBG(eagle3): the first rounds of THIS generate (a phase or a prompt)
             while (show(t)) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
@@ -570,6 +571,15 @@ struct Session {
                 if (eagle_stats && use.t > 1) {
                     ++r.eagle_tot;
                     if (t == w[1]) ++r.eagle_hit;
+                }
+                if (eagle_stats && dbg_round < 12) {   // DBG(eagle3): the round's guesses against the model's
+                    ++dbg_round;                        // own pick - the phase's shape, round by round
+                    std::fprintf(stderr,
+                                 "[eagle] round %d pos %lld: w0=%d g0=%d g1=%d g2=%d model=%d hit=%d use.t=%d
+",
+                                 dbg_round, (long long) engine.pos(), (int) w[0], (int) d[0],
+                                 (int) (use.t > 2 ? d[1] : -1), (int) (use.t > 3 ? d[2] : -1), (int) t,
+                                 (int) (use.t > 1 && t == w[1]), (int) use.t);
                 }
                 while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) t = pick(engine.logits_of(++right));
                 engine.keep(right + 1);

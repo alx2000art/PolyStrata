@@ -4506,6 +4506,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
 // stopped depending on the context (the last chunk is the decode's nearest context, the very rows a
 // draft round weighs most).
 void Engine::eagle_read_tail(const int32_t* tokens, int n) {
+    ++eagle_reads_;   // the draft probes count a fresh phase from here (a prompt read or a continuation)
     if (eagle3_ && taps_host_) {
         // the D2H rides at the tap layers are async: everything below reads the planes on the host
         // and the block is freed at the read's end - both need the copies landed.  A copy still in
@@ -4828,29 +4829,45 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // a round's first draft step starts where the model is: a rejected guess's rows stay in the
         // cache but are written over, and the next round does not walk further into the context.
         // The recursion input (hidden_) is the last KEPT row's draft state - keep() points it there.
+        // DBG(eagle3): the per-phase probes reset on every read (eagle_reads_), so a continuation's
+        // rounds get their own six; the anchor is read BEFORE the step overwrites it
+        static int64_t seen_reads = -1;
+        static int probes = 0;
+        if (seen_reads != eagle_reads_) {
+            seen_reads = eagle_reads_;
+            probes = 0;
+        }
+        const bool probe = i == 0 && probes < 6;
+        float hh0[4] = {};
+        if (probe) {   // the anchor must be settled before the blocking read (the staging rode on st_)
+            ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor sync");
+            ck(cudaMemcpyAsync(hh0, eagle3_->hidden_dev(), sizeof hh0, cudaMemcpyDeviceToHost, cs(st_)),
+               "eagle probe anchor");
+            ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor");
+        }
         if (i == 0) eagle3_->rewind(pos_);
         embed(token, eagle_emb_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
         const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after draft_logits");
-        {   // DBG(eagle3): the head's top-5 for the first drafts - the model's pick (the next round's
-            // "draft step: token" line) shows whether the signal is absent or just mis-ranked
-            static int top_probes = 0;
-            if (top_probes < 10) {
-                ++top_probes;
-                std::vector<float> lg((size_t) eagle3_->dvocab());
-                ck(cudaMemcpy(lg.data(), logits, lg.size() * sizeof(float), cudaMemcpyDeviceToHost),
-                   "eagle top5");
-                std::vector<int> idx(lg.size());
-                for (size_t j = 0; j < idx.size(); ++j) idx[j] = (int) j;
-                std::partial_sort(idx.begin(), idx.begin() + 5, idx.end(),
-                                  [&](int a, int b) { return lg[(size_t) a] > lg[(size_t) b]; });
-                std::fprintf(stderr, "[eagle] top5:");
-                for (int j = 0; j < 5; ++j)
-                    std::fprintf(stderr, " %d/%.2f", (int) eagle3_->d2t(idx[(size_t) j]),
-                                 lg[(size_t) idx[(size_t) j]]);
-                std::fprintf(stderr, "\n");
-            }
+        if (probe) {   // DBG(eagle3): the head's top-5 for the first rounds of EACH phase - the model's pick
+            // (the round trace) shows whether the signal is absent or just mis-ranked, and pos/cache/
+            // anchor tell a stale state from hard content
+            ++probes;
+            std::vector<float> lg((size_t) eagle3_->dvocab());
+            ck(cudaMemcpy(lg.data(), logits, lg.size() * sizeof(float), cudaMemcpyDeviceToHost),
+               "eagle top5");
+            std::vector<int> idx(lg.size());
+            for (size_t j = 0; j < idx.size(); ++j) idx[j] = (int) j;
+            std::partial_sort(idx.begin(), idx.begin() + 5, idx.end(),
+                              [&](int a, int b) { return lg[(size_t) a] > lg[(size_t) b]; });
+            std::fprintf(stderr, "[eagle] top5 pos=%lld cache=%lld tok=%d anchor %.3f %.3f %.3f:",
+                         (long long) pos_, (long long) eagle3_->cache_pos(), (int) token, (double) hh0[0],
+                         (double) hh0[1], (double) hh0[2]);
+            for (int j = 0; j < 5; ++j)
+                std::fprintf(stderr, " %d/%.2f", (int) eagle3_->d2t(idx[(size_t) j]),
+                             lg[(size_t) idx[(size_t) j]]);
+            std::fprintf(stderr, "\n");
         }
         likeliest(logits, eagle3_->dvocab(), h_guess_, st_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after likeliest");

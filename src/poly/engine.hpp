@@ -883,6 +883,8 @@ protected:
     float* taps_host_ = nullptr;                   ///< the read's taps on the host, a plane a tap (tap x row)
     int64_t taps_pos0_ = 0;                        ///< the read's start position (bookkeeping)
     int64_t taps_rows_ = 0;                        ///< the rows taps_host_ holds
+    int64_t eagle_reads_ = 0;                      ///< the reads that ended in eagle_read_tail (the draft
+                                                   ///< probes reset per read: a phase or a prompt) 
     int64_t tap_row_ = 0;                          ///< the rows of the tap layer in hand written so far
     int tap_row_slot_ = -1;                        ///< which tap layer tap_row_ counts
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)
