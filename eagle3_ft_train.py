@@ -154,30 +154,50 @@ class Eagle3Head(nn.Module):
         self.down = nn.Linear(n_ff, n_embd, bias=False)
         self.lm_head = nn.Linear(n_embd, dvocab, bias=False)
 
+    def _residual(self, x, pos):
+        """Общая часть слоя: x [T, 2E] -> hidden [T, E] (residual до out_norm)."""
+        T = x.shape[0]
+        q = self.wq(x).view(T, self.n_head, self.hd)
+        k = self.wk(x).view(T, self.n_kv, self.hd)
+        v = self.wv(x).view(T, self.n_kv, self.hd)
+        q = rope_apply(q, pos, self.rope)
+        k = rope_apply(k, pos, self.rope)
+        # GQA: голова h -> kvh = h // per (смежные группы, проверено check_attn)
+        per = self.n_head // self.n_kv
+        qg = q.view(T, self.n_kv, per, self.hd)
+        att = torch.einsum("tqph,skh->tqps", qg, k) / math.sqrt(self.hd)   # [Tq, n_kv, per, Tk]
+        i = torch.arange(T, device=x.device)
+        causal = (i.view(-1, 1, 1, 1) >= i.view(1, 1, 1, -1))              # [Tq, 1, 1, Tk]
+        w = torch.softmax(att.masked_fill(~causal, float("-inf")), dim=-1)
+        o = torch.einsum("tqps,skh->tqph", w, v)                             # [Tq, n_kv, per, hd]
+        o = o.reshape(T, self.n_head * self.hd)
+        hidden = o                                                           # o уже в n_embd (wo ниже)
+        return o
+
+    def _head_out(self, h_in, o):
+        hidden = h_in + self.wo(o)
+        mlp = self.down(F.silu(self.gate(rmsnorm(hidden, self.ln2.weight, self.eps))) * self.up(rmsnorm(hidden, self.ln2.weight, self.eps)))
+        hidden = hidden + mlp
+        return hidden
+
     def forward(self, embs, taps, pos):
         # embs [T, E], taps [T, K, E], pos [T] (абсолютные позиции строк блока)
         T = embs.shape[0]
         h = self.fc(taps.reshape(T, -1))
         x = torch.cat((rmsnorm(embs, self.ln1.weight, self.eps),
                        rmsnorm(h, self.hnorm.weight, self.eps)), dim=-1)          # [T, 2E]
-        q = self.wq(x).view(T, self.n_head, self.hd)
-        k = self.wk(x).view(T, self.n_kv, self.hd)
-        v = self.wv(x).view(T, self.n_kv, self.hd)
-        q = rope_apply(q, pos, self.rope)
-        k = rope_apply(k, pos, self.rope)
-        # GQA: голова h -> kvh = h // per (смежные группы, проверено check_attn);
-        # scores каждой строки против ВСЕХ ключей [T_key]: [Tq, n_kv, per, Tk]
-        per = self.n_head // self.n_kv
-        qg = q.view(T, self.n_kv, per, self.hd)
-        att = torch.einsum("tqph,skh->tqps", qg, k) / math.sqrt(self.hd)   # [Tq, n_kv, per, Tk]
-        i = torch.arange(T, device=embs.device)
-        causal = (i.view(-1, 1, 1, 1) >= i.view(1, 1, 1, -1))              # [Tq, 1, 1, Tk]
-        w = torch.softmax(att.masked_fill(~causal, float("-inf")), dim=-1)
-        o = torch.einsum("tqps,skh->tqph", w, v)                             # [Tq, n_kv, per, hd]
-        o = o.reshape(T, self.n_head * self.hd)
-        hidden = h + self.wo(o)
-        mlp = self.down(F.silu(self.gate(rmsnorm(hidden, self.ln2.weight, self.eps))) * self.up(rmsnorm(hidden, self.ln2.weight, self.eps)))
-        hidden = hidden + mlp
+        o = self._residual(x, pos)
+        hidden = self._head_out(h, o)
+        normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
+        return self.lm_head(normed), hidden
+
+    def step_hidden(self, h_prev, embs, pos):
+        """Шаг рекурсии decode-раунда: вход h - СОБСТВЕННОЕ скрытое состояние головы с прошлого шага
+        (не fc(taps)): x = [ln1(emb) | hnorm(h_prev)], тот же слой, каузально по срезу."""
+        x = torch.cat((rmsnorm(embs, self.ln1.weight, self.eps),
+                       rmsnorm(h_prev, self.hnorm.weight, self.eps)), dim=-1)
+        o = self._residual(x, pos)
+        hidden = self._head_out(h_prev, o)
         normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
         return self.lm_head(normed)
 
@@ -273,6 +293,8 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--opt8", action="store_true",
                     help="8-битный Adam (bitsandbytes): состояния ~0.8 ГБ вместо ~6.3")
+    ap.add_argument("--rec-weight", type=float, default=1.0,
+                    help="вес ноги рекурсии (0 = как раньше, только leg1)")
     ap.add_argument("--max-rows", type=int, default=1024, help="строк блока за шаг (хвост отбрасывается)")
     ap.add_argument("--coverage", action="store_true", help="только отчёт по покрытию d2t и выход")
     ap.add_argument("--eval-only", action="store_true",
@@ -351,7 +373,7 @@ def main() -> int:
                     pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                         # нога 1: (emb p, h p) -> p+1 - строка p несёт и embs[p], и taps[p]
-                        logits = model(torch.from_numpy(embs_b[start:start + length]).to(device),
+                        logits, _ = model(torch.from_numpy(embs_b[start:start + length]).to(device),
                                        torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                     lab1 = (tgt2draft[np.asarray(tokens_b[start + 1:start + length + 1])]
                             if tgt2draft is not None else
@@ -362,7 +384,7 @@ def main() -> int:
                     hit1 += int(ok.sum())
                     # нога 2: (emb p+1, h p) -> p+2 - эмбеддинг следующей строки при taps текущей
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                        logits2 = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
+                        logits2, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
                                         torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                     lab2 = (tgt2draft[np.asarray(tokens_b[start + 2:start + length + 2])]
                             if tgt2draft is not None else
@@ -405,7 +427,7 @@ def main() -> int:
                 pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                 # bf16-автокаст: веса в fp32, матмулы в bf16 - активации и логиты вдвое меньше
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                    logits = model(x_embs, x_taps, pos)              # [n, dvocab]
+                    logits, hid = model(x_embs, x_taps, pos)         # [n, dvocab], [n, E]
                     if tgt2draft is not None:
                         lab_np = np.asarray(tokens_b[start + 1:start + length + 1])
                         lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)  # -100: вне словаря
@@ -427,6 +449,24 @@ def main() -> int:
                         lab = torch.from_numpy(
                             np.asarray(tokens_b[start + 1:start + length + 1]).astype(np.int64)).to(device)
                         loss = F.cross_entropy(logits.float(), lab, reduction="mean")
+                    # нога рекурсии (так учит штатный EAGLE-3): decode-раунды после первого шага
+                    # кормят голову её СОБСТВЕННЫМ скрытым состоянием с прошлого шага.  Без этой
+                    # ноги файн-тюн перекашивает голову: leg1 растёт, рекурсия деградирует в
+                    # вырожденный токен (TEACH: leg1 23%, recursion 1.4% у первого ft).
+                    if args.rec_weight > 0 and tgt2draft is not None:
+                        hid_in = torch.cat((torch.zeros_like(hid[:1]), hid[:-1].detach()), dim=0)
+                        logits2 = model.step_hidden(hid_in, x_embs, pos)
+                        csum2, ckeep2 = 0.0, 0
+                        for cs in range(1, length, 256):     # строка 0 без предшественника - мимо
+                            ce = min(cs + 256, length)
+                            part = logits2[cs:ce].float()
+                            lab_p = lab_d[cs:ce]
+                            kp = (lab_d[cs:ce] >= 0)
+                            csum2 = csum2 + F.cross_entropy(part, torch.where(kp, lab_p,
+                                                                              torch.zeros_like(lab_p)),
+                                                            ignore_index=-100, reduction="sum")
+                            ckeep2 += int(kp.sum())
+                        loss = loss + args.rec_weight * (csum2 / max(ckeep2, 1))
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
