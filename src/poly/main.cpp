@@ -575,8 +575,7 @@ struct Session {
                 if (eagle_stats && dbg_round < 12) {   // DBG(eagle3): the round's guesses against the model's
                     ++dbg_round;                        // own pick - the phase's shape, round by round
                     std::fprintf(stderr,
-                                 "[eagle] round %d pos %lld: w0=%d g0=%d g1=%d g2=%d model=%d hit=%d use.t=%d
-",
+                                 "[eagle] round %d pos %lld: w0=%d g0=%d g1=%d g2=%d model=%d hit=%d use.t=%d\n",
                                  dbg_round, (long long) engine.pos(), (int) w[0], (int) d[0],
                                  (int) (use.t > 2 ? d[1] : -1), (int) (use.t > 3 ? d[2] : -1), (int) t,
                                  (int) (use.t > 1 && t == w[1]), (int) use.t);
