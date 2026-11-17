@@ -5269,7 +5269,14 @@ def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
     if isinstance(body, list):
         body = " ".join(p.get("text", "") for p in body if isinstance(p, dict))
     preview = (str(body or "")[:80]).replace("\n", " ")
-    print(f"[strata] req {api}: msgs={len(messages)} tools={len(tools or [])} "
+    # the tools by name: a schema the model chokes on (an empty parameters object, a stray description)
+    # derailed the built-in page's requests from their first turn - the names say which ones to blame
+    names = []
+    for t in tools or []:
+        if isinstance(t, dict):
+            names.append(((t.get("function") or t).get("name")) or "?")
+    print(f"[strata] req {api}: msgs={len(messages)} tools={len(tools or [])} {names} "
+          f"tool_choice={req.get('tool_choice')!r} "
           f"max_tokens_raw={req.get('max_tokens')!r}/{req.get('max_completion_tokens')!r} "
           f"max_new={max_new} thinking={thinking} stream={bool(req.get('stream'))} "
           f"prompt_tokens={prompt_tokens} last={last.get('role')!r}:{preview!r}", flush=True)

@@ -176,6 +176,17 @@ VARIANTS+=("57-on-share100|$WORKING_SPEC --cpu-share 1.0")
 # поверх ВСЁ-ВКЛЮЧЕНО — эффект крутки на рабочем конфиге:
 # VARIANTS+=("45-on-pb2048|$(all_on_spec) --prompt-batch 2048")
 # VARIANTS+=("46-on-convcache0|$(all_on_spec) --conversation-cache-mib 0")
+# --- новые опции 2026-11-17: env-ключи движка (ENV:NAME=value; ENV:NAME= снимает) и
+# экономика драфтера (DEL:--draft-model).  SCORE_CONTEXT здесь меряется только по скорости и
+# отсутствию падений — его порчу на >30k промптах свип не докажет (для этого diag_run на doc-30k
+# с семантической проверкой).  FREEZE на 16 ГБ может упасть на росте KV — вариант запишет фейл.
+VARIANTS+=("60-eta-scorectx|$(all_off_spec) ENV:STRATA_POLY_SCORE_CONTEXT=30720")
+VARIANTS+=("61-on-scorectx|$WORKING_SPEC ENV:STRATA_POLY_SCORE_CONTEXT=30720")
+VARIANTS+=("62-eta-freeze|$(all_off_spec) ENV:STRATA_FREEZE_EXPERTS=1")
+VARIANTS+=("63-on-freeze|$WORKING_SPEC ENV:STRATA_FREEZE_EXPERTS=1")
+VARIANTS+=("64-eta-nodraft|$(all_off_spec) DEL:--draft-model")
+VARIANTS+=("65-on-nodraft|$WORKING_SPEC DEL:--draft-model")
+VARIANTS+=("66-on-lmq8off|$WORKING_SPEC ENV:STRATA_EAGLE_LM_Q8=0")
 VARIANTS+=("99-all-off-c|$(all_off_spec)")   # контроль дрейфа (stage2 гасится самой спекой эталона)
 
 # ------------------------- проверки -----------------------------------------
@@ -275,16 +286,41 @@ log "  результаты: $OUT_DIR"
 log "=============================================================="
 
 # ------------------------- работа с конфигом и сервером ---------------------
-apply_variant() {  # $1 = spec пар "ключ значение ..."
+apply_variant() {  # $1 = spec пар "ключ значение ...", plus ENV:KEY=VALUE / ENV:KEY= / DEL:--flag
   python3 - "$CONFIG" "$1" <<'PY'
 import json, os, sys
 path, spec = sys.argv[1], sys.argv[2].strip()
 cfg = json.load(open(path, encoding="utf-8-sig"))
 args = [str(a) for a in (cfg.get("args") or [])]
+env = cfg.get("env") or {}
+# Every variant starts from a clean env for the keys this sweep manages: keys left in the config
+# (or by a previous variant) must not leak into the baselines - the diag runs' stale TEACH/FREEZE
+# lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
+MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG")
+for k in list(env):
+    if k in MANAGED or k.startswith("STRATA_EAGLE_"):
+        del env[k]
 toks = spec.split()
 i = 0
 while i < len(toks):
-    k, v = toks[i], (toks[i + 1] if i + 1 < len(toks) else "")
+    k = toks[i]
+    if k.startswith("ENV:"):                 # ENV:NAME=value sets it; ENV:NAME= removes it
+        name, _, value = k[4:].partition("=")
+        if value:
+            env[name] = value
+        else:
+            env.pop(name, None)
+        i += 1
+        continue
+    if k.startswith("DEL:"):                 # DEL:--flag removes the flag and its value from args
+        name = k[4:]
+        idx = args.index(name) if name in args else -1
+        if idx >= 0:
+            has_val = idx + 1 < len(args) and not args[idx + 1].startswith("--")
+            del args[idx:(idx + 2 if has_val else idx + 1)]
+        i += 1
+        continue
+    v = (toks[i + 1] if i + 1 < len(toks) else "")
     idx = args.index(k) if k in args else -1
     if idx >= 0 and idx + 1 < len(args):
         args[idx + 1] = v
@@ -303,11 +339,13 @@ for k, v in force.items():
     else:
         args += [k, v]
 cfg["args"] = args
+cfg["env"] = env
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
 os.replace(tmp, path)
 print("  args: " + " ".join(args))
+print("  env:  " + (" ".join(f"{k}={v}" for k, v in sorted(env.items())) or "(пусто)"))
 PY
 }
 
