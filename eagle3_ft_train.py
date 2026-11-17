@@ -354,7 +354,7 @@ def main() -> int:
                 x_taps = torch.from_numpy(taps_b[start:start + length]).to(device)
                 pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                 # bf16-автокаст: веса в fp32, матмулы в bf16 - активации и логиты вдвое меньше
-                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                     logits = model(x_embs, x_taps, pos)              # [n, dvocab]
                     if tgt2draft is not None:
                         lab_np = np.asarray(tokens_b[start + 1:start + length + 1])
