@@ -139,10 +139,12 @@ python3 - "$CONFIG" <<'PYEOF'
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg.setdefault("env", {})["STRATA_POLY_STAGE2_DEBUG"] = "1"
-# the engine takes its env from the config, not from the caller: STRATA_EAGLE_* keys left by a previous
-# run would silently outlive their run (a stale TEACH rewrote the cache and left the round-1 anchor
-# stale, understating that run's own numbers) - clear them, then set what this run asks for
-for key in [k for k in cfg.get("env", {}) if k.startswith("STRATA_EAGLE_")]:
+# the engine takes its env from the config, not from the caller: STRATA_EAGLE_* keys and the freeze left by a
+# previous run would silently outlive their run (a stale TEACH rewrote the cache and left the round-1 anchor
+# stale; a stale FREEZE_EXPERTS blocks shrink_cache(), so the KV cannot grow and the request dies with "no VRAM
+# for the attention cache") - clear what this script manages, then set what this run asks for
+for key in [k for k in cfg.get("env", {})
+            if k.startswith("STRATA_EAGLE_") or k == "STRATA_FREEZE_EXPERTS"]:
     del cfg["env"][key]
 # DBG(eagle3): EAGLE_* переменные вызова идут в конфиг как STRATA_EAGLE_* - движок берёт env из
 # конфига, не из вызывающего.  EAGLE_TEACH=<шаг>, EAGLE_DUMP_ATT=1 (путь по умолчанию), EAGLE_TAPS=...
