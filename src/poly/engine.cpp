@@ -4498,7 +4498,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     if (const char* tv = std::getenv("STRATA_EAGLE_TEACH"); tv && eagle3_ && taps_host_) {
         const int stride = std::max(1, std::atoi(tv));
         const size_t e = (size_t) n_embd_;
-        long long hit = 0, tot = 0, self_hit = 0;
+        long long hit = 0, tot = 0, self_hit = 0, rec_hit = 0;
         // DBG(eagle3) STRATA_EAGLE_TEACH_PERM=1: the three taps in every order, on the same positions -
         // the only way to tell a wrong order from a wrong collapse (the fc self-check cannot)
         const bool perms = std::getenv("STRATA_EAGLE_TEACH_PERM") != nullptr;
@@ -4566,9 +4566,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             std::fprintf(stderr, "\n");
         }
         std::fprintf(stderr, "[eagle] TEACH: (emb p, h p) -> p+1 %lld of %lld (%.1f%%); (emb p+1, h p) -> p+2 "
-                             "%lld of %lld (%.1f%%)\n",
+                             "%lld of %lld (%.1f%%); the draft's own recursion -> p+2 %lld of %lld (%.1f%%)\n",
                      self_hit, tot, tot ? 100.0 * double(self_hit) / double(tot) : 0.0, hit, tot,
-                     tot ? 100.0 * double(hit) / double(tot) : 0.0);
+                     tot ? 100.0 * double(hit) / double(tot) : 0.0, rec_hit, tot,
+                     tot ? 100.0 * double(rec_hit) / double(tot) : 0.0);
     }
     std::free(taps_host_);
     taps_host_ = nullptr;
