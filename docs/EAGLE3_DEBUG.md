@@ -79,11 +79,12 @@ grep -rn "DBG(eagle3)" src/        # что удалять
   `00e09afe`: `Eagle3::stage_state(slot)` кладёт состояние строки в `hidden_[slot]` сразу
   после её инжекта; зовётся из window() и eval(). (Путь eval уже инжектировал сам — не
   хватало именно раскладки состояний.)
-- **Конвенция taps была неверной: `mix` (hc_head на каждом tap) вместо `mean`.** Официальная
-  реализация целевой модели (deepseek-ai/DeepSeek-V4-Flash-0731, inference/model.py) собирает
-  aux-состояния как `main_hiddens.append(h.mean(dim=2))` — **среднее по hyper-connection
-  потокам выхода слоя** (захват ПОСЛЕ `h = layer(...)`), а `hc_head` применяется **один раз**
-  в конце модели, никогда к tap. `eagle_check_taps.py` этого не мог поймать: он сравнивает fc
-  от разных свёрток с fc самого движка (circular). Дефолт исправлен на `mean` (mode 0);
-  `STRATA_EAGLE_TAPS=mix` остаётся как опция. Ожидание: TEACH X должен прыгнуть с 13% к
-  заявленным карточкой ~2.6-3.2 из 4 принятых.
+- **Конвенция taps: `mix` подтверждён по SGLang PR #33344 (EAGLE3 для этой пары моделей).**
+  Захват: `eagle3_aux_hidden_states.append(self.hc_head(completed, hc_head_fn, hc_head_scale,
+  hc_head_base))`, где `completed = hc_post(выход слоя)`. Это ровно наш mode 5. `h.mean(dim=2)`
+  из inference/model.py — путь **DSpark** (другой драфтер; SGLang прямо запрещает одновременный
+  захват DSpark и EAGLE3). Эксперимент с mean это подтвердил эмпирически: X упал 13%→6%.
+  Слои: PR «capture runs before layer(i), reading the output of layer (i-1)… capture at index
+  N+1» → ids [1,20,39] = выходы слоёв 1/20/39 — наш захват верен, сдвиг не нужен.
+  `eagle_check_taps.py` конвенцию выбрать не может (circular: fc разных свёрток против fc
+  движка на угаданной свёртке).
