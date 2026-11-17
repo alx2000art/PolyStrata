@@ -4508,6 +4508,9 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
 // draft round weighs most).
 void Engine::eagle_read_tail(const int32_t* tokens, int n) {
     ++eagle_reads_;   // the draft probes count a fresh phase from here (a prompt read or a continuation)
+    const bool dumping = std::getenv("STRATA_EAGLE_DUMP_TAPS") != nullptr;   // the row embeddings ride out
+    std::vector<float> dump_emb;
+    if (dumping) dump_emb.reserve((size_t) n * n_embd_);
     if (eagle3_ && taps_host_) {
         // the D2H rides at the tap layers are async: everything below reads the planes on the host
         // and the block is freed at the read's end - both need the copies landed.  A copy still in
@@ -4529,6 +4532,8 @@ void Engine::eagle_read_tail(const int32_t* tokens, int n) {
                                cudaMemcpyHostToDevice, cs(st_)),
                "the taps back");
             for (int t = 0; t < m; ++t) embed(tokens[p + t], emb_stage + (size_t) t * n_embd_);
+            if (dumping)   // the row embeddings for the tap dump (the head has no table of its own)
+                dump_emb.insert(dump_emb.end(), emb_stage, emb_stage + (size_t) m * n_embd_);
             ck(cudaMemcpyAsync(eagle3_->emb_dev(), emb_stage, size_t(m) * n_embd_ * sizeof(float),
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle embs");
             eagle3_->inject(dspark_taps_, eagle3_->emb_dev(), taps_pos0_ + p, m, st_);
@@ -4557,8 +4562,8 @@ void Engine::eagle_read_tail(const int32_t* tokens, int n) {
             if (!dump) {
                 std::fprintf(stderr, "strata-poly: the tap dump cannot be opened at %s\n", name);
             } else {
-                const uint32_t hdr[4] = {0x50415445u /* "ETAP" */, 1u, (uint32_t) n_embd_,
-                                         (uint32_t) dspark_taps_n_};
+                const uint32_t hdr[5] = {0x50415445u /* "ETAP" */, 2u, (uint32_t) n_embd_,
+                                         (uint32_t) dspark_taps_n_, 1u /* has_emb */};
                 std::fwrite(hdr, sizeof hdr, 1, dump);
                 std::fprintf(stderr, "strata-poly: the tap dump writes to %s\n", name);
             }
@@ -4570,7 +4575,7 @@ void Engine::eagle_read_tail(const int32_t* tokens, int n) {
             std::fwrite(&pos0, sizeof pos0, 1, dump);
             std::fwrite(&rows, sizeof rows, 1, dump);
             std::fwrite(tokens, sizeof(int32_t), (size_t) n, dump);
-            std::vector<uint16_t> row((size_t) dspark_taps_n_ * n_embd_);
+            std::vector<uint16_t> row((size_t) (dspark_taps_n_ + 1) * n_embd_);   // [embs | taps] bf16
             const auto bf16 = [](float f) {
                 uint32_t u;
                 std::memcpy(&u, &f, 4);
@@ -4578,9 +4583,13 @@ void Engine::eagle_read_tail(const int32_t* tokens, int n) {
                 return uint16_t(u >> 16);
             };
             for (int r = 0; r < n; ++r) {
+                if (dumping)
+                    for (int i = 0; i < n_embd_; ++i)
+                        row[(size_t) i] = bf16(dump_emb[(size_t) r * n_embd_ + i]);
                 for (int tp = 0; tp < dspark_taps_n_; ++tp) {
                     const float* src = taps_host_ + ((size_t) tp * taps_rows_ + (size_t) r) * n_embd_;
-                    for (int i = 0; i < n_embd_; ++i) row[(size_t) tp * n_embd_ + i] = bf16(src[i]);
+                    for (int i = 0; i < n_embd_; ++i)
+                        row[(size_t) (tp + 1) * n_embd_ + i] = bf16(src[i]);
                 }
                 std::fwrite(row.data(), sizeof(uint16_t), row.size(), dump);
             }

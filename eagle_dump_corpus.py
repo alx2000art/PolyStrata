@@ -39,12 +39,25 @@ def load_cfg(path: str) -> dict:
 def setup(path: str, dump_dir: str) -> None:
     cfg = load_cfg(path)
     cfg.setdefault("env", {})["STRATA_EAGLE_DUMP_TAPS"] = os.path.abspath(os.path.expanduser(dump_dir))
+    # each dump chunk must be read from position 0 as its own conversation: a reused template prefix
+    # leaves the block without the rows its taps attended, and the trainer's causal attention would
+    # differ from the engine's at every row
+    args = [str(a) for a in (cfg.get("args") or [])]
+    for k, v in (("--conversation-cache-mib", "0"), ("--prompt-cache", "0")):
+        idx = args.index(k) if k in args else -1
+        if idx >= 0 and idx + 1 < len(args):
+            args[idx + 1] = v
+        else:
+            args += [k, v]
+    cfg["args"] = args
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
     print(f"env: STRATA_EAGLE_DUMP_TAPS={cfg['env']['STRATA_EAGLE_DUMP_TAPS']} -> {path}")
+    print("args: кэши разговоров и промптов выключены (блоки дампа самодостаточны)")
     print("перезапустите сервер (./setup.sh) и запустите этот скрипт без --setup")
+    print("после дампа верните кэши (продовое значение) обычной правкой конфига")
 
 
 def chunks(lines, chars: int):
