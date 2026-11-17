@@ -205,10 +205,35 @@ log "-- done:"
 grep "\[strata\] done:" "$OUT_DIR/server.log.last" 2>/dev/null | tail -1 | sed 's/^/   /'
 log "-- промпт и ответ:"
 log "   промпт: $PROMPT_CHARS символов; ответ: $OUT_DIR/diag-run.txt"
-log "-- последние две строки ответа (без [elapsed]):"
+log "-- семантика ответа (порча скоров ловится как повторы и языковой дрейф):"
 if [[ "$(grep -v '^\[elapsed ' "$OUT_DIR/diag-run.txt" 2>/dev/null | grep -c .)" == "0" ]]; then
     log "   ОТВЕТ ПУСТ — движок ничего не сгенерировал"
 else
     grep -v '^\[elapsed ' "$OUT_DIR/diag-run.txt" | tail -2 | cut -c1-200 | sed 's/^/   /'
 fi
+python3 - "$OUT_DIR/diag-run.txt" <<'PY'
+import collections, re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+text = re.sub(r"\n\[elapsed \d+ s\]\n?$", "", text)
+words = re.findall(r"\w+", text.lower())
+cyr = sum(1 for ch in text if "\u0400" <= ch <= "\u04ff")
+lat = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+lines = [l.strip() for l in text.splitlines() if l.strip()]
+grams = collections.Counter(tuple(words[i:i + 8]) for i in range(max(0, len(words) - 7)))
+top_n = grams.most_common(1)[0][1] if grams else 0
+line_rep = max((lines.count(l) for l in set(lines)), default=0)
+letters = cyr + lat
+print(f"   слов {len(words)}, строк {len(lines)}, кириллица {cyr / max(letters, 1):.0%}, "
+      f"самая частая 8-грамма x{top_n}, самая частая строка x{line_rep}")
+bad = []
+if not words:
+    bad.append("ОТВЕТ ПУСТ")
+if top_n >= 4:
+    bad.append(f"ПОВТОР 8-граммы x{top_n}")
+if line_rep >= 3:
+    bad.append(f"ПОВТОР строки x{line_rep}")
+if letters > 80 and cyr < 0.4 * letters:
+    bad.append("ЯЗЫКОВОЙ ДРЕЙФ (латиница доминирует в русском ответе)")
+print("   ВЕРДИКТ: " + ("; ".join(bad) if bad else "чисто"))
+PY
 log "готово. ответ: $OUT_DIR/diag-run.txt, лог: $OUT_DIR/server.log.last"
