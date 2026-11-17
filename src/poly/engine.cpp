@@ -4146,9 +4146,14 @@ void Engine::tap_capture(int il, int n) {
     // (one stream as it lies).  A tap is n_embd values a row either way.
     if (eagle_taps_ < 0) {
         const char* v = std::getenv("STRATA_EAGLE_TAPS");
-        eagle_taps_ = 5;   // mix, the default: SGLang puts every captured state through the model's own hc_head
-        if (v && (!strcmp(v, "mix") || !strcmp(v, "ffn") || !strcmp(v, "attn") || !strcmp(v, "layerffn") ||
-                  !strcmp(v, "layerattn")))
+        // mean, the default: the target's own code (deepseek-ai/DeepSeek-V4-Flash-0731, inference/model.py)
+        // collects its aux states as `main_hiddens.append(h.mean(dim=2))` - the mean over the hyper-
+        // connection streams of the layer's OUTPUT, with hc_head applied once at the top and never to a
+        // tap.  The mix mode (hc_head per tap) was a guess; with it the head's own teacher metric sat at
+        // 13% where the checkpoint's card promises ~3 of 4 accepted tokens.
+        eagle_taps_ = 0;
+        if (v && (!strcmp(v, "mix") || !strcmp(v, "ffn") || !strcmp(v, "attn") ||
+                  !strcmp(v, "layerffn") || !strcmp(v, "layerattn")))
             eagle_taps_ = 5;   // the architecture's own collapse (DeepSeek4 picks the weights by name)
         else if (v && !strcmp(v, "mean")) eagle_taps_ = 0;
         else if (v && v[0] == 's' && v[1] >= '0' && v[1] <= char('0' + streams() - 1)) eagle_taps_ = 1 + (v[1] - '0');
