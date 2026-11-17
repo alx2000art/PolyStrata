@@ -153,6 +153,11 @@ for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE
         if name == "DUMP_ATT" and val == "1":
             val = os.path.expanduser("~/eagle_att.bin")
         cfg.setdefault("env", {})["STRATA_EAGLE_" + name] = val
+# STRATA_FREEZE_EXPERTS: a frozen answer's expert split is the first token's - the route, the sums and
+# so the whole trajectory are a function of the request alone.  Benchmarks A/B against each other only
+# with it (the unfrozen decode's trajectory changes run to run, and the drafter's acceptance with it).
+if os.environ.get("FREEZE_EXPERTS"):
+    cfg.setdefault("env", {})["STRATA_FREEZE_EXPERTS"] = os.environ["FREEZE_EXPERTS"]
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
