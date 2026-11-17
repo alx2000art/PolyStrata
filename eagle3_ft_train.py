@@ -154,16 +154,16 @@ class Eagle3Head(nn.Module):
         v = self.wv(x).view(T, self.n_kv, self.hd)
         q = rope_apply(q, pos, self.rope)
         k = rope_apply(k, pos, self.rope)
-        # GQA: голова h -> kvh = h // (n_head/n_kv); смежные группы (проверено check_attn)
+        # GQA: голова h -> kvh = h // per (смежные группы, проверено check_attn);
+        # scores каждой строки против ВСЕХ ключей [T_key]: [Tq, n_kv, per, Tk]
         per = self.n_head // self.n_kv
         qg = q.view(T, self.n_kv, per, self.hd)
-        k2 = k.unsqueeze(2)                                    # [T, n_kv, 1, hd]
-        v2 = v.unsqueeze(2)
-        att = (qg * k2).sum(-1) / math.sqrt(self.hd)           # [T, n_kv, per]
+        att = torch.einsum("tqph,skh->tqps", qg, k) / math.sqrt(self.hd)   # [Tq, n_kv, per, Tk]
         i = torch.arange(T, device=embs.device)
-        causal = (i.view(-1, 1) >= i.view(1, -1)).view(T, 1, T)
+        causal = (i.view(-1, 1, 1, 1) >= i.view(1, 1, 1, -1))              # [Tq, 1, 1, Tk]
         w = torch.softmax(att.masked_fill(~causal, float("-inf")), dim=-1)
-        o = (w.unsqueeze(-1) * v2.unsqueeze(1)).sum(2).reshape(T, self.n_head * self.hd)
+        o = torch.einsum("tqps,skh->tqph", w, v)                             # [Tq, n_kv, per, hd]
+        o = o.reshape(T, self.n_head * self.hd)
         hidden = h + self.wo(o)
         mlp = self.down(F.silu(self.gate(rmsnorm(hidden, self.ln2.weight, self.eps))) * self.up(rmsnorm(hidden, self.ln2.weight, self.eps)))
         hidden = hidden + mlp
@@ -198,7 +198,7 @@ def load_safetensors(path: str) -> dict:
         # минимальный ридер: заголовок u32 len + json + сырые блоки
         import numpy as np
         with open(path, "rb") as f:
-            n = struct.unpack("<I", f.read(4))[0]
+            n = struct.unpack("<Q", f.read(8))[0]      # длина заголовка - u64 в safetensors
             hdr = json.loads(f.read(n))
         out = {}
         base = 8 + n
@@ -218,11 +218,12 @@ def load_safetensors(path: str) -> dict:
 def load_model(st_path: str, head_cfg: dict, eps: float, device: str) -> tuple:
     sd = load_safetensors(st_path)
     fcw = sd["fc.weight"]
-    n_embd = fcw.shape[0]                        # [E, 3E] или [3E, E]?
+    n_embd = fcw.shape[0]                        # [E, 3E]
     taps_n = fcw.shape[1] // n_embd
+    hd = int(head_cfg.get("head_dim", 64))
     wq = sd["midlayer.self_attn.q_proj.weight"]
-    n_head = wq.shape[0] // 64
-    n_kv = sd["midlayer.self_attn.k_proj.weight"].shape[0] // 64
+    n_head = wq.shape[0] // hd
+    n_kv = sd["midlayer.self_attn.k_proj.weight"].shape[0] // hd
     n_ff = sd["midlayer.mlp.gate_proj.weight"].shape[0]
     dvocab = sd["lm_head.weight"].shape[0]
     # rope: параметры головы (eagle config); corr-границы - формулой из make_rope
@@ -236,7 +237,7 @@ def load_model(st_path: str, head_cfg: dict, eps: float, device: str) -> tuple:
     corr = lambda rot: n_rot * math.log(n_ctx_orig / (rot * 2 * math.pi)) / (2 * math.log(base))  # noqa: E731
     rope = {"base": base, "freq_scale": 1.0 / factor, "ext_factor": ext,
             "corr0": math.floor(corr(beta_fast)), "corr1": math.ceil(corr(beta_slow))}
-    m = Eagle3Head(n_embd, taps_n, n_head, n_kv, 64, n_ff, dvocab, eps, rope).to(device)
+    m = Eagle3Head(n_embd, taps_n, n_head, n_kv, hd, n_ff, dvocab, eps, rope).to(device)
     with torch.no_grad():
         for st_name, (mod, par) in ST_MAP.items():
             w = sd[st_name]
@@ -278,6 +279,19 @@ def main() -> int:
     if t2d is not None:
         t2d_t = (torch.as_tensor(np.asarray(t2d).astype(np.int32)) != 0)
         print(f"t2d: {int(t2d_t.sum())} из {len(t2d_t)} target-токенов в draft-словаре")
+    # обратная карта меток: target -> draft строится из d2t (target = draft + d2t[draft]) - иначе CE
+    # сравнивает id целевого словаря с классами draft-словаря (разные пространства)
+    tgt2draft = None
+    d2t = meta.get("d2t")
+    if d2t is not None:
+        d2t_np = np.asarray(d2t).astype(np.int64)
+        span = int((d2t_np + np.arange(len(d2t_np))).max()) + 1
+        tgt2draft = np.full(span, -100, dtype=np.int64)
+        for draft_i, off in enumerate(d2t_np):
+            tgt = draft_i + int(off)
+            if 0 <= tgt < span and tgt2draft[tgt] == -100:
+                tgt2draft[tgt] = draft_i
+        print(f"d2t: {int((tgt2draft >= 0).sum())} target-токенов имеют draft-id")
 
     blocks = []
     for f in sorted(glob.glob(os.path.join(args.dump, "taps-*.bin"))):
@@ -323,13 +337,15 @@ def main() -> int:
             x_taps = torch.from_numpy(taps[:n]).to(device)
             pos = torch.arange(pos0, pos0 + n, device=device)
             logits = model(x_embs, x_taps, pos)                      # [n, dvocab]
-            lab = torch.from_numpy(np.asarray(tokens[1:n + 1])).to(device)
-            if t2d_t is not None:
-                keep = t2d_t[lab]
-                lab_d = torch.where(keep, lab, torch.zeros_like(lab))
-                loss = F.cross_entropy(logits.float(), lab_d, ignore_index=-100, reduction="sum") \
-                    / max(int(keep.sum()), 1)
+            lab_np = np.asarray(tokens[1:n + 1])
+            if tgt2draft is not None:
+                lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)   # -100: вне draft-словаря
+                keep = (lab_d >= 0)
+                lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
+                loss = F.cross_entropy(logits.float(), lab_d, ignore_index=-100,
+                                       reduction="sum") / max(int(keep.sum()), 1)
             else:
+                lab = torch.from_numpy(lab_np.astype(np.int64)).to(device)
                 loss = F.cross_entropy(logits.float(), lab, reduction="mean")
             opt.zero_grad(set_to_none=True)
             loss.backward()
