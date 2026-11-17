@@ -202,7 +202,8 @@ def load_safetensors(path: str) -> dict:
             hdr = json.loads(f.read(n))
         out = {}
         base = 8 + n
-        dt = {"BF16": torch.bfloat16, "F32": torch.float32, "F16": torch.float16}
+        dt = {"BF16": torch.bfloat16, "F32": torch.float32, "F16": torch.float16,
+              "I64": torch.int64, "I32": torch.int32, "F64": torch.float64, "BOOL": torch.bool}
         with open(path, "rb") as f:
             for name, ti in hdr.items():
                 if name == "__metadata__":
