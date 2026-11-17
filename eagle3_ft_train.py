@@ -43,27 +43,38 @@ except ImportError:
 MAGIC = 0x50415445  # "ETAP"
 
 
-def iter_blocks(path: str):
-    """Блоки дампа v2: (pos0, tokens int32[n], embs f32[n, E], taps f32[n, K, E])."""
+def scan_blocks(paths):
+    """Метаданные блоков без чтения payload: (path, offset, pos0, n, tokens).  Данные ленивые."""
+    out, n_embd, taps_n = [], 0, 0
+    for path in paths:
+        with open(path, "rb") as f:
+            magic, ver, n_embd, taps_n, has_emb = struct.unpack("<5I", f.read(20))
+            if magic != MAGIC or ver != 2 or has_emb != 1:
+                raise SystemExit(f"{path}: не дамп v2 (magic={magic:#x}, ver={ver})")
+            while True:
+                off = f.tell()
+                head = f.read(12)
+                if len(head) < 12:
+                    break
+                pos0, n = struct.unpack("<QI", head)
+                if n == 0:
+                    break
+                tokens = np.frombuffer(f.read(4 * n), dtype="<i4").copy()
+                f.seek(2 * n * (taps_n + 1) * n_embd, 1)
+                out.append((path, off, pos0, n, tokens))
+    return out, n_embd, taps_n
+
+
+def load_block(path: str, off: int, n: int, n_embd: int, taps_n: int):
+    """Один блок с диска: (pos0, tokens, embs f32[n, E], taps f32[n, K, E])."""
     with open(path, "rb") as f:
-        hdr = f.read(20)
-        magic, ver, n_embd, taps_n, has_emb = struct.unpack("<5I", hdr)
-        if magic != MAGIC or ver != 2 or has_emb != 1:
-            raise SystemExit(f"{path}: не дамп v2 (magic={magic:#x}, ver={ver}, has_emb={has_emb})")
-        while True:
-            head = f.read(12)
-            if len(head) < 12:
-                return
-            pos0, n = struct.unpack("<QI", head)
-            if n == 0:
-                return
-            tokens = np.frombuffer(f.read(4 * n), dtype="<i4")
-            rows = np.frombuffer(f.read(2 * n * (taps_n + 1) * n_embd), dtype="<u2") \
-                .reshape(n, taps_n + 1, n_embd)
-            embs = (rows[:, 0, :].astype(np.uint32) << 16).view(np.float32) \
-                if False else _bf16_to_f32(rows[:, 0, :])
-            taps = _bf16_to_f32(rows[:, 1:, :])
-            yield pos0, tokens, embs.astype(np.float32), taps.astype(np.float32)
+        f.seek(off)
+        f.read(12)
+        tokens = np.frombuffer(f.read(4 * n), dtype="<i4")
+        rows = np.frombuffer(f.read(2 * n * (taps_n + 1) * n_embd), dtype="<u2")             .reshape(n, taps_n + 1, n_embd)
+    embs = _bf16_to_f32(rows[:, 0, :]).astype(np.float32)
+    taps = _bf16_to_f32(rows[:, 1:, :]).astype(np.float32)
+    return pos0, tokens, embs, taps
 
 
 def _bf16_to_f32(a: np.ndarray) -> np.ndarray:
@@ -294,22 +305,17 @@ def main() -> int:
                 tgt2draft[tgt] = draft_i
         print(f"d2t: {int((tgt2draft >= 0).sum())} target-токенов имеют draft-id")
 
-    blocks = []
-    for f in sorted(glob.glob(os.path.join(args.dump, "taps-*.bin"))):
-        try:
-            for pos0, tokens, embs, taps in iter_blocks(f):
-                blocks.append((pos0, tokens, embs, taps))
-        except Exception as e:  # noqa: BLE001 - битый блок не роняет остальные
-            print(f"  ! {f}: {e}", file=sys.stderr)
+    files = sorted(glob.glob(os.path.join(args.dump, "taps-*.bin")))
+    blocks, _, _ = scan_blocks(files)
     if not blocks:
         print("нет блоков дампа", file=sys.stderr)
         return 1
-    rows_total = sum(len(t) for _, t, _, _ in blocks)
-    print(f"блоков {len(blocks)}, строк {rows_total}")
+    rows_total = sum(n for _, _, _, n, _ in blocks)
+    print(f"блоков {len(blocks)}, строк {rows_total} (данные читаются с диска на каждом шаге)")
 
     if args.coverage:
         cov = tot = 0
-        for _, tokens, _, _ in blocks:
+        for _, _, _, n, tokens in blocks:
             if t2d_t is None:
                 cov += len(tokens) - 1
                 tot += len(tokens) - 1
@@ -330,10 +336,14 @@ def main() -> int:
         rng.shuffle(order)
         tot_loss, tot_rows = 0.0, 0
         for bi in order:
-            pos0, tokens, embs, taps = blocks[bi]
-            n = min(len(tokens) - 1, args.max_rows)
+            path, off, pos0, n_rows, tokens = blocks[bi]
+            n = min(n_rows - 1, args.max_rows)
             if n < 8:
                 continue
+            pos0, tokens_b, embs, taps = load_block(path, off, min(n_rows, args.max_rows + 1),
+                                                    meta["n_embd"], meta["taps_n"])
+            tokens = tokens_b
+            n = min(len(tokens) - 1, args.max_rows)
             x_embs = torch.from_numpy(embs[:n]).to(device)
             x_taps = torch.from_numpy(taps[:n]).to(device)
             pos = torch.arange(pos0, pos0 + n, device=device)
