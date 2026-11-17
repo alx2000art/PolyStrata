@@ -4286,10 +4286,16 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             }
             if (turn && c + 1 < n_calls && !(*turn)(c + 1, n_calls)) {
                 behind.wait();
+                std::free(taps_host_);
+                taps_host_ = nullptr;
                 return false;
             }
         }
         behind.wait();
+        // the read's end is the read's end on this path too: the injection below used to live only on the
+        // long read's path, and every prompt of one call's rows (and every read's last short chunk) left
+        // the drafter's cache without its rows - the decode then attended rows that were never written
+        eagle_read_tail(tokens, n);
         return true;
     }
     widen_stage();
@@ -4370,6 +4376,8 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                 shared_ahead_ = false;
                 r_ = r0;
                 pos_ = pos0;
+                std::free(taps_host_);
+                taps_host_ = nullptr;
                 return false;
             }
             for (int c = 0; c < n_calls; ++c) {
@@ -4464,7 +4472,32 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                          folded);
     }
     // DSpark/EAGLE: the read's rows' taps rode to the host (the layer-major order); the drafter's
-    // cache rows fill in batches here - the decode's draft rounds then attend them.
+    // cache rows fill in batches here - the decode's draft rounds then attend them.  Both read paths
+    // (the staged one and the early return above) end in the same tail.
+    eagle_read_tail(tokens, n);
+    r_ = r0;
+    pos_ = pos0;
+    if (next_) {
+        next_->pass_ = host ? h_res_ : h_pass_;
+        next_->pass_at_ = pos0;
+        std::vector<Mark> on(marks, marks + n_marks);   // the next card's part of each state is after this one's
+        for (Mark& m : on)
+            if (m.state) m.state += card_state_bytes();
+        if (!next_->read(tokens, n, on.data(), n_marks, asked)) return false;
+    }
+    pos_ = pos0 + n;
+    stats_.tokens += n;
+    return true;
+}
+
+// The read's end, both paths': the taps rode to the host during the read (the layer-major order), and
+// here they fill the drafter's cache in batches - the decode's draft rounds then attend them.  This used
+// to live only at the staged read's tail, and the early path (a read of one call's rows: every short
+// prompt, and every long read's last short chunk) returned before it - the cache kept only the chunks
+// that filled whole calls, the decode attended rows that were never written, and the head's answers
+// stopped depending on the context (the last chunk is the decode's nearest context, the very rows a
+// draft round weighs most).
+void Engine::eagle_read_tail(const int32_t* tokens, int n) {
     if (eagle3_ && taps_host_) {
         // the D2H rides at the tap layers are async: everything below reads the planes on the host
         // and the block is freed at the read's end - both need the copies landed.  A copy still in
@@ -4488,7 +4521,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             for (int t = 0; t < m; ++t) embed(tokens[p + t], emb_stage + (size_t) t * n_embd_);
             ck(cudaMemcpyAsync(eagle3_->emb_dev(), emb_stage, size_t(m) * n_embd_ * sizeof(float),
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle embs");
-            eagle3_->inject(dspark_taps_, eagle3_->emb_dev(), pos0 + p, m, st_);
+            eagle3_->inject(dspark_taps_, eagle3_->emb_dev(), taps_pos0_ + p, m, st_);
         }
         std::free(emb_stage);
     }
@@ -4573,19 +4606,6 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     }
     std::free(taps_host_);
     taps_host_ = nullptr;
-    r_ = r0;
-    pos_ = pos0;
-    if (next_) {
-        next_->pass_ = host ? h_res_ : h_pass_;
-        next_->pass_at_ = pos0;
-        std::vector<Mark> on(marks, marks + n_marks);   // the next card's part of each state is after this one's
-        for (Mark& m : on)
-            if (m.state) m.state += card_state_bytes();
-        if (!next_->read(tokens, n, on.data(), n_marks, asked)) return false;
-    }
-    pos_ = pos0 + n;
-    stats_.tokens += n;
-    return true;
 }
 
 // The tokens of a window of t that leave the recurrent state as it is after them: each but the last when there

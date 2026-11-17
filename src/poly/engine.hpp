@@ -887,6 +887,11 @@ protected:
     int tap_row_slot_ = -1;                        ///< which tap layer tap_row_ counts
     float* eagle_emb_ = nullptr;                   ///< the draft token's embedding (the host)
     void tap_capture(int il, int n);               ///< the tap state at a tap layer's tail (+ the read's D2H)
+    void eagle_read_tail(const int32_t* tokens, int n);   ///< the read's end: the taps injected into the
+                                                   ///< drafter's cache - both read paths call it (the
+                                                   ///< short one used to skip the block, so every prompt
+                                                   ///< of one call's rows left the head's cache without
+                                                   ///< its last, decode-nearest rows)
     virtual void tap_state_mix(int, int, float*, int64_t) {}   ///< the architecture's own collapse of its
                                                                ///< streams (DeepSeek4: the output head's mix)
     virtual void eager_head_mix() {}               ///< load the stream-mix weights at setup, before any
