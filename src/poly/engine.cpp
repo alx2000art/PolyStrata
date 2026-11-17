@@ -41,6 +41,7 @@ static const bool g_pool_swap_ = [] {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <new>
@@ -4533,6 +4534,61 @@ void Engine::eagle_read_tail(const int32_t* tokens, int n) {
             eagle3_->inject(dspark_taps_, eagle3_->emb_dev(), taps_pos0_ + p, m, st_);
         }
         std::free(emb_stage);
+    }
+    // STRATA_EAGLE_DUMP_TAPS=<dir>: this read's rows as one training block of the head's fine-tune -
+    // {pos0, n, tokens[n], taps[n][3][n_embd] bf16}.  The taps ride in the host's [tap][row] planes;
+    // the block writes them row-major ([row][tap][embd], the fc's own order).  The inject above synced
+    // the stream, so the planes are settled.  The label of row r is tokens[r + 1]; a block's last row
+    // has none (the trainer drops it).  ~24.6 KB a row: 1M tokens ~ 25 GB.
+    if (const char* dd = std::getenv("STRATA_EAGLE_DUMP_TAPS"); dd && *dd && taps_host_ && n > 0) {
+        static FILE* dump = nullptr;
+        if (!dump) {
+            char name[4096];
+            const std::time_t now = std::time(nullptr);
+            std::tm lt{};
+#ifdef _WIN32
+            localtime_s(&lt, &now);
+#else
+            localtime_r(&now, &lt);
+#endif
+            std::snprintf(name, sizeof name, "%s/taps-%04d%02d%02d-%02d%02d%02d.bin", dd, lt.tm_year + 1900,
+                          lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+            dump = std::fopen(name, "wb");
+            if (!dump) {
+                std::fprintf(stderr, "strata-poly: the tap dump cannot be opened at %s\n", name);
+            } else {
+                const uint32_t hdr[4] = {0x50415445u /* "ETAP" */, 1u, (uint32_t) n_embd_,
+                                         (uint32_t) dspark_taps_n_};
+                std::fwrite(hdr, sizeof hdr, 1, dump);
+                std::fprintf(stderr, "strata-poly: the tap dump writes to %s\n", name);
+            }
+        }
+        if (dump) {
+            static long long blocks = 0;
+            const uint64_t pos0 = (uint64_t) taps_pos0_;
+            const uint32_t rows = (uint32_t) n;
+            std::fwrite(&pos0, sizeof pos0, 1, dump);
+            std::fwrite(&rows, sizeof rows, 1, dump);
+            std::fwrite(tokens, sizeof(int32_t), (size_t) n, dump);
+            std::vector<uint16_t> row((size_t) dspark_taps_n_ * n_embd_);
+            const auto bf16 = [](float f) {
+                uint32_t u;
+                std::memcpy(&u, &f, 4);
+                u += 0x7FFFu + ((u >> 16) & 1u);   // round to nearest even
+                return uint16_t(u >> 16);
+            };
+            for (int r = 0; r < n; ++r) {
+                for (int tp = 0; tp < dspark_taps_n_; ++tp) {
+                    const float* src = taps_host_ + ((size_t) tp * taps_rows_ + (size_t) r) * n_embd_;
+                    for (int i = 0; i < n_embd_; ++i) row[(size_t) tp * n_embd_ + i] = bf16(src[i]);
+                }
+                std::fwrite(row.data(), sizeof(uint16_t), row.size(), dump);
+            }
+            std::fflush(dump);
+            ++blocks;
+            std::fprintf(stderr, "[eagle] tap dump: block %lld, %d rows at pos %lld\n", blocks, n,
+                         (long long) taps_pos0_);
+        }
     }
     // DBG(eagle3) STRATA_EAGLE_TEACH=<stride>: the head is asked on positions whose answer the prompt
     // already holds - state at p and the embedding of p+1 must name token p+2.  A real accuracy figure
