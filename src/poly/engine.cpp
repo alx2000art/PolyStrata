@@ -4194,8 +4194,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
             ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
             { static long long inj_calls = 0; if (++inj_calls == 1 || inj_calls % 100 == 0)
-                std::fprintf(stderr, "[eagle] decode injects run: call %lld at pos %lld
-", inj_calls, (long long) pos_); }
+                std::fprintf(stderr, "[eagle] decode injects run: call %lld at pos %lld\n", inj_calls, (long long) pos_); }
             eagle3_->inject(dspark_taps_ + size_t(t) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(), pos_ + t, 1, st_);
             eagle3_->stage_state(t, st_);
             eagle_dump_decode_row(pos_ + t, tokens[t]);
@@ -4805,8 +4804,7 @@ void Engine::window(const int32_t* tokens, int t) {
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
             ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
             { static long long inj_calls = 0; if (++inj_calls == 1 || inj_calls % 100 == 0)
-                std::fprintf(stderr, "[eagle] decode injects run: call %lld at pos %lld
-", inj_calls, (long long) pos_); }
+                std::fprintf(stderr, "[eagle] decode injects run: call %lld at pos %lld\n", inj_calls, (long long) pos_); }
             eagle3_->inject(dspark_taps_ + size_t(j) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(),
                             pos_ + j, 1, st_);
             eagle3_->stage_state(j, st_);
