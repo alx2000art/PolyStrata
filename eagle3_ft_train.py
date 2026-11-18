@@ -43,6 +43,17 @@ except ImportError:
 MAGIC = 0x50415445  # "ETAP"
 
 
+def map_labels(tokens: "np.ndarray", tgt2draft):
+    """target-токены -> draft-классы; вне d2t-таблицы (хвост словаря таргета) и вне словаря: -100.
+    Без t2d/d2t метки - сами target-id (сравнение в CE пространства не путается: dvocab = словарь)."""
+    if tgt2draft is None:
+        return tokens.astype(np.int64)
+    lab = np.full(tokens.shape, -100, dtype=np.int64)
+    ok = (tokens >= 0) & (tokens < len(tgt2draft))
+    lab[ok] = tgt2draft[tokens[ok]]
+    return lab
+
+
 def scan_blocks(paths):
     """Метаданные блоков без чтения payload: (path, offset, pos0, n, tokens).  Данные ленивые."""
     out, n_embd, taps_n = [], 0, 0
@@ -375,9 +386,7 @@ def main() -> int:
                         # нога 1: (emb p, h p) -> p+1 - строка p несёт и embs[p], и taps[p]
                         logits, _ = model(torch.from_numpy(embs_b[start:start + length]).to(device),
                                        torch.from_numpy(taps_b[start:start + length]).to(device), pos)
-                    lab1 = (tgt2draft[np.asarray(tokens_b[start + 1:start + length + 1])]
-                            if tgt2draft is not None else
-                            np.asarray(tokens_b[start + 1:start + length + 1]).astype(np.int64))
+                    lab1 = map_labels(np.asarray(tokens_b[start + 1:start + length + 1]), tgt2draft)
                     pred = logits.argmax(-1).cpu().numpy()
                     ok = (lab1 >= 0) & (pred == lab1)
                     tot1 += int((lab1 >= 0).sum())
@@ -386,9 +395,7 @@ def main() -> int:
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                         logits2, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
                                         torch.from_numpy(taps_b[start:start + length]).to(device), pos)
-                    lab2 = (tgt2draft[np.asarray(tokens_b[start + 2:start + length + 2])]
-                            if tgt2draft is not None else
-                            np.asarray(tokens_b[start + 2:start + length + 2]).astype(np.int64))
+                    lab2 = map_labels(np.asarray(tokens_b[start + 2:start + length + 2]), tgt2draft)
                     pred2 = logits2.argmax(-1).cpu().numpy()
                     ok2 = (lab2 >= 0) & (pred2 == lab2)
                     tot2 += int((lab2 >= 0).sum())
@@ -429,8 +436,8 @@ def main() -> int:
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                     logits, hid = model(x_embs, x_taps, pos)         # [n, dvocab], [n, E]
                     if tgt2draft is not None:
-                        lab_np = np.asarray(tokens_b[start + 1:start + length + 1])
-                        lab_d = torch.from_numpy(tgt2draft[lab_np]).to(device)  # -100: вне словаря
+                        lab_d = torch.from_numpy(map_labels(np.asarray(tokens_b[start + 1:start + length + 1]),
+                                                            tgt2draft)).to(device)  # -100: вне словаря
                         keep = (lab_d >= 0)
                         lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
                         # чанковый CE: fp32-временники логитов держим по куску строк, не целиком
