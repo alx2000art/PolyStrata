@@ -226,6 +226,17 @@ def main() -> int:
                 print(f"  пара {i:2d}: движок {theta_eng[i]:+.4f}  наш {theta_ours[i]:+.4f}  "
                       f"diff {d:+.4f} (в периодах {d / (2 * np.pi):+.4f})")
 
+    # движок интерливит строки q/k при загрузке (w_rope: 2i<-i, 2i+1<-i+32): разворачиваем и сверяем
+    if "q" in eng and "k" in eng:
+        engq = np.asarray(eng["q"], dtype=np.float64).reshape(model.n_head, model.hd)
+        engk = np.asarray(eng["k"], dtype=np.float64).reshape(model.n_kv, model.hd)
+        q_un = np.concatenate((engq[:, 0::2], engq[:, 1::2]), axis=1).reshape(-1)
+        k_un = np.concatenate((engk[:, 0::2], engk[:, 1::2]), axis=1).reshape(-1)
+        for name, a in (("q", q_un), ("k", k_un)):
+            b = np.asarray(got[name], dtype=np.float64)
+            c = float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-12))
+            print(f"  {name} (развёрнутая перестановка движка) cos={c:+.4f}")
+
     print("\nсверка стадий движка с нашей математикой (входы - сами стадии движка):")
     with torch.no_grad():
         t_eng = torch.from_numpy(np.asarray(eng["taps"], dtype=np.float32)[None]).to(device)
