@@ -289,6 +289,7 @@ void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     o_ = (float*) eagle_alloc(size_t(rows_) * n_head_ * head_dim_ * sizeof(float), "the eagle3 o");
     o_out_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 o proj");
     att_dump_ = (float*) eagle_alloc(size_t(n_head_) * head_dim_ * sizeof(float), "the eagle3 att dump");
+    fc_state_ = (float*) eagle_alloc(size_t(n_embd_) * sizeof(float), "the eagle3 fc state");
     normed_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 normed");
     normed_q8_ = eagle_alloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 normed q8_1");
     cat_f32_ = (float*) eagle_alloc(size_t(rows_) * 2 * n_embd_ * sizeof(float), "the eagle3 cat fp32");
@@ -423,6 +424,11 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         ck(cudaMemcpy(fc_dump.data(), hidden_ + drow * n_embd_, fc_dump.size() * sizeof(float),
                       cudaMemcpyDeviceToHost), "eagle dump fc");
     }
+    // the round's first step's state: fc(taps) as it is, before the midlayer adds the residual
+    if (fc_state_)
+        ck(cudaMemcpyAsync(fc_state_, hidden_ + size_t(n - 1) * n_embd_, size_t(n_embd_) * sizeof(float),
+                           cudaMemcpyDeviceToDevice, cs(stream)),
+           "the eagle fc state");
     dump_att_ = dumping;
     dump_row_ = drow;
     midlayer(emb_dev, pos, n, stream);
@@ -492,6 +498,12 @@ void Eagle3::keep_state(int n, void* stream) {
     ck(cudaMemcpyAsync(hidden_, hidden_ + size_t(n - 1) * n_embd_, size_t(n_embd_) * sizeof(float),
                        cudaMemcpyDeviceToDevice, cs(stream)),
        "the eagle's kept recursion state");
+}
+
+void Eagle3::restore_fc(void* stream) {
+    if (!fc_state_) return;
+    ck(cudaMemcpyAsync(hidden_, fc_state_, size_t(n_embd_) * sizeof(float), cudaMemcpyDeviceToDevice, cs(stream)),
+       "the eagle's fc state back");
 }
 
 void Eagle3::stage_state(int slot, void* stream) {

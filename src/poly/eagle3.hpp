@@ -41,6 +41,9 @@ public:
     // The cache holds rows [0, pos) already; a round's rejected guesses leave theirs behind, so every
     // round starts the draft steps at the model's own position again.
     void rewind(int64_t pos) { cache_pos_ = pos; }
+    /// The round's first step's state: the head's own fc(taps) of the row the round starts from,
+    /// preserved by inject() before the midlayer overwrote the residual (the reference's input).
+    void restore_fc(void* stream);
     int dvocab() const { return dvocab_; }
     // The draft id's TARGET id: the file's table is the OFFSET from the draft id to the target id,
     // not the target id itself - both references (SpecForge's eagle3 model and SafeAILab's cnets.py)
@@ -110,6 +113,10 @@ private:
     bool cat_he_ = false;         // STRATA_EAGLE_CAT=he: the midlayer's input is [hidden | embedding]
     // DBG(eagle3) STRATA_EAGLE_DUMP: the attention's output of the dumped row - o_ is reused by the
     // down projection later in the same midlayer, so the copy happens right after attend_batch
+    // EAGLE-3's first draft step of a round takes the head's OWN projection of the target's taps
+    // (fc(taps)), not the residual the inject's midlayer left: that is the input the head is trained
+    // on (TEACH's "emb p, h p -> p+1"), and it is where the round starts (draft_logits' i == 0)
+    float* fc_state_ = nullptr;
     float* att_dump_ = nullptr;
     bool dump_att_ = false;
     size_t dump_row_ = 0;

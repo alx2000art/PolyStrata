@@ -4911,7 +4911,13 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                "eagle probe anchor");
             ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor");
         }
-        if (i == 0) eagle3_->rewind(pos_);
+        if (i == 0) {
+            eagle3_->rewind(pos_);
+            // the round's first step starts from fc(taps) - the state the head is trained on
+            // (TEACH's (emb p, h p) -> p+1).  The residual the inject left is for the recursion
+            // steps only; with it the first step named a degenerate token in every round.
+            eagle3_->restore_fc(st_);
+        }
         embed(token, eagle_emb_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
         const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
