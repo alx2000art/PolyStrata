@@ -4117,11 +4117,12 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
         }
         if (want_logits) ck(cudaStreamSynchronize(cs(st_)), "eval");
     }
-    // behind the logits: the caller has them while the card does this
-    if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
     // EAGLE-3: the drafter's cache follows the model's own steps - without these rows it would attend a
     // prompt with holes from the first generated token on.  Each row's state is staged where
     // keep_state(n) will read it (the per-row injects leave theirs in hidden_[0]).
+    // The injects go BEFORE the rounds: a round's first step restores the fc(taps) of the row it starts
+    // from, and that row is the one this call injects.  After the rounds it was the previous call's
+    // row - one position behind - and every decode round named a degenerate token.
     if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
         for (int t = 0; t < n; ++t) {
             embed(tokens[t], eagle_emb_);
@@ -4132,6 +4133,8 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
             eagle3_->stage_state(t, st_);
         }
     }
+    // behind the logits: the caller has them while the card does this
+    if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
     pos_ += n;
     stats_.tokens += n;
 }
