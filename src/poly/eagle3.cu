@@ -397,12 +397,16 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
     }
     // DBG(eagle3) STRATA_EAGLE_DUMP=<file>: the first inject's taps and its fc output BEFORE the midlayer
     // touches hidden_ (after it, hidden_ is the residual's sum, not what fc produced).
-    // DBG(eagle3) STRATA_EAGLE_DUMP_ROW0=1: dump the batch's FIRST row instead of its last - row 0's
-    // attention attends only itself, so the trainer can reproduce its whole forward from (taps, emb)
-    // alone; the last row's context is the whole batch and can't be reproduced offline.
+    // DBG(eagle3) STRATA_EAGLE_DUMP_ROW=<i>: dump the batch's row i (STRATA_EAGLE_DUMP_ROW0=1 is row 0).
+    // Row 0's attention attends only itself (the rope at pos 0 is the identity), so the trainer
+    // reproduces it from (taps, emb) alone; a later row also checks the rope's phase and the cache.
     const char* dpath = std::getenv("STRATA_EAGLE_DUMP");
     const bool dumping = dpath && !dumped_ && n > 1;
-    const size_t drow = std::getenv("STRATA_EAGLE_DUMP_ROW0") ? 0 : (size_t) (n - 1);
+    size_t drow = (size_t) (n - 1);
+    if (const char* dr = std::getenv("STRATA_EAGLE_DUMP_ROW"); dr && *dr)
+        drow = std::min((size_t) std::max(0, std::atoi(dr)), (size_t) (n - 1));
+    else if (std::getenv("STRATA_EAGLE_DUMP_ROW0"))
+        drow = 0;
     std::vector<float> fc_dump;
     if (dumping) {
         ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync");
