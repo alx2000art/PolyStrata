@@ -4993,12 +4993,15 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                "eagle probe anchor");
             ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor");
         }
-        // the round's first step is the head's own row of the token evaluated in this call
-        // (position pos_), exactly as TEACH asks it: (fc(taps p), emb p, pos p) -> p+1.  The row
-        // sits at its own position (the inject above wrote it), and the restored fc is the state
-        // the head is trained on, not the inject's residual.  The rewind goes FIRST: the A/B's
-        // teacher_step writes the cache row at cache_pos_ and crashes beyond the cache without it.
-        if (i == 0) {
+        // DBG(eagle3) STRATA_EAGLE_STALE_FC=1: the OLD first-step state - rewind(pos_-1) + the PURE
+        // fc(taps) overwriting the inject's accumulated hidden - kept for the A/B.  That pair is
+        // (emb x_{n+1}, fc(taps x_n)) - the head never trained on it (TEACH leg2: 0.1% at read) and
+        // the rounds' first guess was 0 of 51 with the degenerate token-1/copy attractors.
+        static const bool stale_fc = [&] {
+            const char* v = std::getenv("STRATA_EAGLE_STALE_FC");
+            return v && v[0] == '1';
+        }();
+        if (i == 0 && stale_fc) {
             eagle3_->rewind(pos_ - 1);
             // the round's first step's state: fc(taps) of the LAST row of the last eval's taps -
             // the row this round starts from.  The decode runs in windowed bursts, so the row is
@@ -5009,6 +5012,12 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             else
                 eagle3_->restore_fc(st_);
         }
+        // The normal path needs nothing here: the eval's own inject already ran the chain's root row
+        // (emb x_n, fc(taps x_n)) at x_n's row and left hidden_ as the root's accumulated state,
+        // keep_state points it at the last kept row's state, and cache_pos_ stands at the child's
+        // row - so the first draft_logits below runs the chain's CHILD (emb of the fresh pick, the
+        // root's state) at its own position, the pair the TEACH recursion measures (6.5% at read,
+        // the chain the rounds are supposed to ride).
         // DBG(eagle3) STRATA_EAGLE_ROUND_AB=1: is the restored fc_state_ the fc of THIS row?
         // (the earlier teacher_step A/B crashed inside its attend: cuBLAS 14 at m=26k; this check
         // needs no attention at all)
