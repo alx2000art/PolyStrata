@@ -15,8 +15,12 @@ import numpy as np
 
 path = sys.argv[1] if len(sys.argv) > 1 else "/home/a.makarov/eagle_att.bin"
 data = open(path, "rb").read()
-pos, n_head, n_kv, hd, rows = struct.unpack("<5i", data[:20])
-rest = data[20:]
+# the header is TEXT: "%d %d %d %d %d
+" (pos, n_head, n_kv, head_dim, rows), then the binary payload
+hdr_end = data.index(b"
+") + 1
+pos, n_head, n_kv, hd, rows = (int(x) for x in data[:hdr_end].split())
+rest = data[hdr_end:]
 q = np.frombuffer(rest[: n_head * hd * 4], dtype=np.float32).astype(np.float64)
 off = n_head * hd * 4
 k = np.frombuffer(rest[off: off + rows * n_kv * hd * 2], dtype=np.float16).astype(np.float64)
