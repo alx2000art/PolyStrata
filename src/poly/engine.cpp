@@ -4914,11 +4914,12 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                "eagle probe anchor");
             ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor");
         }
+        // the round's first step is the head's own row of the token evaluated in this call
+        // (position pos_), exactly as TEACH asks it: (fc(taps p), emb p, pos p) -> p+1.  The row
+        // sits at its own position (the inject above wrote it), and the restored fc is the state
+        // the head is trained on, not the inject's residual.  The rewind goes FIRST: the A/B's
+        // teacher_step writes the cache row at cache_pos_ and crashes beyond the cache without it.
         if (i == 0) {
-            // the round's first step is the head's own row of the token evaluated in this call
-            // (position pos_), exactly as TEACH asks it: (fc(taps p), emb p, pos p) -> p+1.  The row
-            // sits at its own position (the inject above wrote it), and the restored fc is the state
-            // the head is trained on, not the inject's residual.
             eagle3_->rewind(pos_);
             eagle3_->restore_fc(st_);
         }
