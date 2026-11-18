@@ -122,21 +122,23 @@ def yarn_phase(pos: "torch.Tensor", iw_half: "torch.Tensor", base: float, freq_s
 
 
 def rope_apply(x: "torch.Tensor", pos: "torch.Tensor", r) -> "torch.Tensor":
-    """x [T, H, D]: смежные пары (2i, 2i+1), все D повернуты (off=0, n_rot=D), off иного нет."""
+    """x [T, H, D]: HF/transformers rotate_half - пара (i, i + D/2), как у референса (Llama rope).
+    Движок снимает это, переставляя строки q_proj/k_proj при загрузке (eagle3.cu w_rope: интерливит
+    (i, i+32) в соседние и крутит соседние пары).  Соседние пары на СЫРЫХ строках - другая операция:
+    с ней обученная голова в движке видит другое q/k (cos 0.09) и проваливается (73% офлайн vs 32%)."""
     T, H, D = x.shape
     half = D // 2
     iw = torch.arange(half, device=x.device)
     theta, mscale = yarn_phase(pos, iw, r["base"], r["freq_scale"], r["ext_factor"], r["corr0"],
                                r["corr1"], D)
     c, s = torch.cos(theta) * mscale, torch.sin(theta) * mscale        # [T, half]
-    a = x[:, :, 0::2]
-    b = x[:, :, 1::2]
+    a = x[:, :, :half]
+    b = x[:, :, half:]
     c = c.unsqueeze(1)
     s = s.unsqueeze(1)
     x0 = a * c - b * s
     x1 = a * s + b * c
-    out = torch.stack((x0, x1), dim=-1).reshape(T, H, D)
-    return out
+    return torch.cat((x0, x1), dim=-1)
 
 
 def rmsnorm(x: "torch.Tensor", w: "torch.Tensor", eps: float) -> "torch.Tensor":
