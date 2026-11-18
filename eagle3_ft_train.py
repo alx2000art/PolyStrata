@@ -378,15 +378,17 @@ def main() -> int:
 
     if args.eval_only:
         # та же метрика, что TEACH движка: (emb p, h p) -> p+1 и (emb p+1, h p) -> p+2.
-        # top-1 считается по позициям, чья метка есть в draft-словаре (иначе позиция не измерима)
+        # top-1 считается по позициям, чья метка есть в draft-словаре (иначе позиция не измерима).
+        # Нога 1 меряется на n_rows-1 строках, ноги 2/3 - на n_rows-2 (их метки на строку дальше):
+        # decode-дамп приходит ПАРНЫМИ блоками по 2 строки - нога 1 там единственная измеримая.
         tot1 = hit1 = tot2 = hit2 = tot3 = hit3 = 0
         with torch.no_grad():
             for path, off, pos0, n_rows, _tokens_meta in blocks:
                 pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
                                                               meta["n_embd"], meta["taps_n"])
-                for start in range(0, n_rows - 2, args.max_rows):
-                    length = min(args.max_rows, n_rows - 2 - start)
-                    if length < 8:
+                for start in range(0, max(n_rows - 1, 0), args.max_rows):
+                    length = min(args.max_rows, n_rows - 1 - start)
+                    if length < 1:
                         break
                     pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
@@ -399,14 +401,16 @@ def main() -> int:
                     tot1 += int((lab1 >= 0).sum())
                     hit1 += int(ok.sum())
                     # нога 2: (emb p+1, h p) -> p+2 - эмбеддинг следующей строки при taps текущей
-                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                        logits2, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
-                                        torch.from_numpy(taps_b[start:start + length]).to(device), pos)
-                    lab2 = map_labels(np.asarray(tokens_b[start + 2:start + length + 2]), tgt2draft)
-                    pred2 = logits2.argmax(-1).cpu().numpy()
-                    ok2 = (lab2 >= 0) & (pred2 == lab2)
-                    tot2 += int((lab2 >= 0).sum())
-                    hit2 += int(ok2.sum())
+                    # (нужны строки p+1 и метка p+2: в парном decode-блоке из 2 строк её нет - пропуск)
+                    if start + length + 1 < n_rows:
+                        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                            logits2, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
+                                            torch.from_numpy(taps_b[start:start + length]).to(device), pos)
+                        lab2 = map_labels(np.asarray(tokens_b[start + 2:start + length + 2]), tgt2draft)
+                        pred2 = logits2.argmax(-1).cpu().numpy()
+                        ok2 = (lab2 >= 0) & (pred2 == lab2)
+                        tot2 += int((lab2 >= 0).sum())
+                        hit2 += int(ok2.sum())
                     # нога 3: математика ПЕРВОГО decode-шага движка: h = собственный residual головы
                     # на строке p (inject уже прогнал слой), позиция p+1, метка та же p+1.
                     # Если тут ~0% при 30%+ у ноги 1 - движок спрашивает голову не тем входом.
