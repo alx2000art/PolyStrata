@@ -183,13 +183,13 @@ def main() -> int:
                 q2 = _ra(q2, pos, model.rope)
                 k2 = _ra(k2, pos, model.rope)
                 for gqa in ("adjacent", "interleaved"):
-                    for s in (1.0, 1.0 + 0.1 * _math.log(16.0)):
+                    for s in (1.0, 0.5, 0.2, 0.1, 0.05):
                         if gqa == "adjacent":
-                            qg = (q2 * s).view(T, n_kv, per, hd)
+                            qg = q2.view(T, n_kv, per, hd)
                         else:
-                            qg = (q2 * s).view(T, per, n_kv, hd).permute(0, 2, 1, 3)
-                        kg = k2 * s
-                        att = torch.einsum("tqph,skh->tqps", qg, kg) / _math.sqrt(hd)
+                            qg = q2.view(T, per, n_kv, hd).permute(0, 2, 1, 3)
+                        kg = k2
+                        att = (torch.einsum("tqph,skh->tqps", qg, kg) / _math.sqrt(hd)) * s
                         w = torch.softmax(att.masked_fill(~causal[:, None, None, :], float("-inf")), dim=-1)
                         o = torch.einsum("tqps,skh->tqph", w, v2).reshape(T, n_head * hd)
                         oo = model.wo(o)[row].float().cpu().numpy().astype(np.float64)
