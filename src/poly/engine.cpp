@@ -4372,6 +4372,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                 behind.wait();
                 std::free(taps_host_);
                 taps_host_ = nullptr;
+                in_read_ = false;   // a bailed read ends here too: the decode evals must not be mistaken for reads
                 return false;
             }
         }
@@ -4380,6 +4381,8 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         // long read's path, and every prompt of one call's rows (and every read's last short chunk) left
         // the drafter's cache without its rows - the decode then attended rows that were never written
         eagle_read_tail(tokens, n);
+        in_read_ = false;   // the early path's own end: without it the decode evals are mistaken for reads,
+                            // the decode injects never ran, and every round answered a frozen cache
         return true;
     }
     widen_stage();
