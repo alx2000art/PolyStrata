@@ -437,6 +437,10 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
             put(e_norm_, e, drow, e);
             put(f_norm_, e, drow, e);
             put(normed_, e, drow, e);
+            // the layer's two halves apart: hidden = fc + o_out + o(mlp).  o_out names the attention
+            // (its direction and its scale), the mlp's output names the rest
+            put(o_out_, e, drow, e);
+            put(o_, e, drow, e);
             std::fclose(f);
             std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dpath, (long long) (pos + drow));
         }

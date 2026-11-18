@@ -25,7 +25,7 @@ import numpy as np
 def read_engine_dump(path: str, n_embd: int) -> dict:
     data = np.fromfile(path, dtype=np.float32)
     e = n_embd
-    names = ["taps", "fc", "emb", "ln1", "hnorm", "normed"]
+    names = ["taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp"]
     out, off = {}, 0
     widths = {"taps": 3 * e}
     for name in names:
@@ -87,7 +87,11 @@ def main() -> int:
         h = model.fc(x_taps.reshape(row + 1, -1))
         e = torch.from_numpy(embs_b[:row + 1]).to(device)
         o = model._residual(torch.cat((model.ln1(e), model.hnorm(h)), dim=-1), pos)
-        hidden = model._head_out(h, o)
+        wo_out = model.wo(o)
+        hidden_a = h + wo_out
+        norm2 = model.ln2(hidden_a)
+        mlp_out = model.down(F.silu(model.gate(norm2)) * model.up(norm2))
+        hidden = hidden_a + mlp_out
         normed = model.out_norm(hidden)
         got = {
             "fc": h[row].float().cpu().numpy(),
@@ -95,10 +99,12 @@ def main() -> int:
             "ln1": model.ln1(e[row:row + 1]).float().cpu().numpy()[0],
             "hnorm": model.hnorm(h[row:row + 1]).float().cpu().numpy()[0],
             "normed": normed[row].float().cpu().numpy(),
+            "o_out": wo_out[row].float().cpu().numpy(),
+            "o_mlp": mlp_out[row].float().cpu().numpy(),
         }
 
     print(f"\nстрока {row} блока 0 (абс. поз. {pos0_b + row}):")
-    for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed"):
+    for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp"):
         if name not in eng:
             continue
         a = np.asarray(eng[name], dtype=np.float64)
