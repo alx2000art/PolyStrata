@@ -102,6 +102,27 @@ def main() -> int:
         cos = float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-12))
         print(f"  {name:7s} cos={cos:+.4f}  |a-b|max={np.abs(a - b).max():.4g}  "
               f"|a|={np.linalg.norm(a):.3g} |b|={np.linalg.norm(b):.3g}")
+
+    # какую строку дампа движок снял на самом деле: ищем лучший cos по всем блокам
+    print("\nпоиск строки движкового дампа по всем блокам:")
+    E3 = 3 * E
+    for name, key in (("emb", embs_b),):
+        a = np.asarray(eng[name], dtype=np.float32)
+        an = float(np.linalg.norm(a))
+        best = []
+        for bi, (path_b, off_b, pos0_b2, n_b, _tok) in enumerate(blocks):
+            if bi > 2:
+                break
+            _p, _t, emb_b, tap_b = load_block(path_b, off_b, min(n_b, 8192), E, meta["taps_n"])
+            flat = emb_b.reshape(-1, E)
+            dots = flat @ a
+            norms = np.linalg.norm(flat, axis=1) * max(an, 1e-12)
+            cos = dots / np.maximum(norms, 1e-12)
+            idx = np.argsort(-cos)[:3]
+            for i in idx:
+                best.append((float(cos[i]), bi, int(i), int(pos0_b2 + i)))
+        best.sort(reverse=True)
+        print(f"  {name}: " + ", ".join(f"cos={c:+.4f} блок {b} строка {r} (поз {p})" for c, b, r, p in best[:5]))
     return 0
 
 
