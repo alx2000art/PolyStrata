@@ -4934,8 +4934,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             const float* lg_t = eagle3_->teacher_step(ab_taps.data(), eagle_emb_, pos_, st_);
             likeliest(lg_t, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "ab teacher sync");
-            std::fprintf(stderr, "[eagle] AB teacher pos %lld: p=%.4f draft_id=%d -> target=%d
-",
+            std::fprintf(stderr, "[eagle] AB teacher pos %lld: p=%.4f draft_id=%d -> target=%d\n"
                          (long long) pos_, (double) h_guess_->prob, (int) h_guess_->token,
                          (int) eagle3_->d2t(h_guess_->token));
         }
