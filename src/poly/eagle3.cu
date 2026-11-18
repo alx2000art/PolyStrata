@@ -396,14 +396,18 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                      s / th.size(), mn, mx);
     }
     // DBG(eagle3) STRATA_EAGLE_DUMP=<file>: the first inject's taps and its fc output BEFORE the midlayer
-    // touches hidden_ (after it, hidden_ is the residual's sum, not what fc produced)
+    // touches hidden_ (after it, hidden_ is the residual's sum, not what fc produced).
+    // DBG(eagle3) STRATA_EAGLE_DUMP_ROW0=1: dump the batch's FIRST row instead of its last - row 0's
+    // attention attends only itself, so the trainer can reproduce its whole forward from (taps, emb)
+    // alone; the last row's context is the whole batch and can't be reproduced offline.
     const char* dpath = std::getenv("STRATA_EAGLE_DUMP");
     const bool dumping = dpath && !dumped_ && n > 1;
+    const size_t drow = std::getenv("STRATA_EAGLE_DUMP_ROW0") ? 0 : (size_t) (n - 1);
     std::vector<float> fc_dump;
     if (dumping) {
         ck(cudaStreamSynchronize(cs(stream)), "eagle dump sync");
         fc_dump.assign((size_t) n_embd_, 0.f);
-        ck(cudaMemcpy(fc_dump.data(), hidden_ + (size_t) (n - 1) * n_embd_, fc_dump.size() * sizeof(float),
+        ck(cudaMemcpy(fc_dump.data(), hidden_ + drow * n_embd_, fc_dump.size() * sizeof(float),
                       cudaMemcpyDeviceToHost), "eagle dump fc");
     }
     midlayer(emb_dev, pos, n, stream);
@@ -421,14 +425,14 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
                    "eagle dump");
                 std::fwrite(buf.data(), sizeof(float), cnt, f);
             };
-            put(taps_dev, 3 * e, (size_t) (n - 1), 3 * e);
+            put(taps_dev, 3 * e, drow, 3 * e);
             std::fwrite(fc_dump.data(), sizeof(float), fc_dump.size(), f);
-            put(emb_dev, e, (size_t) (n - 1), e);
-            put(e_norm_, e, (size_t) (n - 1), e);
-            put(f_norm_, e, (size_t) (n - 1), e);
-            put(normed_, e, (size_t) (n - 1), e);
+            put(emb_dev, e, drow, e);
+            put(e_norm_, e, drow, e);
+            put(f_norm_, e, drow, e);
+            put(normed_, e, drow, e);
             std::fclose(f);
-            std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dpath, (long long) (pos + n - 1));
+            std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dpath, (long long) (pos + drow));
         }
     }
     // the draft's feature is the call's LAST row (the token the drafter starts from): move it to row 0,
