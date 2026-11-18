@@ -218,6 +218,17 @@ class Eagle3Head(nn.Module):
         normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
         return self.lm_head(normed)
 
+    def step_hidden_h(self, h_prev, embs, pos):
+        """Тот же шаг цепочки, но возвращает и накопленное hidden - вход следующей глубины.
+        Референс (traineagle3/cnets.py) гонит глубины 1..7 ровно так: hidden_states = layer_outputs[0]
+        (pre-norm накопленное состояние) без detach, градиенты сквозь глубины."""
+        x = torch.cat((rmsnorm(embs, self.ln1.weight, self.eps),
+                       rmsnorm(h_prev, self.hnorm.weight, self.eps)), dim=-1)
+        o = self._residual(x, pos)
+        hidden = self._head_out(h_prev, o)
+        normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
+        return self.lm_head(normed), hidden
+
 
 # ----------------------------- веса из safetensors --------------------------
 
@@ -313,6 +324,9 @@ def main() -> int:
                     help="8-битный Adam (bitsandbytes): состояния ~0.8 ГБ вместо ~6.3")
     ap.add_argument("--rec-weight", type=float, default=1.0,
                     help="вес ноги рекурсии (0 = как раньше, только leg1)")
+    ap.add_argument("--chain-depth", type=int, default=0,
+                    help="глубокая цепочка как у референса: глубины 1..D без detach, веса 0.8^d "
+                         "(0 = нога рекурсии как раньше; D>=1 заменяет её)")
     ap.add_argument("--max-rows", type=int, default=1024, help="строк блока за шаг (хвост отбрасывается)")
     ap.add_argument("--coverage", action="store_true", help="только отчёт по покрытию d2t и выход")
     ap.add_argument("--eval-only", action="store_true",
@@ -381,7 +395,7 @@ def main() -> int:
         # top-1 считается по позициям, чья метка есть в draft-словаре (иначе позиция не измерима).
         # Нога 1 меряется на n_rows-1 строках, ноги 2/3 - на n_rows-2 (их метки на строку дальше):
         # decode-дамп приходит ПАРНЫМИ блоками по 2 строки - нога 1 там единственная измеримая.
-        tot1 = hit1 = tot2 = hit2 = tot3 = hit3 = 0
+        tot1 = hit1 = tot2 = hit2 = tot3 = hit3 = tot4 = hit4 = 0
         with torch.no_grad():
             for path, off, pos0, n_rows, _tokens_meta in blocks:
                 pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
@@ -421,10 +435,26 @@ def main() -> int:
                     ok3 = (lab1 >= 0) & (pred3 == lab1)
                     tot3 += int((lab1 >= 0).sum())
                     hit3 += int(ok3.sum())
+                    # нога 4 - ПАРА ЦЕПОЧКИ, на которой едут decode-раунды: (emb x_{j+1},
+                    # накопленное hidden головы с строки j) на позиции j+1 -> x_{j+2}.
+                    # Честный офлайн-номер того, что меряет движковая TEACH-рекурсия.
+                    rows4 = length - 2
+                    if rows4 >= 1:
+                        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                            logits4, _ = model.step_hidden_h(
+                                hid[:rows4],
+                                torch.from_numpy(embs_b[start + 1:start + 1 + rows4]).to(device),
+                                pos[1:1 + rows4])
+                        lab4 = map_labels(np.asarray(tokens_b[start + 2:start + 2 + rows4]), tgt2draft)
+                        pred4 = logits4.argmax(-1).cpu().numpy()
+                        ok4 = (lab4 >= 0) & (pred4 == lab4)
+                        tot4 += int((lab4 >= 0).sum())
+                        hit4 += int(ok4.sum())
         print(f"eval-only (top-1 среди покрытых d2t): "
               f"(emb p, h p) -> p+1: {hit1} из {tot1} ({100 * hit1 / max(tot1, 1):.1f}%), "
               f"(emb p+1, h p) -> p+2: {hit2} из {tot2} ({100 * hit2 / max(tot2, 1):.1f}%), "
-              f"decode step (h=residual p, pos p+1): {hit3} из {tot3} ({100 * hit3 / max(tot3, 1):.1f}%)")
+              f"decode step (h=residual p, pos p+1): {hit3} из {tot3} ({100 * hit3 / max(tot3, 1):.1f}%), "
+              f"chain (emb p+1, h=p) -> p+2: {hit4} из {tot4} ({100 * hit4 / max(tot4, 1):.1f}%)")
         return 0
 
     if args.opt8:
@@ -482,7 +512,9 @@ def main() -> int:
                     # кормят голову её СОБСТВЕННЫМ скрытым состоянием с прошлого шага.  Без этой
                     # ноги файн-тюн перекашивает голову: leg1 растёт, рекурсия деградирует в
                     # вырожденный токен (TEACH: leg1 23%, recursion 1.4% у первого ft).
-                    if args.rec_weight > 0 and tgt2draft is not None:
+                    # При --chain-depth >= 1 её заменяет глубокая цепочка ниже (тот же шаг d=1,
+                    # но без detach и с градиентами сквозь глубины).
+                    if args.rec_weight > 0 and args.chain_depth == 0 and tgt2draft is not None:
                         hid_in = torch.cat((torch.zeros_like(hid[:1]), hid[:-1].detach()), dim=0)
                         logits2 = model.step_hidden(hid_in, x_embs, pos)
                         csum2, ckeep2 = 0.0, 0
@@ -496,6 +528,32 @@ def main() -> int:
                                                             ignore_index=-100, reduction="sum")
                             ckeep2 += int(kp.sum())
                         loss = loss + args.rec_weight * (csum2 / max(ckeep2, 1))
+                    # глубокая цепочка - рецепт референса (traineagle3/cnets.py + main.py):
+                    # глубина d: строки j = (emb x_{j+d}, накопленное hidden глубины d-1 с ТОГО ЖЕ j)
+                    # на позиции j+d, метка x_{j+d+1}; состояние подаётся БЕЗ detach - градиент течёт
+                    # сквозь глубины, и голова учится не только потреблять, но и ПРОИЗВОДИТЬ
+                    # состояния, пригодные для собственной цепочки (одношаговая detached-нога
+                    # оставляла цепочку на 6.5-8% при leg1 41%).  Веса 0.8^d как в референсе.
+                    if args.chain_depth > 0 and tgt2draft is not None:
+                        h = hid
+                        for d in range(1, args.chain_depth + 1):
+                            rows = length - d - 1
+                            if rows < 1:
+                                break
+                            logits_d, h = model.step_hidden_h(h[:rows], x_embs[d:d + rows], pos[d:d + rows])
+                            lab_d2 = torch.from_numpy(
+                                map_labels(np.asarray(tokens_b[start + d + 1:start + d + 1 + rows]),
+                                           tgt2draft)).to(device)
+                            csum_d, ckeep_d = 0.0, 0
+                            for cs in range(0, rows, 256):
+                                ce = min(cs + 256, rows)
+                                part = logits_d[cs:ce].float()
+                                kp = (lab_d2[cs:ce] >= 0)
+                                csum_d = csum_d + F.cross_entropy(
+                                    part, torch.where(kp, lab_d2[cs:ce], torch.zeros_like(lab_d2[cs:ce])),
+                                    ignore_index=-100, reduction="sum")
+                                ckeep_d += int(kp.sum())
+                            loss = loss + (0.8 ** d) * (csum_d / max(ckeep_d, 1))
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
