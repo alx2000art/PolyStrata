@@ -141,6 +141,35 @@ def main() -> int:
         cos = float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-12))
         print(f"  {name:7s} cos={cos:+.4f}  |a-b|max={np.abs(a - b).max():.4g}  "
               f"|a|={np.linalg.norm(a):.3g} |b|={np.linalg.norm(b):.3g}")
+
+    # taps по отдельности: подмена порядка слоёв видна как перестановка единиц и нулей
+    print("\ntaps по отдельности (движок vs наша строка):")
+    et = np.asarray(eng["taps"], dtype=np.float64).reshape(-1, E)
+    for tp in range(et.shape[0]):
+        for cand in range(et.shape[0]):
+            a, b = et[tp], np.asarray(taps_b[row][cand], dtype=np.float64)
+            c = float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-12))
+            if abs(c) > 0.5:
+                print(f"  движковый tap{tp} ~ наш tap{cand}: cos={c:+.4f}")
+        best = max((float(et[tp] @ np.asarray(taps_b[row][cand], dtype=np.float64)) /
+                    max(np.linalg.norm(et[tp]) * np.linalg.norm(taps_b[row][cand]), 1e-12), cand)
+                   for cand in range(et.shape[0]))
+        if abs(best[0]) <= 0.5:
+            print(f"  движковый tap{tp}: лучший cos={best[0]:+.4f} (tap{best[1]}) - не наша строка")
+    # и поиск строки по taps
+    print("\nпоиск строки движкового дампа по taps:")
+    a = et.reshape(-1)
+    an = float(np.linalg.norm(a))
+    best = []
+    for bi, (path_b, off_b, pos0_b2, n_b, _tok) in enumerate(blocks):
+        _p, _t, _emb, tap_b = load_block(path_b, off_b, min(n_b, 8192), E, meta["taps_n"])
+        flat = tap_b.reshape(-1, 3 * E)
+        cos = (flat @ a) / np.maximum(np.linalg.norm(flat, axis=1) * max(an, 1e-12), 1e-12)
+        idx = np.argsort(-cos)[:3]
+        for i in idx:
+            best.append((float(cos[i]), bi, int(i), int(pos0_b2 + i)))
+    best.sort(reverse=True)
+    print("  " + ", ".join(f"cos={c:+.4f} блок {b} строка {r} (поз {p})" for c, b, r, p in best[:5]))
     return 0
 
 
