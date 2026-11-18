@@ -484,8 +484,7 @@ const float* Eagle3::teacher_step(const float* taps_row, const float* emb_host, 
     // be run on the very q/k/v it used (pos, then q [n_head*dim], k and v [pos+1][n_kv*dim], then o)
     g_att_armed = g_att_path && !g_att_done;
     if (const char* ab = std::getenv("STRATA_EAGLE_ROUND_AB"); ab && *ab)
-        std::fprintf(stderr, "[eagle] teacher at pos %lld (cache_pos %lld, cap %lld)
-", (long long) pos,
+        std::fprintf(stderr, "[eagle] teacher at pos %lld (cache_pos %lld, cap %lld)\n", (long long) pos,
                      (long long) cache_pos_, (long long) cache_cap_);
     ck(cudaMemcpyAsync(emb_dev_, emb_host, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(stream)),
        "eagle teach emb");
