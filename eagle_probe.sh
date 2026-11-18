@@ -155,6 +155,7 @@ stop_server
 head -2 "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /'
 grep -A14 "строка $ROW " "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || tail -20 "$OUT_DIR/compare_row$ROW.log"
 grep -A10 "перебор attention" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
+grep -A12 "rope-углы" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
 grep "стадии движка" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
 log ""
 log "готово: $OUT_DIR/compare_row$ROW.log (полный лог сверки)"
