@@ -108,6 +108,8 @@ Rope make_rope(float base, int n_rot, float freq_scale, float ext_factor, int n_
 // the dump right after attend_batch (o_ is overwritten by the down projection later in the call, so a
 // dump taken at the end of the step holds the mlp's output, not the attention's)
 static const char* g_att_path = std::getenv("STRATA_EAGLE_DUMP_ATT");
+static long g_att_min_pos = g_att_path && std::getenv("STRATA_EAGLE_DUMP_ATT_POS")
+                                ? std::atol(std::getenv("STRATA_EAGLE_DUMP_ATT_POS")) : 0;
 static bool g_att_armed = false;
 static bool g_att_done = false;
 
@@ -347,8 +349,9 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
                            (size_t) n_head_ * head_dim_ * sizeof(float), cudaMemcpyDeviceToDevice, cs(stream)),
            "eagle att dump copy");
     }
-    if (g_att_path && g_att_armed && !g_att_done) {   // DBG(eagle3): o_ dies at the down projection - the dump
-        g_att_done = true;                            // must read it here, while it still holds the attention
+    if (g_att_path && g_att_armed && !g_att_done && (long long) pos >= g_att_min_pos) {   // DBG(eagle3): o_ dies
+        g_att_done = true;                            // at the down projection - the dump
+                                                      // must read it here, while it still holds the attention
         ck(cudaStreamSynchronize(cs(stream)), "att dump sync");
         FILE* f = std::fopen(g_att_path, "wb");
         if (f) {

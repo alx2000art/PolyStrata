@@ -149,7 +149,7 @@ for key in [k for k in cfg.get("env", {})
 # DBG(eagle3): EAGLE_* переменные вызова идут в конфиг как STRATA_EAGLE_* - движок берёт env из
 # конфига, не из вызывающего.  EAGLE_TEACH=<шаг>, EAGLE_DUMP_ATT=1 (путь по умолчанию), EAGLE_TAPS=...
 for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE_GUESSES", "ONE_DRAFT",
-             "STATS", "DRAFT_PREV", "LM_Q8", "TOP5", "ROUND_AB", "DUMP_DECODE"):
+             "STATS", "DRAFT_PREV", "LM_Q8", "TOP5", "ROUND_AB", "DUMP_DECODE", "DUMP_ATT_POS"):
     val = os.environ.get("EAGLE_" + name)
     if val:
         if name == "DUMP_ATT" and val == "1":
