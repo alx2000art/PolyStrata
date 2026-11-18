@@ -4922,6 +4922,23 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             eagle3_->rewind(pos_);
             eagle3_->restore_fc(st_);
         }
+        // DBG(eagle3) STRATA_EAGLE_ROUND_AB=1: the round's own row through BOTH paths - the
+        // teacher_step (fc(taps), TEACH's 41%) and the draft_logits (the restored fc) - the two
+        // argmaxes name whether the functions or the surroundings differ
+        static const bool round_ab = std::getenv("STRATA_EAGLE_ROUND_AB") != nullptr;
+        if (round_ab && i == 0) {
+            static std::vector<float> ab_taps;
+            if (ab_taps.empty()) ab_taps.resize((size_t) dspark_taps_n_ * n_embd_);
+            ck(cudaMemcpy(ab_taps.data(), dspark_taps_, ab_taps.size() * sizeof(float), cudaMemcpyDeviceToHost),
+               "ab taps");
+            const float* lg_t = eagle3_->teacher_step(ab_taps.data(), eagle_emb_, pos_, st_);
+            likeliest(lg_t, eagle3_->dvocab(), h_guess_, st_);
+            ck(cudaStreamSynchronize(cs(st_)), "ab teacher sync");
+            std::fprintf(stderr, "[eagle] AB teacher pos %lld: p=%.4f draft_id=%d -> target=%d
+",
+                         (long long) pos_, (double) h_guess_->prob, (int) h_guess_->token,
+                         (int) eagle3_->d2t(h_guess_->token));
+        }
         embed(token, eagle_emb_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
         const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
