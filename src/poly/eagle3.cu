@@ -288,6 +288,7 @@ void Eagle3::begin(int rows, int64_t max_context, void* blas) {
     v_ = (float*) eagle_alloc(size_t(rows_) * n_kv_ * head_dim_ * sizeof(float), "the eagle3 v");
     o_ = (float*) eagle_alloc(size_t(rows_) * n_head_ * head_dim_ * sizeof(float), "the eagle3 o");
     o_out_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 o proj");
+    att_dump_ = (float*) eagle_alloc(size_t(n_head_) * head_dim_ * sizeof(float), "the eagle3 att dump");
     normed_ = (float*) eagle_alloc(size_t(rows_) * n_embd_ * sizeof(float), "the eagle3 normed");
     normed_q8_ = eagle_alloc(size_t(rows_) * kernels::native_q8_1_bytes(n_embd_), "the eagle3 normed q8_1");
     cat_f32_ = (float*) eagle_alloc(size_t(rows_) * 2 * n_embd_ * sizeof(float), "the eagle3 cat fp32");
@@ -339,6 +340,12 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
+    if (dump_att_ && att_dump_ && dump_row_ < (size_t) n) {
+        dump_att_ = false;
+        ck(cudaMemcpyAsync(att_dump_, o_ + dump_row_ * (size_t) n_head_ * head_dim_,
+                           (size_t) n_head_ * head_dim_ * sizeof(float), cudaMemcpyDeviceToDevice, cs(stream)),
+           "eagle att dump copy");
+    }
     if (g_att_path && g_att_armed && !g_att_done) {   // DBG(eagle3): o_ dies at the down projection - the dump
         g_att_done = true;                            // must read it here, while it still holds the attention
         ck(cudaStreamSynchronize(cs(stream)), "att dump sync");
@@ -416,6 +423,8 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
         ck(cudaMemcpy(fc_dump.data(), hidden_ + drow * n_embd_, fc_dump.size() * sizeof(float),
                       cudaMemcpyDeviceToHost), "eagle dump fc");
     }
+    dump_att_ = dumping;
+    dump_row_ = drow;
     midlayer(emb_dev, pos, n, stream);
     if (dumping) {
         dumped_ = true;
@@ -446,6 +455,7 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
             put(q_, (size_t) n_head_ * head_dim_, drow, (size_t) n_head_ * head_dim_);
             put(k_, (size_t) n_kv_ * head_dim_, drow, (size_t) n_kv_ * head_dim_);
             put(v_, (size_t) n_kv_ * head_dim_, drow, (size_t) n_kv_ * head_dim_);
+            put(att_dump_, e, 0, e);   // the attention's output (pre-o_proj) of the dumped row
             std::fclose(f);
             std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dpath, (long long) (pos + drow));
         }

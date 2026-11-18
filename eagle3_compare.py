@@ -27,7 +27,7 @@ CMP_VER = "v3 2026-11-18 (q/k/v stages)"
 def read_engine_dump(path: str, n_embd: int, kv_width: int = 0) -> dict:
     data = np.fromfile(path, dtype=np.float32)
     e = n_embd
-    names = ["taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v"]
+    names = ["taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v", "o_att"]
     out, off = {}, 0
     widths = {"taps": 3 * e, "k": kv_width or None, "v": kv_width or None}
     for name in names:
@@ -119,7 +119,7 @@ def main() -> int:
         got["v"] = v_t[row].float().cpu().numpy().reshape(-1)
 
     print(f"\nстрока {row} блока 0 (абс. поз. {pos0_b + row}):")
-    for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v"):
+    for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v", "o_att"):
         if name not in eng:
             continue
         a = np.asarray(eng[name], dtype=np.float64)

@@ -108,6 +108,11 @@ private:
     int dbg_inj_ = 0, dbg_att_ = 0, dbg_logits_ = 0;   // the one-shot debug prints left (2 of each)
     bool lm_bf16_ = false;        // the lm_head's BF16 by default; STRATA_EAGLE_LM_Q8=1 flips to the Q8_0 copy
     bool cat_he_ = false;         // STRATA_EAGLE_CAT=he: the midlayer's input is [hidden | embedding]
+    // DBG(eagle3) STRATA_EAGLE_DUMP: the attention's output of the dumped row - o_ is reused by the
+    // down projection later in the same midlayer, so the copy happens right after attend_batch
+    float* att_dump_ = nullptr;
+    bool dump_att_ = false;
+    size_t dump_row_ = 0;
     bool dumped_ = false;         // STRATA_EAGLE_DUMP: the inject stages are written once
     bool dumped_logits_ = false;  // their draft step's logits appended once
     bool loaded_ = false;
