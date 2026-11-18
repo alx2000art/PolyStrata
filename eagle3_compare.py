@@ -197,6 +197,35 @@ def main() -> int:
                         print(f"  {xname} {gqa:12s} mscale {s:.4f}: cos={c:+.4f}  |b|={np.linalg.norm(oo):.4g} "
                               f"(движок |a|={np.linalg.norm(eng_o):.4g})")
 
+    # фактический угол rope движка по парам: из пре-rope q и пост-rope q угол восстанавливается
+    # однозначно; сравнение с нашим theta по парам покажет закономерность расхождения
+    if "q" in eng:
+        import math as _m2
+        with torch.no_grad():
+            hh = model.fc(x_taps.reshape(row + 1, -1))
+            xin = torch.cat((model.ln1(e), model.hnorm(hh)), dim=-1)
+            pre = model.wq(xin)[row].float().cpu().numpy().reshape(model.n_head, model.hd)
+            engq = np.asarray(eng["q"], dtype=np.float64).reshape(model.n_head, model.hd)
+            a = pre[0, 0::2].astype(np.float64)
+            b = pre[0, 1::2].astype(np.float64)
+            x0 = engq[0, 0::2]
+            x1 = engq[0, 1::2]
+            r2 = np.maximum(a * a + b * b, 1e-30)
+            cc = (a * x0 + b * x1) / r2
+            ss = (a * x1 - b * x0) / r2
+            theta_eng = np.arctan2(ss, cc)
+            from eagle3_ft_train import yarn_phase as _yp
+            iw = torch.arange(model.hd // 2, dtype=torch.float32)
+            pos_t = torch.tensor([float(row)])
+            th, _ms = _yp(pos_t, iw, model.rope["base"], model.rope["freq_scale"],
+                          model.rope["ext_factor"], model.rope["corr0"], model.rope["corr1"], model.hd)
+            theta_ours = th[0].numpy()
+            print(f"\nrope-углы по парам (движок vs наш, голова 0, позиция {row}):")
+            for i in (0, 4, 8, 12, 16, 19, 20, 21, 24, 28, 31):
+                d = float(np.mod(theta_eng[i] - theta_ours[i] + np.pi, 2 * np.pi) - np.pi)
+                print(f"  пара {i:2d}: движок {theta_eng[i]:+.4f}  наш {theta_ours[i]:+.4f}  "
+                      f"diff {d:+.4f} (в периодах {d / (2 * np.pi):+.4f})")
+
     print("\nсверка стадий движка с нашей математикой (входы - сами стадии движка):")
     with torch.no_grad():
         t_eng = torch.from_numpy(np.asarray(eng["taps"], dtype=np.float32)[None]).to(device)
