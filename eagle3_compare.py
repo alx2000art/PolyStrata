@@ -271,6 +271,33 @@ def main() -> int:
         print(f"самоконтроль движка: cos(wo(o_att), o_out)={c:+.4f}  "
               f"|wo(o_att)|={np.linalg.norm(chk):.3g} |o_out|={np.linalg.norm(b):.3g}")
 
+    # causal ли внимание inject-а: если o_att строки 0 совпадает с ПОЛНОЙ маской (весь батч),
+    # в движке маска не causal
+    if "o_att" in eng and "q" in eng:
+        import math as _m4
+        with torch.no_grad():
+            hh = model.fc(x_taps.reshape(row + 1, -1))
+            xin = torch.cat((model.ln1(e), model.hnorm(hh)), dim=-1)
+            T = xin.shape[0]
+            n_head, n_kv, hd = model.n_head, model.n_kv, model.hd
+            per = n_head // n_kv
+            q2 = _ra2(model.wq(xin).view(T, n_head, hd), pos, model.rope)
+            k2 = _ra2(model.wk(xin).view(T, n_kv, hd), pos, model.rope)
+            v2 = model.wv(xin).view(T, n_kv, hd)
+            qg = q2.view(T, n_kv, per, hd)
+            i4 = torch.arange(T, device=xin.device)
+            causal4 = i4.view(-1, 1) >= i4.view(1, -1)
+            for mname, mask in (("causal", causal4), ("full", torch.ones_like(causal4, dtype=torch.bool))):
+                att = torch.einsum("tqph,skh->tqps", qg, k2) / _m4.sqrt(hd)
+                w = torch.softmax(att.masked_fill(~mask[:, None, None, :], float("-inf")), dim=-1)
+                o4 = torch.einsum("tqps,skh->tqph", w, v2).reshape(T, n_head * hd)[row]
+                o4 = o4.float().cpu().numpy().astype(np.float64)
+                a4 = np.asarray(eng["o_att"], dtype=np.float64)
+                c4 = float(a4 @ o4 / max(np.linalg.norm(a4) * np.linalg.norm(o4), 1e-12))
+                print("")
+                print(f"маска {mname}: cos(o_att, наш)={c4:+.4f}  |наш|={np.linalg.norm(o4):.3g} "
+                      f"|движок|={np.linalg.norm(a4):.3g}")
+
     # движок интерливит строки q/k при загрузке (w_rope: 2i<-i, 2i+1<-i+32): разворачиваем и сверяем
     if "q" in eng and "k" in eng:
         engq = np.asarray(eng["q"], dtype=np.float64).reshape(model.n_head, model.hd)
