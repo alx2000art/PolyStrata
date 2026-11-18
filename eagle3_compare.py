@@ -123,6 +123,24 @@ def main() -> int:
                 best.append((float(cos[i]), bi, int(i), int(pos0_b2 + i)))
         best.sort(reverse=True)
         print(f"  {name}: " + ", ".join(f"cos={c:+.4f} блок {b} строка {r} (поз {p})" for c, b, r, p in best[:5]))
+
+    # стадии движка через НАШУ математику - идентичность строки не нужна: если cos ~1 на всех
+    # трёх, то fc/нормы/веса головы у движка и тренера - одни и те же, и расхождение сидит
+    # в attention/позиции/подаче (то, что от строки зависит), а не в весах и конвенции
+    print("\nсверка стадий движка с нашей математикой (входы - сами стадии движка):")
+    with torch.no_grad():
+        t_eng = torch.from_numpy(np.asarray(eng["taps"], dtype=np.float32)[None]).to(device)
+        fc_self = model.fc(t_eng).float().cpu().numpy()[0]
+        e_eng = torch.from_numpy(np.asarray(eng["emb"], dtype=np.float32)[None]).to(device)
+        ln1_self = model.ln1(e_eng).float().cpu().numpy()[0]
+        fc_in = torch.from_numpy(np.asarray(eng["fc"], dtype=np.float32)[None]).to(device)
+        hn_self = model.hnorm(fc_in).float().cpu().numpy()[0]
+    for name, mine in (("fc", fc_self), ("ln1", ln1_self), ("hnorm", hn_self)):
+        a = np.asarray(eng[name], dtype=np.float64)
+        b = np.asarray(mine, dtype=np.float64)
+        cos = float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-12))
+        print(f"  {name:7s} cos={cos:+.4f}  |a-b|max={np.abs(a - b).max():.4g}  "
+              f"|a|={np.linalg.norm(a):.3g} |b|={np.linalg.norm(b):.3g}")
     return 0
 
 
