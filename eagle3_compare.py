@@ -65,7 +65,13 @@ def main() -> int:
     path, off, pos0, n_rows, tokens = blocks[0]
     print(f"блок 0: {n_rows} строк, pos0 {pos0}; движковый дамп — стадии его первого inject")
     row = args.row if args.row >= 0 else min(2047, n_rows - 1)
-    pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, min(row + 1, n_rows), E, meta["taps_n"])
+    # грузим блок целиком (как в поиске): путь load_block(n=1) отдавал не ту строку - два способа
+    # чтения одного файла расходились, и сравнение смотрело на чужие taps
+    pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, min(n_rows, max(row + 1, 8192)),
+                                                  E, meta["taps_n"])
+    if row >= embs_b.shape[0]:
+        print(f"строка {row} вне загруженного среза {embs_b.shape[0]}", file=sys.stderr)
+        return 1
 
     eng = read_engine_dump(args.engine_dump, E)
     print(f"стадии движка: {', '.join(k for k in eng if not k.startswith('_'))} "
