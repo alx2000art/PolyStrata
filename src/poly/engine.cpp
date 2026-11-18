@@ -4084,11 +4084,16 @@ void Engine::hand_on(int64_t pos, int n, float* h) {
     next_->pass_at_ = pos;
 }
 
-// DBG(eagle3) STRATA_EAGLE_DUMP_DECODE=<dir>: every decode inject's row as the trainer's v2 block
-// {pos0 u64, n u32, token i32, [emb | taps] bf16} - the decode-time taps beside the read-time ones
-// (the head was fine-tuned on the read's), so the offline eval names whether they differ.
+// DBG(eagle3) STRATA_EAGLE_DUMP_DECODE=<dir>: the decode injects' rows as the trainer's v2 blocks
+// (taps-decode-*.bin), PAIRED: a block holds two consecutive injects {pos0=P, n=2, tokens[P], tokens[P+1],
+// rows P and P+1} - the trainer's label of row P is tokens[P+1], which only exists once the next inject
+// happens.  The decode-time taps beside the read-time ones (the head was fine-tuned on the read's), so
+// the offline eval names whether they differ.
 void Engine::eagle_dump_decode_row(int64_t pos, int32_t token) {
     static FILE* dump = nullptr;
+    static int64_t prev_pos = -1;
+    static int32_t prev_token = 0;
+    static std::vector<float> prev_row;             // [emb | taps] floats
     if (!dump) {
         const char* dd = std::getenv("STRATA_EAGLE_DUMP_DECODE");
         if (!dd || !*dd) return;
@@ -4112,28 +4117,35 @@ void Engine::eagle_dump_decode_row(int64_t pos, int32_t token) {
         std::fwrite(hdr, sizeof hdr, 1, dump);
         std::fprintf(stderr, "strata-poly: the decode tap dump writes to %s\n", name);
     }
-    ck(cudaStreamSynchronize(cs(st_)), "the decode dump sync");   // the taps and the emb are on st_
-    const uint64_t pos0 = (uint64_t) pos;
-    const uint32_t rows = 1u;
-    std::fwrite(&pos0, sizeof pos0, 1, dump);
-    std::fwrite(&rows, sizeof rows, 1, dump);
-    std::fwrite(&token, sizeof token, 1, dump);
-    std::vector<float> taps((size_t) dspark_taps_n_ * n_embd_);
-    ck(cudaMemcpy(taps.data(), dspark_taps_, taps.size() * sizeof(float), cudaMemcpyDeviceToHost),
-       "the decode dump taps");
+    ck(cudaStreamSynchronize(cs(st_)), "the decode dump sync");   // the taps are on st_
+    std::vector<float> cur((size_t) (dspark_taps_n_ + 1) * n_embd_);
+    for (int i = 0; i < n_embd_; ++i) cur[(size_t) i] = eagle_emb_[i];
+    ck(cudaMemcpy(cur.data() + n_embd_, dspark_taps_, (size_t) dspark_taps_n_ * n_embd_ * sizeof(float),
+                  cudaMemcpyDeviceToHost), "the decode dump taps");
     const auto bf16 = [](float f) {
         uint32_t u;
         std::memcpy(&u, &f, 4);
         u += 0x7FFFu + ((u >> 16) & 1u);   // round to nearest even
         return uint16_t(u >> 16);
     };
-    std::vector<uint16_t> row((size_t) (dspark_taps_n_ + 1) * n_embd_);   // [emb | taps]
-    for (int i = 0; i < n_embd_; ++i) row[(size_t) i] = bf16(eagle_emb_[i]);
-    for (int tp = 0; tp < dspark_taps_n_; ++tp)
-        for (int i = 0; i < n_embd_; ++i)
-            row[(size_t) (tp + 1) * n_embd_ + i] = bf16(taps[(size_t) tp * n_embd_ + i]);
-    std::fwrite(row.data(), sizeof(uint16_t), row.size(), dump);
-    std::fflush(dump);
+    if (prev_pos >= 0 && pos == prev_pos + 1) {
+        // the pair (prev, this): the trainer's label of prev's row is this row's token
+        const uint64_t pos0 = (uint64_t) prev_pos;
+        const uint32_t rows = 2u;
+        const int32_t toks[2] = {prev_token, token};
+        std::fwrite(&pos0, sizeof pos0, 1, dump);
+        std::fwrite(&rows, sizeof rows, 1, dump);
+        std::fwrite(toks, sizeof(int32_t), 2, dump);
+        for (const std::vector<float>* r : {&prev_row, &cur}) {
+            std::vector<uint16_t> row(r->size());
+            for (size_t i = 0; i < r->size(); ++i) row[i] = bf16((*r)[i]);
+            std::fwrite(row.data(), sizeof(uint16_t), row.size(), dump);
+        }
+        std::fflush(dump);
+    }
+    prev_pos = pos;
+    prev_token = token;
+    prev_row = std::move(cur);
 }
 
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
