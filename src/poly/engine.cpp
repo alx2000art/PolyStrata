@@ -4189,7 +4189,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     // row - one position behind - and every decode round named a degenerate token.
     { static int cond_dbg = 0;
       if (cond_dbg++ < 4)
-        std::fprintf(stderr, "[eagle] run cond: eagle3 %d in_read %d taps_n %d (n %d)" + std::string(1, char(10)),
+        std::fprintf(stderr, "[eagle] run cond: eagle3 %d in_read %d taps_n %d (n %d)\n",
                      eagle3_ ? 1 : 0, in_read_ ? 1 : 0, dspark_taps_n_, n); }
     if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
         for (int t = 0; t < n; ++t) {
