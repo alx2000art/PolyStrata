@@ -4188,17 +4188,16 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     // from, and that row is the one this call injects.  After the rounds it was the previous call's
     // row - one position behind - and every decode round named a degenerate token.
     if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
-        for (int j = 0; j < t; ++j) {
-            embed(tokens[j], eagle_emb_);
+        for (int t = 0; t < n; ++t) {
+            embed(tokens[t], eagle_emb_);
             ck(cudaMemcpyAsync(eagle3_->emb_dev(), eagle_emb_, (size_t) n_embd_ * sizeof(float),
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
             ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
-            eagle3_->inject(dspark_taps_ + size_t(j) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(),
-                            pos_ + j, 1, st_);
-            eagle3_->stage_state(j, st_);
-            eagle_dump_decode_row(pos_ + j, tokens[j]);
+            eagle3_->inject(dspark_taps_ + size_t(t) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(), pos_ + t, 1, st_);
+            eagle3_->stage_state(t, st_);
+            eagle_dump_decode_row(pos_ + t, tokens[t]);
         }
-        dspark_last_n_ = t;
+        dspark_last_n_ = n;
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
@@ -4805,8 +4804,8 @@ void Engine::window(const int32_t* tokens, int t) {
             eagle3_->inject(dspark_taps_ + size_t(j) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(),
                             pos_ + j, 1, st_);
             eagle3_->stage_state(j, st_);
+            eagle_dump_decode_row(pos_ + j, tokens[j]);
         }
-   
         dspark_last_n_ = t;
     }
     std::copy(tokens, tokens + t, win_tok_);
