@@ -153,7 +153,7 @@ stop_server
 "$PY" "$STRATA_DIR/eagle3_compare.py" --dump "$NEW" --engine-dump "$EDUMP" \
     --safetensors "$SATEF" --config "$HCONFIG" --row "$ROW" > "$OUT_DIR/compare_row$ROW.log" 2>&1 || true
 head -2 "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /'
-grep -A8 "строка $ROW " "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || tail -20 "$OUT_DIR/compare_row$ROW.log"
+grep -A14 "строка $ROW " "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || tail -20 "$OUT_DIR/compare_row$ROW.log"
 grep -A10 "перебор attention" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
 grep "стадии движка" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
 log ""
