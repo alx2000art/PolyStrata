@@ -149,8 +149,10 @@ void Eagle3::load(Shards& dg) {
         const float boost = 1.f + 0.1f * std::log(1.f / rope_.freq_scale);
         rope_.attn_factor = float(std::atof(rs)) / boost;
     }
-    std::fprintf(stderr, "strata-poly: the eagle3 rope: base %g, freq_scale %g, attn_factor %g, effective %g\n", base,
-                 rope_.freq_scale, rope_.attn_factor, rope_.attn_factor * (1.f + 0.1f * std::log(1.f / rope_.freq_scale)));
+    std::fprintf(stderr, "strata-poly: the eagle3 rope: base %g, freq_scale %g, attn_factor %g, effective %g, "
+                 "corr0 %g corr1 %g (n_rot %d)\n", base,
+                 rope_.freq_scale, rope_.attn_factor, rope_.attn_factor * (1.f + 0.1f * std::log(1.f / rope_.freq_scale)),
+                 (double) rope_.corr0, (double) rope_.corr1, head_dim_);
 
     // the vocab mapping
     if (const MetaValue* t = kv("eagle3.d2t"); t && t->type == MetaType::ARRAY) {

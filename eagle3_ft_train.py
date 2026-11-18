@@ -284,6 +284,7 @@ def load_model(st_path: str, head_cfg: dict, eps: float, device: str) -> tuple:
     corr = lambda rot: n_rot * math.log(n_ctx_orig / (rot * 2 * math.pi)) / (2 * math.log(base))  # noqa: E731
     rope = {"base": base, "freq_scale": 1.0 / factor, "ext_factor": ext,
             "corr0": math.floor(corr(beta_fast)), "corr1": math.ceil(corr(beta_slow))}
+    print(f"rope: base {rope['base']} freq_scale {rope['freq_scale']:.6g} ext {rope['ext_factor']} corr0 {rope['corr0']} corr1 {rope['corr1']} n_rot {n_rot}")
     m = Eagle3Head(n_embd, taps_n, n_head, n_kv, hd, n_ff, dvocab, eps, rope).to(device)
     with torch.no_grad():
         for st_name, (mod, par) in ST_MAP.items():
