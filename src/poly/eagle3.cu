@@ -503,6 +503,10 @@ void Eagle3::keep_state(int n, void* stream) {
        "the eagle's kept recursion state");
 }
 
+void Eagle3::fc_into(float* out, const float* taps_dev, void* stream) {
+    linear(fc_w_, taps_dev, 3 * n_embd_, n_embd_, out, 1, stream);
+}
+
 void Eagle3::restore_fc(void* stream) {
     if (!fc_state_) return;
     ck(cudaMemcpyAsync(hidden_, fc_state_, size_t(n_embd_) * sizeof(float), cudaMemcpyDeviceToDevice, cs(stream)),
