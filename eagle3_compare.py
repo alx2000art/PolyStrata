@@ -260,6 +260,17 @@ def main() -> int:
             print("")
             print(f"attention из стадий движка: cos(o_att, наш)={c:+.4f}  "
                   f"|движок|={np.linalg.norm(a):.3g} |наш|={np.linalg.norm(o2):.3g}")
+    # самоконтроль дампа: у движка o_out = wo(o_att); если нет - o_att снят не с той строки
+    if "o_att" in eng and "o_out" in eng:
+        with torch.no_grad():
+            a = torch.from_numpy(np.asarray(eng["o_att"], dtype=np.float32)[None]).to(device)
+            chk = model.wo(a).float().cpu().numpy()[0].astype(np.float64)
+        b = np.asarray(eng["o_out"], dtype=np.float64)
+        c = float(chk @ b / max(np.linalg.norm(chk) * np.linalg.norm(b), 1e-12))
+        print("")
+        print(f"самоконтроль движка: cos(wo(o_att), o_out)={c:+.4f}  "
+              f"|wo(o_att)|={np.linalg.norm(chk):.3g} |o_out|={np.linalg.norm(b):.3g}")
+
     # движок интерливит строки q/k при загрузке (w_rope: 2i<-i, 2i+1<-i+32): разворачиваем и сверяем
     if "q" in eng and "k" in eng:
         engq = np.asarray(eng["q"], dtype=np.float64).reshape(model.n_head, model.hd)
