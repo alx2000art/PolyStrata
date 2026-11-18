@@ -161,21 +161,27 @@ def main() -> int:
             i = torch.arange(T, device=xin.device)
             causal = i.view(-1, 1) >= i.view(1, -1)
             print("\nперебор attention-вариантов (cos с выходом движка o_out):")
-            for gqa, goff in (("adjacent", 0), ("interleaved", 1)):
-                for s in (1.0, 1.0 + 0.1 * _math.log(16.0), 1.0 / (1.0 + 0.1 * _math.log(16.0))):
-                    if gqa == "adjacent":
-                        qg = (q * s).view(T, n_kv, per, hd)
-                        kg = k * s
-                    else:
-                        qg = (q * s).view(T, per, n_kv, hd).permute(0, 2, 1, 3)
-                        kg = k * s
-                    att = torch.einsum("tqph,skh->tqps", qg, kg) / _math.sqrt(hd)
-                    w = torch.softmax(att.masked_fill(~causal[:, None, None, :], float("-inf")), dim=-1)
-                    o = torch.einsum("tqps,skh->tqph", w, v).reshape(T, n_head * hd)
-                    oo = model.wo(o)[row].float().cpu().numpy().astype(np.float64)
-                    c = float(eng_o @ oo / max(np.linalg.norm(eng_o) * np.linalg.norm(oo), 1e-12))
-                    print(f"  {gqa:12s} mscale {s:.4f}: cos={c:+.4f}  |b|={np.linalg.norm(oo):.4g} "
-                          f"(движок |a|={np.linalg.norm(eng_o):.4g})")
+            xsw = torch.cat((model.hnorm(hh), model.ln1(e)), dim=-1)   # [h | emb] вместо [emb | h]
+            for xname, xin2 in (("cat=eh", xin), ("cat=he", xsw)):
+                q2 = model.wq(xin2).view(T, n_head, hd)
+                k2 = model.wk(xin2).view(T, n_kv, hd)
+                v2 = model.wv(xin2).view(T, n_kv, hd)
+                q2 = _ra(q2, pos, model.rope)
+                k2 = _ra(k2, pos, model.rope)
+                for gqa in ("adjacent", "interleaved"):
+                    for s in (1.0, 1.0 + 0.1 * _math.log(16.0)):
+                        if gqa == "adjacent":
+                            qg = (q2 * s).view(T, n_kv, per, hd)
+                        else:
+                            qg = (q2 * s).view(T, per, n_kv, hd).permute(0, 2, 1, 3)
+                        kg = k2 * s
+                        att = torch.einsum("tqph,skh->tqps", qg, kg) / _math.sqrt(hd)
+                        w = torch.softmax(att.masked_fill(~causal[:, None, None, :], float("-inf")), dim=-1)
+                        o = torch.einsum("tqps,skh->tqph", w, v2).reshape(T, n_head * hd)
+                        oo = model.wo(o)[row].float().cpu().numpy().astype(np.float64)
+                        c = float(eng_o @ oo / max(np.linalg.norm(eng_o) * np.linalg.norm(oo), 1e-12))
+                        print(f"  {xname} {gqa:12s} mscale {s:.4f}: cos={c:+.4f}  |b|={np.linalg.norm(oo):.4g} "
+                              f"(движок |a|={np.linalg.norm(eng_o):.4g})")
 
     print("\nсверка стадий движка с нашей математикой (входы - сами стадии движка):")
     with torch.no_grad():
