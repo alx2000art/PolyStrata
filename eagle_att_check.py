@@ -49,7 +49,7 @@ for h in range(n_head):
     g = h // per
     mine[h] = (W[h][:, None] * V[:, g, :]).sum(0)
 
-cos = float((mine @ O) / max(np.linalg.norm(mine) * np.linalg.norm(O), 1e-12))
+cos = float((mine.flatten() @ O.flatten()) / max(np.linalg.norm(mine) * np.linalg.norm(O), 1e-12))
 print(f"numpy softmax(qk)v vs движковый o: cos={cos:+.4f}  |numpy|={np.linalg.norm(mine):.4g}  "
       f"|движок|={np.linalg.norm(O):.4g}")
 
