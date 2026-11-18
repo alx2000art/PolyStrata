@@ -151,6 +151,7 @@ stop_server
     --safetensors "$SATEF" --config "$HCONFIG" --row "$ROW" > "$OUT_DIR/compare_row$ROW.log" 2>&1 || true
 head -2 "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /'
 grep -A8 "строка $ROW " "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || tail -20 "$OUT_DIR/compare_row$ROW.log"
+grep -A10 "перебор attention" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
 log ""
 log "готово: $OUT_DIR/compare_row$ROW.log (полный лог сверки)"
 log "внимание: конфиг остался в дамп-режиме (DUMP_TAPS/DUMP, кэши выключены)."
