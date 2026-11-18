@@ -4931,6 +4931,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             if (ab_taps.empty()) ab_taps.resize((size_t) dspark_taps_n_ * n_embd_);
             ck(cudaMemcpy(ab_taps.data(), dspark_taps_, ab_taps.size() * sizeof(float), cudaMemcpyDeviceToHost),
                "ab taps");
+            embed(token, eagle_emb_);   // before the teacher call: eagle_emb_ is this round's token
             const float* lg_t = eagle3_->teacher_step(ab_taps.data(), eagle_emb_, pos_, st_);
             likeliest(lg_t, eagle3_->dvocab(), h_guess_, st_);
             ck(cudaStreamSynchronize(cs(st_)), "ab teacher sync");
