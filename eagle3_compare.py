@@ -51,6 +51,7 @@ def main() -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from eagle3_ft_train import Eagle3Head, load_model, load_block, scan_blocks  # noqa: E402
     import torch
+    import torch.nn.functional as F
 
     head_cfg = json.load(open(args.config, encoding="utf-8")) if args.config else {}
     eps = float(head_cfg.get("rms_norm_eps", 1e-6))
