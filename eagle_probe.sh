@@ -18,6 +18,8 @@
 # верните кэши и уберите STRATA_EAGLE_DUMP* руками.
 # ============================================================================
 set -uo pipefail
+PROBE_VER="v4 2026-11-18 (q/k/v stages)"; printf "eagle_probe %s
+" "$PROBE_VER"
 
 STRATA_DIR="${STRATA_DIR:-$HOME/PolyStrata}"
 CONFIG="${CONFIG:-$STRATA_DIR/strata-dsv4-ud-iq2_xxs.json}"
@@ -135,6 +137,7 @@ start_server
 wait_ready || die "сервер не поднялся — смотри $OUT_DIR/server.log.last"
 ELOG="$OUT_DIR/server.log.last"
 [[ -n "$LOG" && -f "$LOG" ]] && ELOG="$LOG"
+log "-- версия: $PROBE_VER"
 log "-- rope движка:"
 grep -h "eagle3 rope" "$ELOG" 2>/dev/null | tail -1 | sed 's/^/   /' || true
 
@@ -152,6 +155,7 @@ stop_server
 head -2 "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /'
 grep -A8 "строка $ROW " "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || tail -20 "$OUT_DIR/compare_row$ROW.log"
 grep -A10 "перебор attention" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
+grep "стадии движка" "$OUT_DIR/compare_row$ROW.log" | sed 's/^/   /' || true
 log ""
 log "готово: $OUT_DIR/compare_row$ROW.log (полный лог сверки)"
 log "внимание: конфиг остался в дамп-режиме (DUMP_TAPS/DUMP, кэши выключены)."

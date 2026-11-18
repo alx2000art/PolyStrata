@@ -21,6 +21,8 @@ import sys
 
 import numpy as np
 
+CMP_VER = "v3 2026-11-18 (q/k/v stages)"
+
 
 def read_engine_dump(path: str, n_embd: int, kv_width: int = 0) -> dict:
     data = np.fromfile(path, dtype=np.float32)
@@ -61,6 +63,7 @@ def main() -> int:
     model, meta = load_model(args.safetensors, head_cfg, eps, device)
     E = meta["n_embd"]
 
+    print(f"eagle3_compare {CMP_VER}")
     blocks, _, _ = scan_blocks([args.dump])
     if not blocks:
         print("нет блоков в дампе", file=sys.stderr)
