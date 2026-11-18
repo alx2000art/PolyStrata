@@ -117,6 +117,7 @@ def main() -> int:
         got["q"] = q_t[row].float().cpu().numpy().reshape(-1)
         got["k"] = k_t[row].float().cpu().numpy().reshape(-1)
         got["v"] = v_t[row].float().cpu().numpy().reshape(-1)
+        got["o_att"] = o[row].float().cpu().numpy().reshape(-1)   # attention output, pre-o_proj
 
     print(f"\nстрока {row} блока 0 (абс. поз. {pos0_b + row}):")
     for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v", "o_att"):
