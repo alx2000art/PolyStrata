@@ -4912,10 +4912,11 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             ck(cudaStreamSynchronize(cs(st_)), "eagle probe anchor");
         }
         if (i == 0) {
-            eagle3_->rewind(pos_);
-            // the round's first step starts from fc(taps) - the state the head is trained on
-            // (TEACH's (emb p, h p) -> p+1).  The residual the inject left is for the recursion
-            // steps only; with it the first step named a degenerate token in every round.
+            // the round's first step is the head's own row of the LAST KNOWN token (position pos_ - 1),
+            // exactly as TEACH asks it: (fc(taps p), emb p, pos p) -> p+1.  The row sits at its own
+            // position, its k/v are the read's own row's (the same inputs - the write is idempotent),
+            // and the restored fc is the state the head is trained on, not the inject's residual.
+            eagle3_->rewind(pos_ - 1);
             eagle3_->restore_fc(st_);
         }
         embed(token, eagle_emb_);
