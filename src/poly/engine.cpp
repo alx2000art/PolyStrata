@@ -4205,7 +4205,6 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
         }
         if (want_logits) ck(cudaStreamSynchronize(cs(st_)), "eval");
     }
-    }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
     pos_ += n;
