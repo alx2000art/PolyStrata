@@ -5033,6 +5033,32 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             std::fprintf(stderr, "[eagle] AB fc: cos=%+.4f |a|=%.3g |b|=%.3g maxdiff=%.3g (pos %lld)\n",
                          (na * nb) > 0 ? dot / std::sqrt(na * nb) : 0.0, std::sqrt(na), std::sqrt(nb), md, (long long) pos_);
         }
+        // DBG(eagle3) STRATA_EAGLE_ROUND_AB=2: the round's row through BOTH paths - the teacher_step
+        // (TEACH's own call, 41% at the read's tail) and the draft_logits below - the two argmaxes name
+        // whether the functions or the surroundings differ.  The round's h is saved and restored, so the
+        // normal path proceeds unchanged.
+        static const bool round_ab2 = [&] {
+            const char* v = std::getenv("STRATA_EAGLE_ROUND_AB");
+            return v && v[0] == '2';
+        }();
+        if (round_ab2 && i == 0) {
+            static std::vector<float> ab_taps, ab_h;
+            if (ab_taps.empty()) { ab_taps.resize((size_t) dspark_taps_n_ * n_embd_);
+                                   ab_h.resize((size_t) n_embd_); }
+            ck(cudaMemcpy(ab_taps.data(), dspark_taps_ + size_t(dspark_last_n_ - 1) * dspark_taps_n_ * n_embd_,
+                          ab_taps.size() * sizeof(float), cudaMemcpyDeviceToHost), "ab taps");
+            ck(cudaMemcpy(ab_h.data(), eagle3_->hidden_dev(), ab_h.size() * sizeof(float), cudaMemcpyDeviceToHost),
+               "ab h");
+            embed(token, eagle_emb_);
+            const float* lg_t = eagle3_->teacher_step(ab_taps.data(), eagle_emb_, pos_ - 1, st_);
+            likeliest(lg_t, eagle3_->dvocab(), h_guess_, st_);
+            ck(cudaStreamSynchronize(cs(st_)), "ab teacher sync");
+            std::fprintf(stderr, "[eagle] AB teacher pos %lld: p=%.4f draft_id=%d -> target=%d\n",
+                         (long long) (pos_ - 1), (double) h_guess_->prob, (int) h_guess_->token,
+                         (int) eagle3_->d2t(h_guess_->token));
+            ck(cudaMemcpy(eagle3_->hidden_dev(), ab_h.data(), ab_h.size() * sizeof(float), cudaMemcpyHostToDevice),
+               "ab h back");
+        }
         embed(token, eagle_emb_);
         ck(cudaStreamSynchronize(cs(st_)), "draft after embed");
         const float* logits = eagle3_->draft_logits(token, eagle_emb_, st_);
