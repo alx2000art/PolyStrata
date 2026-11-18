@@ -45,6 +45,7 @@ public:
     void fc_into(float* out, const float* taps_dev, void* stream);
     /// the AB check's buffers (the engine reads them back to the host)
     float* att_dump_dev() { return att_dump_; }
+    float* hidden_dev() { return hidden_; }
     float* fc_state_dev() { return fc_state_; }
     /// The round's first step's state: the head's own fc(taps) of the row the round starts from,
     /// preserved by inject() before the midlayer overwrote the residual (the reference's input).

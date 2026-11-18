@@ -4132,6 +4132,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
             eagle3_->inject(dspark_taps_ + size_t(t) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(), pos_ + t, 1, st_);
             eagle3_->stage_state(t, st_);
         }
+        dspark_last_n_ = n;
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
@@ -4739,6 +4740,8 @@ void Engine::window(const int32_t* tokens, int t) {
                             pos_ + j, 1, st_);
             eagle3_->stage_state(j, st_);
         }
+   
+        dspark_last_n_ = t;
     }
     std::copy(tokens, tokens + t, win_tok_);
     if (next_) {   // a card's way is timed by its own layers
@@ -4921,7 +4924,14 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // teacher_step writes the cache row at cache_pos_ and crashes beyond the cache without it.
         if (i == 0) {
             eagle3_->rewind(pos_);
-            eagle3_->restore_fc(st_);
+            // the round's first step's state: fc(taps) of the LAST row of the last eval's taps -
+            // the row this round starts from.  The decode runs in windowed bursts, so the row is
+            // dspark_taps_'s last one, not its first (the first was the burst's earliest token).
+            if (dspark_last_n_ > 0)
+                eagle3_->fc_into(eagle3_->hidden_dev(),
+                                 dspark_taps_ + size_t(dspark_last_n_ - 1) * dspark_taps_n_ * n_embd_, st_);
+            else
+                eagle3_->restore_fc(st_);
         }
         // DBG(eagle3) STRATA_EAGLE_ROUND_AB=1: is the restored fc_state_ the fc of THIS row?
         // (the earlier teacher_step A/B crashed inside its attend: cuBLAS 14 at m=26k; this check
@@ -4929,7 +4939,8 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         static const bool round_ab = std::getenv("STRATA_EAGLE_ROUND_AB") != nullptr;
         if (round_ab && i == 0) {
             eagle3_->fc_into(eagle3_->att_dump_dev(), dspark_taps_, st_);
-            ck(cudaStreamSynchronize(cs(st_)), "ab fc sync");
+            ck(cudaStreamSynchronize(cs(st_)), "ab fc sync");   // both D2H reads must see the stream's writes
+            ck(cudaStreamSynchronize(cs(st_)), "ab fc sync2");
             static std::vector<float> a, b;
             if (a.empty()) { a.resize((size_t) n_embd_); b.resize((size_t) n_embd_); }
             ck(cudaMemcpy(a.data(), eagle3_->att_dump_dev(), n_embd_ * sizeof(float), cudaMemcpyDeviceToHost),

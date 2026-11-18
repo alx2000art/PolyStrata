@@ -84,6 +84,7 @@ struct Options {
                                   ///< less (--read-heat 0: the counts leave the cache alone, as before)
     int attend_batch = 1;         ///< DeepSeek V4's attention takes two tokens a block, the two raw windows' union
                                   ///< staged once (--attend-batch); 0: a token a block
+    int dspark_last_n_ = 0;       ///< the last eval's token count whose taps sit in dspark_taps_ (the round's fc source)
     int group_heads = 16;         ///< the heads attend_rows_kernel's block takes: 16, or 8 as the kernel first
                                   ///< was (--group-heads; a pair of tokens is always 16)
     int q8_dequant = 1;           ///< with --kv q8_0: the packed half2 dequant of a staged key row; 0: a value
