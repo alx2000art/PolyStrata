@@ -113,7 +113,11 @@ def yarn_phase(pos: "torch.Tensor", iw_half: "torch.Tensor", base: float, freq_s
     y = (iw_half.float().unsqueeze(0) - corr0) / max(0.001, corr1 - corr0)
     ramp = (1.0 - torch.clamp(y, 0.0, 1.0)) * ext_factor
     theta = theta_interp * (1 - ramp) + theta_extrap * ramp
-    mscale = 1.0 + 0.1 * math.log(1.0 / freq_scale)      # = 1.0 при our attn_factor (см. доку)
+    # движок: mscale = attn_factor * (1 + 0.1*ln(1/freq_scale)), где attn_factor при yarn =
+    # 1/(1 + 0.1*ln(1/freq_scale)) - произведение РОВНО 1.0. Раньше здесь стоял только boost
+    # (1.277 при factor 16): q/k офлайн вращались на 28% сильнее движка, скоры внимания были
+    # острее в 1.63 раза - голова училась под чужую температуру (73% офлайн vs 35% в движке).
+    mscale = 1.0
     return theta, mscale
 
 
