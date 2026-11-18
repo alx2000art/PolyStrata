@@ -441,6 +441,11 @@ void Eagle3::inject(const float* taps_dev, float* emb_dev, int64_t pos, int n, v
             // (its direction and its scale), the mlp's output names the rest
             put(o_out_, e, drow, e);
             put(o_, e, drow, e);
+            // and the attention's own inputs: q (after the rope), k, v of the row - a divergence here
+            // names the projections/rope, a match names the softmax/mask
+            put(q_, (size_t) n_head_ * head_dim_, drow, (size_t) n_head_ * head_dim_);
+            put(k_, (size_t) n_kv_ * head_dim_, drow, (size_t) n_kv_ * head_dim_);
+            put(v_, (size_t) n_kv_ * head_dim_, drow, (size_t) n_kv_ * head_dim_);
             std::fclose(f);
             std::fprintf(stderr, "[eagle] dumped the stages to %s (pos %lld)\n", dpath, (long long) (pos + drow));
         }

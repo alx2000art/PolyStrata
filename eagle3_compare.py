@@ -22,14 +22,16 @@ import sys
 import numpy as np
 
 
-def read_engine_dump(path: str, n_embd: int) -> dict:
+def read_engine_dump(path: str, n_embd: int, kv_width: int = 0) -> dict:
     data = np.fromfile(path, dtype=np.float32)
     e = n_embd
-    names = ["taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp"]
+    names = ["taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v"]
     out, off = {}, 0
-    widths = {"taps": 3 * e}
+    widths = {"taps": 3 * e, "k": kv_width or None, "v": kv_width or None}
     for name in names:
         w = widths.get(name, e)
+        if w is None:
+            break
         if off + w > len(data):
             break
         out[name] = data[off:off + w]
@@ -74,7 +76,7 @@ def main() -> int:
         print(f"строка {row} вне загруженного среза {embs_b.shape[0]}", file=sys.stderr)
         return 1
 
-    eng = read_engine_dump(args.engine_dump, E)
+    eng = read_engine_dump(args.engine_dump, E, model.n_kv * model.hd)
     print(f"стадии движка: {', '.join(k for k in eng if not k.startswith('_'))} "
           f"(+{eng['_rest'].size} float хвостом)")
     if "taps" not in eng or "fc" not in eng:
@@ -103,9 +105,18 @@ def main() -> int:
             "o_out": wo_out[row].float().cpu().numpy(),
             "o_mlp": mlp_out[row].float().cpu().numpy(),
         }
+        from eagle3_ft_train import rope_apply as _ra2
+        xin = torch.cat((model.ln1(e), model.hnorm(h)), dim=-1)
+        Tq = xin.shape[0]
+        q_t = _ra2(model.wq(xin).view(Tq, model.n_head, model.hd), pos, model.rope)
+        k_t = _ra2(model.wk(xin).view(Tq, model.n_kv, model.hd), pos, model.rope)
+        v_t = model.wv(xin).view(Tq, model.n_kv, model.hd)
+        got["q"] = q_t[row].float().cpu().numpy().reshape(-1)
+        got["k"] = k_t[row].float().cpu().numpy().reshape(-1)
+        got["v"] = v_t[row].float().cpu().numpy().reshape(-1)
 
     print(f"\nстрока {row} блока 0 (абс. поз. {pos0_b + row}):")
-    for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp"):
+    for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed", "o_out", "o_mlp", "q", "k", "v"):
         if name not in eng:
             continue
         a = np.asarray(eng[name], dtype=np.float64)
