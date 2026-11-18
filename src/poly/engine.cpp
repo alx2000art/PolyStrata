@@ -4923,7 +4923,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // the head is trained on, not the inject's residual.  The rewind goes FIRST: the A/B's
         // teacher_step writes the cache row at cache_pos_ and crashes beyond the cache without it.
         if (i == 0) {
-            eagle3_->rewind(pos_);
+            eagle3_->rewind(pos_ - 1);
             // the round's first step's state: fc(taps) of the LAST row of the last eval's taps -
             // the row this round starts from.  The decode runs in windowed bursts, so the row is
             // dspark_taps_'s last one, not its first (the first was the burst's earliest token).
