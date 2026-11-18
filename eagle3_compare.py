@@ -77,19 +77,19 @@ def main() -> int:
     x_embs = torch.from_numpy(embs_b[:row + 1]).to(device)
     x_taps = torch.from_numpy(taps_b[:row + 1]).to(device)
     pos = torch.arange(pos0_b, pos0_b + row + 1, device=device)
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+    with torch.no_grad():
         h = model.fc(x_taps.reshape(row + 1, -1))
-        o = model._residual(torch.cat((model.ln1(torch.from_numpy(embs_b[:row + 1]).to(device)),
-                                       model.hnorm(h)), dim=-1), pos)
+        e = torch.from_numpy(embs_b[:row + 1]).to(device)
+        o = model._residual(torch.cat((model.ln1(e), model.hnorm(h)), dim=-1), pos)
         hidden = model._head_out(h, o)
         normed = model.out_norm(hidden)
-    got = {
-        "fc": h[row].float().cpu().numpy(),
-        "hnorm": model.hnorm(h[row:row + 1]).float().cpu().numpy()[0],
-        "normed": normed[row].float().cpu().numpy(),
-        "emb": embs_b[row],
-    }
-    got["ln1"] = model.ln1(torch.from_numpy(embs_b[row:row + 1]).to(device)).float().cpu().numpy()[0]
+        got = {
+            "fc": h[row].float().cpu().numpy(),
+            "emb": embs_b[row],
+            "ln1": model.ln1(e[row:row + 1]).float().cpu().numpy()[0],
+            "hnorm": model.hnorm(h[row:row + 1]).float().cpu().numpy()[0],
+            "normed": normed[row].float().cpu().numpy(),
+        }
 
     print(f"\nстрока {row} блока 0 (абс. поз. {pos0_b + row}):")
     for name in ("taps", "fc", "emb", "ln1", "hnorm", "normed"):
