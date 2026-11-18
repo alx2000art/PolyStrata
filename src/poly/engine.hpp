@@ -84,7 +84,6 @@ struct Options {
                                   ///< less (--read-heat 0: the counts leave the cache alone, as before)
     int attend_batch = 1;         ///< DeepSeek V4's attention takes two tokens a block, the two raw windows' union
                                   ///< staged once (--attend-batch); 0: a token a block
-    int dspark_last_n_ = 0;       ///< the last eval's token count whose taps sit in dspark_taps_ (the round's fc source)
     int group_heads = 16;         ///< the heads attend_rows_kernel's block takes: 16, or 8 as the kernel first
                                   ///< was (--group-heads; a pair of tokens is always 16)
     int q8_dequant = 1;           ///< with --kv q8_0: the packed half2 dequant of a staged key row; 0: a value
@@ -876,6 +875,7 @@ protected:
     float* dspark_taps_ = nullptr;                 ///< dspark_taps_n_ slots of rows_ * n_embd_ floats
     int dspark_tap_layers_[3] = {-1, -1, -1};      ///< the layers the taps come from
     int dspark_taps_n_ = 0;                        ///< the filled slots (0: the capture is off)
+    int dspark_last_n_ = 0;                        ///< the last eval's token count: its taps sit in dspark_taps_
     int eagle_taps_ = -1;                          ///< STRATA_EAGLE_TAPS: 0 the streams' mean, 1..4 a stream
     bool draft_is_eagle3_ = false;                 ///< the draft file is a dflash/eagle3 head - the
                                                    ///< Eagle3 drafter consumes it, not the nextn probe
