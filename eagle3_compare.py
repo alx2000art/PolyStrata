@@ -227,6 +227,39 @@ def main() -> int:
                 print(f"  пара {i:2d}: движок {theta_eng[i]:+.4f}  наш {theta_ours[i]:+.4f}  "
                       f"diff {d:+.4f} (в периодах {d / (2 * np.pi):+.4f})")
 
+    # attention из САМИХ стадий движка: q/k разворачиваем из интерлива к HF-порядку, прошлые
+    # ключи/значения берём наши (в дампе только текущая строка), считаем softmax и сравниваем с o_att
+    if all(k in eng for k in ("q", "k", "v", "o_att")):
+        import math as _m3
+        with torch.no_grad():
+            hh = model.fc(x_taps.reshape(row + 1, -1))
+            xin = torch.cat((model.ln1(e), model.hnorm(hh)), dim=-1)
+            T = xin.shape[0]
+            n_head, n_kv, hd = model.n_head, model.n_kv, model.hd
+            per = n_head // n_kv
+            engq = np.asarray(eng["q"], dtype=np.float64).reshape(n_head, hd)
+            engk = np.asarray(eng["k"], dtype=np.float64).reshape(n_kv, hd)
+            q_un = np.concatenate((engq[:, 0::2], engq[:, 1::2]), axis=1)
+            k_un = np.concatenate((engk[:, 0::2], engk[:, 1::2]), axis=1)
+            v_row = np.asarray(eng["v"], dtype=np.float64).reshape(n_kv, hd)
+            qh = _ra2(model.wq(xin).view(T, n_head, hd), pos, model.rope)
+            kh = _ra2(model.wk(xin).view(T, n_kv, hd), pos, model.rope)
+            vh = model.wv(xin).view(T, n_kv, hd)
+            qa = qh.clone(); qa[row] = torch.from_numpy(q_un).to(qh.dtype)
+            ka = kh.clone(); ka[row] = torch.from_numpy(k_un).to(kh.dtype)
+            va = vh.clone(); va[row] = torch.from_numpy(v_row).to(vh.dtype)
+            i2 = torch.arange(T, device=xin.device)
+            causal2 = i2.view(-1, 1) >= i2.view(1, -1)
+            qg = qa.view(T, n_kv, per, hd)
+            att = torch.einsum("tqph,skh->tqps", qg, ka) / _m3.sqrt(hd)
+            w = torch.softmax(att.masked_fill(~causal2[:, None, None, :], float("-inf")), dim=-1)
+            o2 = torch.einsum("tqps,skh->tqph", w, va).reshape(T, n_head * hd)[row]
+            o2 = o2.float().cpu().numpy().astype(np.float64)
+            a = np.asarray(eng["o_att"], dtype=np.float64)
+            c = float(a @ o2 / max(np.linalg.norm(a) * np.linalg.norm(o2), 1e-12))
+            print("")
+            print(f"attention из стадий движка: cos(o_att, наш)={c:+.4f}  "
+                  f"|движок|={np.linalg.norm(a):.3g} |наш|={np.linalg.norm(o2):.3g}")
     # движок интерливит строки q/k при загрузке (w_rope: 2i<-i, 2i+1<-i+32): разворачиваем и сверяем
     if "q" in eng and "k" in eng:
         engq = np.asarray(eng["q"], dtype=np.float64).reshape(model.n_head, model.hd)
