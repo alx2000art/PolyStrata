@@ -259,6 +259,9 @@ public:
     /// Feed n tokens from position pos().  With want_logits, logits() then holds the scores of the token after the
     /// last one.
     void eval(const int32_t* tokens, int n, bool want_logits);
+    /// DBG(eagle3) STRATA_EAGLE_DUMP_DECODE=<dir>: the decode injects' rows as the trainer's v2 blocks
+    /// (taps-decode-*.bin) - the decode-time taps next to the read-time ones, for the offline comparison.
+    void eagle_dump_decode_row(int64_t pos, int32_t token);
     const float* logits() const { return next_ ? next_->logits() : h_logits_; }
     /// Feed n tokens of a prompt, none of them a picture's row, as eval() without logits would in calls of
     /// max_rows(): the same tokens a call.  With experts outside the cache it is faster than those calls, the

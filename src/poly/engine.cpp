@@ -4084,6 +4084,58 @@ void Engine::hand_on(int64_t pos, int n, float* h) {
     next_->pass_at_ = pos;
 }
 
+// DBG(eagle3) STRATA_EAGLE_DUMP_DECODE=<dir>: every decode inject's row as the trainer's v2 block
+// {pos0 u64, n u32, token i32, [emb | taps] bf16} - the decode-time taps beside the read-time ones
+// (the head was fine-tuned on the read's), so the offline eval names whether they differ.
+void Engine::eagle_dump_decode_row(int64_t pos, int32_t token) {
+    static FILE* dump = nullptr;
+    if (!dump) {
+        const char* dd = std::getenv("STRATA_EAGLE_DUMP_DECODE");
+        if (!dd || !*dd) return;
+        char name[4096];
+        const std::time_t now = std::time(nullptr);
+        std::tm lt{};
+#ifdef _WIN32
+        localtime_s(&lt, &now);
+#else
+        localtime_r(&now, &lt);
+#endif
+        std::snprintf(name, sizeof name, "%s/taps-decode-%04d%02d%02d-%02d%02d%02d.bin", dd,
+                      lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+        dump = std::fopen(name, "wb");
+        if (!dump) {
+            std::fprintf(stderr, "strata-poly: the decode tap dump cannot be opened at %s\n", name);
+            return;
+        }
+        const uint32_t hdr[5] = {0x50415445u /* "ETAP" */, 2u, (uint32_t) n_embd_,
+                                 (uint32_t) dspark_taps_n_, 1u /* has_emb */};
+        std::fwrite(hdr, sizeof hdr, 1, dump);
+        std::fprintf(stderr, "strata-poly: the decode tap dump writes to %s\n", name);
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "the decode dump sync");   // the taps and the emb are on st_
+    const uint64_t pos0 = (uint64_t) pos;
+    const uint32_t rows = 1u;
+    std::fwrite(&pos0, sizeof pos0, 1, dump);
+    std::fwrite(&rows, sizeof rows, 1, dump);
+    std::fwrite(&token, sizeof token, 1, dump);
+    std::vector<float> taps((size_t) dspark_taps_n_ * n_embd_);
+    ck(cudaMemcpy(taps.data(), dspark_taps_, taps.size() * sizeof(float), cudaMemcpyDeviceToHost),
+       "the decode dump taps");
+    const auto bf16 = [](float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        u += 0x7FFFu + ((u >> 16) & 1u);   // round to nearest even
+        return uint16_t(u >> 16);
+    };
+    std::vector<uint16_t> row((size_t) (dspark_taps_n_ + 1) * n_embd_);   // [emb | taps]
+    for (int i = 0; i < n_embd_; ++i) row[(size_t) i] = bf16(eagle_emb_[i]);
+    for (int tp = 0; tp < dspark_taps_n_; ++tp)
+        for (int i = 0; i < n_embd_; ++i)
+            row[(size_t) (tp + 1) * n_embd_ + i] = bf16(taps[(size_t) tp * n_embd_ + i]);
+    std::fwrite(row.data(), sizeof(uint16_t), row.size(), dump);
+    std::fflush(dump);
+}
+
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     OnCard here(device_, split_);
     run(tokens, n);
@@ -4124,15 +4176,17 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     // from, and that row is the one this call injects.  After the rounds it was the previous call's
     // row - one position behind - and every decode round named a degenerate token.
     if (eagle3_ && !in_read_ && dspark_taps_n_ > 0) {
-        for (int t = 0; t < n; ++t) {
-            embed(tokens[t], eagle_emb_);
+        for (int j = 0; j < t; ++j) {
+            embed(tokens[j], eagle_emb_);
             ck(cudaMemcpyAsync(eagle3_->emb_dev(), eagle_emb_, (size_t) n_embd_ * sizeof(float),
                                cudaMemcpyHostToDevice, cs(st_)), "the eagle emb");
             ck(cudaStreamSynchronize(cs(st_)), "the eagle emb copy");   // the host row is reused below
-            eagle3_->inject(dspark_taps_ + size_t(t) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(), pos_ + t, 1, st_);
-            eagle3_->stage_state(t, st_);
+            eagle3_->inject(dspark_taps_ + size_t(j) * dspark_taps_n_ * n_embd_, eagle3_->emb_dev(),
+                            pos_ + j, 1, st_);
+            eagle3_->stage_state(j, st_);
+            eagle_dump_decode_row(pos_ + j, tokens[j]);
         }
-        dspark_last_n_ = n;
+        dspark_last_n_ = t;
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
