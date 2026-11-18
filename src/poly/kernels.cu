@@ -2700,6 +2700,12 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
             const half* vrow = vq ? (const half*) vwork : (const half*) vcache + size_t(row) * width;
             // A product a group: its heads' queries of every token of the chunk against the group's keys.  cuBLAS
             // reads the cache's rows as the transpose, and the groups' keys lie `dim` apart in a row.
+            static const bool dbg_gemm = std::getenv("STRATA_EAGLE_ROUND_AB") != nullptr;
+            if (dbg_gemm && k0 == 0)
+                std::fprintf(stderr, "[eagle] gemm m %d cols %lld k %d lda %d sA %d ldb %d sB %lld ldc %d sC %lld batch %d
+",
+                             m, (long long) cols, dim, width, dim, dim, (long long) (cols * dim), m,
+                             (long long) (cols * m), kv_heads);
             blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, m, (int) cols, dim, &scale,
                                                krow, CUDA_R_16F, width, dim, qg,
                                                CUDA_R_16F, dim, cols * dim, &zero, score, CUDA_R_32F, m, cols * m,
