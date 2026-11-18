@@ -372,7 +372,7 @@ def main() -> int:
     if args.eval_only:
         # та же метрика, что TEACH движка: (emb p, h p) -> p+1 и (emb p+1, h p) -> p+2.
         # top-1 считается по позициям, чья метка есть в draft-словаре (иначе позиция не измерима)
-        tot1 = hit1 = tot2 = hit2 = 0
+        tot1 = hit1 = tot2 = hit2 = tot3 = hit3 = 0
         with torch.no_grad():
             for path, off, pos0, n_rows, _tokens_meta in blocks:
                 pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
@@ -384,8 +384,8 @@ def main() -> int:
                     pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                         # нога 1: (emb p, h p) -> p+1 - строка p несёт и embs[p], и taps[p]
-                        logits, _ = model(torch.from_numpy(embs_b[start:start + length]).to(device),
-                                       torch.from_numpy(taps_b[start:start + length]).to(device), pos)
+                        logits, hid = model(torch.from_numpy(embs_b[start:start + length]).to(device),
+                                            torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                     lab1 = map_labels(np.asarray(tokens_b[start + 1:start + length + 1]), tgt2draft)
                     pred = logits.argmax(-1).cpu().numpy()
                     ok = (lab1 >= 0) & (pred == lab1)
@@ -400,9 +400,20 @@ def main() -> int:
                     ok2 = (lab2 >= 0) & (pred2 == lab2)
                     tot2 += int((lab2 >= 0).sum())
                     hit2 += int(ok2.sum())
+                    # нога 3: математика ПЕРВОГО decode-шага движка: h = собственный residual головы
+                    # на строке p (inject уже прогнал слой), позиция p+1, метка та же p+1.
+                    # Если тут ~0% при 30%+ у ноги 1 - движок спрашивает голову не тем входом.
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                        logits3 = model.step_hidden(hid, torch.from_numpy(embs_b[start:start + length]).to(device),
+                                                    pos + 1)
+                    pred3 = logits3.argmax(-1).cpu().numpy()
+                    ok3 = (lab1 >= 0) & (pred3 == lab1)
+                    tot3 += int((lab1 >= 0).sum())
+                    hit3 += int(ok3.sum())
         print(f"eval-only (top-1 среди покрытых d2t): "
               f"(emb p, h p) -> p+1: {hit1} из {tot1} ({100 * hit1 / max(tot1, 1):.1f}%), "
-              f"(emb p+1, h p) -> p+2: {hit2} из {tot2} ({100 * hit2 / max(tot2, 1):.1f}%)")
+              f"(emb p+1, h p) -> p+2: {hit2} из {tot2} ({100 * hit2 / max(tot2, 1):.1f}%), "
+              f"decode step (h=residual p, pos p+1): {hit3} из {tot3} ({100 * hit3 / max(tot3, 1):.1f}%)")
         return 0
 
     if args.opt8:
