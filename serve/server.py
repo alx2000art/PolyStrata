@@ -3275,8 +3275,9 @@ class Service:
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
-        # opt-in "warm_start": the first turn of the last long prompt with tools (an agent's system prompt), kept
-        # next to the config and read when the server starts; a request stops that read and goes first
+        # opt-in "warm_start": true - the first turn of the last long prompt with tools (an agent's system prompt),
+        # kept next to the config and read when the server starts; a path - that chat request (its messages rendered
+        # and tokenized like any request's) read at every (re)start; a request stops the read and goes first
         self.warm_start = False
         self.warm_ids = None                              # the start kept last (keep_start())
         self.warm_stop = threading.Event()                # set: no warm read runs, or the one running is to stop
@@ -3375,23 +3376,68 @@ class Service:
         except OSError as e:
             print(f"[strata] warm start: {path} could not be written ({e})", flush=True)
 
+    def read_warm_request(self, path: str):
+        """A pinned chat request's file: {"messages": [...]} (with optional "tools"), a bare message list, or
+        {"prompt": "..."}.  Returns (messages, tools, kwargs) for encode_prompt(), or None (the reason printed)."""
+        try:
+            body = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            print(f"[strata] warm start: {path} does not exist; ignored", flush=True)
+            return None
+        except (OSError, ValueError) as e:
+            print(f"[strata] warm start: {path} cannot be read ({e}); ignored", flush=True)
+            return None
+        if isinstance(body, list):
+            body = {"messages": body}
+        messages = body.get("messages") if isinstance(body, dict) else None
+        if not isinstance(messages, list) or not messages:
+            if isinstance(body, dict) and isinstance(body.get("prompt"), str) and body["prompt"].strip():
+                messages = [{"role": "user", "content": body["prompt"]}]
+            else:
+                print(f"[strata] warm start: {path} holds no messages; ignored", flush=True)
+                return None
+        for m in messages:
+            if not isinstance(m, dict) or not isinstance(m.get("role"), str) or \
+                    not isinstance(m.get("content") or "", str):
+                print(f"[strata] warm start: {path}'s messages are not a chat request's; ignored", flush=True)
+                return None
+        tools = body.get("tools") if isinstance(body, dict) else None
+        kwargs = {}
+        if isinstance(body, dict) and isinstance(body.get("reasoning_effort"), str):
+            kwargs["reasoning_effort"] = body["reasoning_effort"]       # the effort changes the template's tail
+        return messages, tools, kwargs
+
     def start_warm(self) -> None:
-        """"warm_start": read the prompt start keep_start() kept when the server ran last, so that the first request
-        that starts with it again reads only what follows.  A request stops the read (run() sets warm_stop); the part
-        read stays cached."""
+        """"warm_start": read the prompt start so that the first request that starts with it again reads only what
+        follows.  true: the start keep_start() kept when the server ran last (warm_path()); a path: that chat
+        request's messages, rendered and tokenized like any request's.  A request stops the read (run() sets
+        warm_stop); the part read stays cached."""
         if not self.warm_start or not self.loaded():
             return
-        path = self.warm_path()
-        try:
-            ids = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return
-        except (OSError, ValueError) as e:
-            print(f"[strata] warm start: {path} cannot be read ({e})", flush=True)
-            return
+        if isinstance(self.warm_start, str):
+            req = self.read_warm_request(self.warm_start)
+            if req is None:
+                return
+            messages, tools, kwargs = req
+            try:
+                ids = self.encode_prompt(messages, tools, kwargs, store=False)   # #567: not a request: keeps none
+            except Exception as e:
+                print(f"[strata] warm start: {self.warm_start} could not be encoded ({e})", flush=True)
+                return
+            name = self.warm_start
+        else:
+            name = path = self.warm_path()
+            try:
+                ids = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return
+            except (OSError, ValueError) as e:
+                print(f"[strata] warm start: {path} cannot be read ({e})", flush=True)
+                return
         if not (isinstance(ids, list) and WARM_MIN_TOKENS <= len(ids) < self.engine.max_context and
                 all(isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in ids)):
-            print(f"[strata] warm start: {path} is not a kept prompt start; ignored", flush=True)
+            print(f"[strata] warm start: {name} is not a kept prompt start of {WARM_MIN_TOKENS}+ tokens; ignored",
+                  flush=True)
             return
         self.warm_ids = ids
         stop = self.warm_stop = threading.Event()
@@ -3916,6 +3962,7 @@ class Service:
                 self.vision.unload()
             raise
         print("[strata] the engine is running again", flush=True)
+        self.start_warm()                                # the pinned prompt (or the kept start) reads again
         if self.restore_after_load:                      # an image job unloaded it: its conversation comes back
             images_api.restore_session(self)
         if self.vram_reserve is not None and hasattr(self.engine, "vram"):   # #533: the reserve asked for last
@@ -4781,7 +4828,7 @@ class Service:
         if emb:                                         # strata-poly finds the images' rows by their token
             sampling = {**(sampling or {}), "image_pad": self.embeddings.pad}
         self.warm_stop.set()                            # a warm read (start_warm()) gives way
-        if self.warm_start and tools and not emb:
+        if self.warm_start is True and tools and not emb:   # a pinned path's start is the config's, not captured
             self.keep_start(ids)
         img_keys, self.embeddings.keys = getattr(self.embeddings, "keys", None), None
         if emb and img_keys:
@@ -7343,6 +7390,14 @@ def model_settings(cfg: dict, overrides: dict | None = None) -> dict:
             raise ValueError(f"\"{key}\" must be true or false, not {v!r}")
         return v
 
+    def warm_start_value():                            # true/false, or the path of a chat request to pin
+        v = cfg.get("warm_start", False)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        raise ValueError(f"\"warm_start\" must be true, false or the path of a chat request, not {v!r}")
+
     def number(key, kind, words):
         try:
             return kind(cfg.get(key) or 0)
@@ -7382,7 +7437,7 @@ def model_settings(cfg: dict, overrides: dict | None = None) -> dict:
         "aliases": alias_list(cfg.get("aliases")),                           # #297: other names the model answers to
         "anthropic_think_unasked": mode == "model",
         "tool_call_recovery": flag("tool_call_recovery"),                    # opt-in: see OutputParser's recover
-        "warm_start": flag("warm_start"),                                    # opt-in: see Service.start_warm
+        "warm_start": warm_start_value(),               # true/false or a chat request's path: see start_warm
         "repeat_stop_tokens": rs,
         "reasoning_budget_tokens": budget if budget is not None else 0,
         "reasoning_loop_recovery": loops,
