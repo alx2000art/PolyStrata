@@ -1273,6 +1273,7 @@ int main(int argc, char** argv) {
         else if (a == "--lookup") lookup = std::atoi(val());
         else if (a == "--no-draft") o.draft = false;
         else if (a == "--draft-model") o.draft_model = val();
+        else if (a == "--vocab-ext") o.vocab_ext = val();
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--tail-skip") o.tail_skip = std::atoi(val());
         else if (a == "--skip-weight") o.skip_weight = (float) std::atof(val());

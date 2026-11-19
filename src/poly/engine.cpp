@@ -1056,6 +1056,28 @@ void Engine::load_shape() {
     need(n_layer_ > 0 && n_embd_ > 0 && n_embd_ % 32 == 0 && n_vocab_ > 0, "bad block_count or embedding_length");
     need(n_used_ >= 1 && n_used_ <= kMaxUsed && n_used_ <= n_expert_, "bad expert_used_count");
 
+    // --vocab-ext=<gguf>: the extended tokenizer's new tokens live in a sidecar - extra rows of
+    // token_embd and output in the same types as the main file's tables.  n_vocab_ grows by the
+    // sidecar's rows here (every buffer sized after this sees the full vocabulary), the token
+    // table reads the main mmap below main_vocab_ and the sidecar beyond it, and the output
+    // matrix is uploaded as main + ext in one piece.
+    if (!opt_.vocab_ext.empty()) {
+        vx_ = std::make_unique<Shards>(opt_.vocab_ext);
+        const TensorInfo* et = vx_->find("token_embd_ext.weight");
+        const TensorInfo* eo = vx_->find("output_ext.weight");
+        need(et && et->shape.size() == 2 && (int64_t) et->shape[0] == n_embd_,
+             "the sidecar has no token_embd_ext.weight of [embedding_length, rows]");
+        need(eo && eo->shape.size() == 2 && (int64_t) eo->shape[0] == n_embd_,
+             "the sidecar has no output_ext.weight of [embedding_length, rows]");
+        need((int64_t) et->shape[1] == (int64_t) eo->shape[1] && (int64_t) et->shape[1] > 0,
+             "the sidecar's tables disagree in length");
+        main_vocab_ = n_vocab_;
+        vx_n_ = (int) et->shape[1];
+        n_vocab_ += vx_n_;
+        std::fprintf(stderr, "strata-poly: vocab-ext: %d rows over the main %d (vocab %d), sidecar %s\n",
+                     vx_n_, main_vocab_, n_vocab_, opt_.vocab_ext.c_str());
+    }
+
     // a block from another file must be this model's: a pruned model's has fewer experts to choose among
     if (block_ && block_ != gg_.get()) {
         const TensorInfo* gate = tensor(n_layer_, "ffn_gate_inp.weight");
@@ -1324,6 +1346,29 @@ Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, i
     std::vector<ggml_bf16_t> h(count);
     ggml_fp32_to_bf16_row(f.data(), h.data(), (int64_t) count);
     h2d(d.p, h.data(), out);
+    return d;
+}
+
+// The extended vocab's output matrix: the main file's rows and the sidecar's rows, of the same
+// quant type, in one VRAM matrix - the matmuls and the logits just see n_vocab rows.  Only the
+// as-is path (the quantized types the matmul kernels read directly) is supported: the sidecar's
+// rows are copied after the main's unchanged.
+Dev Engine::upload_ext_mat(const TensorInfo* t, const TensorInfo* e, const std::string& name,
+                           int64_t n_in, int64_t n_out, Want want) {
+    const bool as_is = t->type == kTypeF32 || (want != kF32 && t->type == kTypeBF16) ||
+                       (want == kAnyMat && kernels::native_mmvq_supported((int) t->type));
+    if (!as_is)
+        throw std::runtime_error("vocab-ext: " + name + "'s type (" + std::to_string(t->type) +
+                                 ") is not an as-is matmul type, the sidecar cannot ride it");
+    if (e->type != t->type)
+        throw std::runtime_error("vocab-ext: the sidecar's output_ext type differs from the main's");
+    const size_t bytes = home(*t).payload(*t), ebytes = vx_->payload(*e);
+    const Dev d{dense_ ? dense_ + dense_at_ : nullptr, (uint32_t) t->type, (int) n_in, (int) n_out};
+    dense_at_ += pad(bytes + ebytes) + kTail;
+    if (!dense_) return d;
+    if (dense_at_ > dense_bytes_) throw std::logic_error("the dense arena is too small for " + name);
+    h2d(d.p, home(*t).data(*t), bytes);
+    h2d(d.p + bytes, vx_->data(*e), ebytes);
     return d;
 }
 
@@ -2118,15 +2163,31 @@ void Engine::load(const Options& o) {
 
     // the token table stays in the file, a row a token, and embed() reads a row in whatever type it has
     const TensorInfo* te = gg_->find("token_embd.weight");
+    const int64_t main_rows = vx_ ? main_vocab_ : n_vocab_;   // the sidecar's rows are not in this file
     const ggml_type_traits* tt = te ? ggml_get_type_traits((ggml_type) te->type) : nullptr;
-    if (!te || te->shape.size() != 2 || (int64_t) te->shape[0] != n_embd_ || (int64_t) te->shape[1] != n_vocab_ ||
+    if (!te || te->shape.size() != 2 || (int64_t) te->shape[0] != n_embd_ || (int64_t) te->shape[1] != main_rows ||
         !tt || tt->blck_size <= 0 || n_embd_ % tt->blck_size != 0 || (te->type != kTypeF32 && !tt->to_float))
         throw std::runtime_error("token_embd.weight must be [" + std::to_string(n_embd_) + ", " +
-                                 std::to_string(n_vocab_) + "] in a type ggml converts to floats, it is " +
+                                 std::to_string(main_rows) + "] in a type ggml converts to floats, it is " +
                                  (te ? shape_of(*te) : "missing"));
-    tok_row_ = gg_->payload(*te) / (size_t) n_vocab_;
+    tok_row_ = gg_->payload(*te) / (size_t) main_rows;
     tok_type_ = te->type;
     tok_embd_ = gg_->data(*te);
+
+    // the sidecar's rows must be the same types as the main tables': the token rows go through
+    // embed()'s one dequant path, the output rows ride in the same VRAM matrix as the main's
+    if (vx_) {
+        const TensorInfo* et = vx_->find("token_embd_ext.weight");
+        const TensorInfo* eo = vx_->find("output_ext.weight");
+        if (et->type != tok_type_)
+            throw std::runtime_error("the sidecar's token_embd_ext type differs from the main table's");
+        if (!ggml_get_type_traits((ggml_type) eo->type)->to_float)
+            throw std::runtime_error("the sidecar's output_ext type is not readable");
+        vx_tok_row_ = vx_->payload(*et) / (size_t) vx_n_;
+        vx_tok_ = vx_->data(*et);
+        vx_out_row_ = vx_->payload(*eo) / (size_t) vx_n_;
+        vx_out_ = vx_->data(*eo);
+    }
 
     // twice: the first pass adds up the arena, the second fills it
     for (int pass = 0; pass < 2; ++pass) {
@@ -2145,8 +2206,12 @@ void Engine::load(const Options& o) {
             out_norm_ = upload(norm, "output_norm.weight", n_embd_, 1, kF32);
             // a file without an output matrix ties the output to the token table
             const TensorInfo* head = gg_->find("output.weight");
-            output_ = upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, n_vocab_,
-                             kAnyMat);
+            if (vx_ && !head)
+                throw std::runtime_error("vocab-ext needs an untied output.weight in the main file");
+            output_ = vx_ ? upload_ext_mat(head, vx_->find("output_ext.weight"), "output.weight",
+                                           n_embd_, n_vocab_, kAnyMat)
+                          : upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, n_vocab_,
+                                   kAnyMat);
         }
         if (draft_) load_drafter();
         if (pass == 0) {
@@ -2635,9 +2700,14 @@ const Stats& Engine::stats() const {
 }
 
 void Engine::embed(int32_t token, float* dst) const {
-    const uint8_t* row = tok_embd_ + (size_t) token * tok_row_;
-    if (tok_type_ == kTypeF32) std::memcpy(dst, row, (size_t) n_embd_ * sizeof(float));
-    else ggml_get_type_traits((ggml_type) tok_type_)->to_float(row, dst, n_embd_);
+    // the tokens beyond main_vocab_ live in the sidecar, whose rows are the same type and length
+    const bool ext = token >= main_vocab_ && vx_tok_;
+    const uint8_t* base = ext ? vx_tok_ : tok_embd_;
+    const size_t row = ext ? vx_tok_row_ : tok_row_;
+    const int32_t id = ext ? (int32_t) (token - main_vocab_) : token;
+    const uint8_t* r = base + (size_t) id * row;
+    if (tok_type_ == kTypeF32) std::memcpy(dst, r, (size_t) n_embd_ * sizeof(float));
+    else ggml_get_type_traits((ggml_type) tok_type_)->to_float(r, dst, n_embd_);
 }
 
 void Engine::images(const Image* im, int n) {

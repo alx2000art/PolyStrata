@@ -131,6 +131,9 @@ struct Options {
                                   ///< -1: as many as the architecture's vocabulary has in order of use (guess_vocab())
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
                                   ///< for an architecture that guesses with a model of its own, that model's file
+    std::string vocab_ext;        ///< a sidecar gguf with extra rows of token_embd/output for an extended
+                                  ///< tokenizer's new tokens (--vocab-ext); n_vocab grows by its rows, the
+                                  ///< token table reads the sidecar beyond the main file's vocab
     int tail_skip = 0;            ///< a routed expert outside VRAM that every token of a call ranks this far down or
                                   ///< further (the router's first choice is 0) is left out (--tail-skip,
                                   ///< STRATA_ROUTE_TAIL_SKIP); 0: none is
@@ -507,7 +510,9 @@ protected:
     /// exact one costs a wrong guess now and then and no token.
     enum Want { kF32, kFloatMat, kAnyMat, kGuessMat };
     Dev upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
-               float (*fix)(float) = nullptr);
+                   float (*fix)(float) = nullptr);
+    Dev upload_ext_mat(const TensorInfo* t, const TensorInfo* e, const std::string& name,
+                       int64_t n_in, int64_t n_out, Want want);
     const TensorInfo* tensor(int il, const char* name) const;
     const Shards& home(const TensorInfo& t) const;
     const MetaValue* meta_in(const Shards& g, const char* key) const;
@@ -683,6 +688,13 @@ protected:
     const uint8_t* tok_embd_ = nullptr;   ///< the token table in the mapped file, tok_row_ bytes a token
     size_t tok_row_ = 0;
     uint32_t tok_type_ = 0;
+    std::unique_ptr<Shards> vx_;          ///< Options::vocab_ext, the extended vocab's rows sidecar
+    int main_vocab_ = 0;                  ///< the main file's vocab; the tokens beyond it live in the sidecar
+    int vx_n_ = 0;                        ///< the sidecar's rows
+    const uint8_t* vx_tok_ = nullptr;     ///< the sidecar's token rows (a mapped sidecar), vx_tok_row_ a row
+    size_t vx_tok_row_ = 0;
+    const uint8_t* vx_out_ = nullptr;     ///< the sidecar's output rows, vx_out_row_ a row
+    size_t vx_out_row_ = 0;
 
     uint8_t* dense_ = nullptr;   ///< the dense weights' arena
     size_t dense_bytes_ = 0, dense_at_ = 0;
