@@ -330,8 +330,8 @@ public:
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
     // On several cards: the first card's part, then the next one's.
-    size_t state_bytes() const { return card_state_bytes() + (next_ ? next_->state_bytes() : 0); }
-    size_t row_bytes() const { return card_row_bytes() + (next_ ? next_->row_bytes() : 0); }
+    size_t state_bytes() const { return card_state_bytes_all() + (next_ ? next_->state_bytes() : 0); }
+    size_t row_bytes() const { return card_row_bytes_all() + (next_ ? next_->row_bytes() : 0); }
     /// The recurrent state at pos(), state_bytes() long.
     void save_state(uint8_t* dst);
     /// Back to position `pos` with the recurrent state it had there.  The rows before pos must be the sequence's.
@@ -491,6 +491,12 @@ protected:
     // ---- what it builds on ----
     /// Whether layer il is this engine's: one of [lo_, hi_), or the draft block on the card that ends the model.
     bool runs(int il) const { return il >= lo_ && (il < hi_ || hi_ == n_layer_); }
+    /// card_state_bytes()/card_row_bytes() with the drafter's own part appended: a park/restore carries
+    /// the EAGLE-3 head's cache and chain state with the sequence (conversations.hpp sizes its blobs from
+    /// state_bytes()/row_bytes(), which are these sums).
+    size_t card_state_bytes_all() const;
+    size_t card_row_bytes_all() const;
+
     size_t card_state_bytes() const { return state_n_ * sizeof(float) + extra_bytes(); }
     /// Every expert of this engine's layers is in its cache.
     bool all_cached() const { return cached_ == n_moe_ * n_expert_; }

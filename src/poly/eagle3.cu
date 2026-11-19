@@ -516,6 +516,54 @@ void Eagle3::restore_fc(void* stream) {
        "the eagle's fc state back");
 }
 
+// The drafter's own part of a park/restore: hidden_[0] (the chain's input at the save point) and fc_state_
+// (the pure fc the round's first guess restores), then the cache rows - a row's k then v, fp16.  The engine's
+// save/load state and rows append these to the target's, so Conversations carries the drafter with the
+// sequence: a parked-and-resumed conversation keeps a drafter whose cache matches the restored rows.
+
+size_t Eagle3::state_bytes() const {
+    return 2 * (size_t) n_embd_ * sizeof(float);
+}
+
+void Eagle3::save_state(uint8_t* dst) {
+    ck(cudaMemcpy(dst, hidden_, (size_t) n_embd_ * sizeof(float), cudaMemcpyDeviceToHost), "eagle save state");
+    if (fc_state_)
+        ck(cudaMemcpy(dst + (size_t) n_embd_ * sizeof(float), fc_state_, (size_t) n_embd_ * sizeof(float),
+                      cudaMemcpyDeviceToHost), "eagle save state fc");
+    else
+        std::memset(dst + (size_t) n_embd_ * sizeof(float), 0, (size_t) n_embd_ * sizeof(float));
+}
+
+void Eagle3::load_state(const uint8_t* src, int64_t pos) {
+    ck(cudaMemcpy(hidden_, src, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice), "eagle load state");
+    if (fc_state_)
+        ck(cudaMemcpy(fc_state_, src + (size_t) n_embd_ * sizeof(float), (size_t) n_embd_ * sizeof(float),
+                      cudaMemcpyHostToDevice), "eagle load state fc");
+    cache_pos_ = pos;                                // the rows [0, pos) are the sequence's again
+}
+
+size_t Eagle3::row_bytes() const {
+    return 2 * (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+}
+
+void Eagle3::save_rows(int64_t first, int64_t n, uint8_t* dst) {
+    const size_t part = (size_t) n * n_kv_ * head_dim_ * sizeof(uint16_t);
+    ck(cudaMemcpy(dst, k_cache_ + (size_t) first * n_kv_ * head_dim_, part, cudaMemcpyDeviceToHost),
+       "eagle save rows");
+    ck(cudaMemcpy(dst + part, v_cache_ + (size_t) first * n_kv_ * head_dim_, part, cudaMemcpyDeviceToHost),
+       "eagle save rows v");
+}
+
+void Eagle3::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
+    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+    const size_t part = (size_t) count * n_kv_ * head_dim_ * sizeof(uint16_t);
+    const size_t skip = (size_t) (first - from) * row;
+    ck(cudaMemcpy(k_cache_ + (size_t) first * n_kv_ * head_dim_, src + skip, (size_t) n * row,
+                  cudaMemcpyHostToDevice), "eagle load rows");
+    ck(cudaMemcpy(v_cache_ + (size_t) first * n_kv_ * head_dim_, src + part + skip, (size_t) n * row,
+                  cudaMemcpyHostToDevice), "eagle load rows v");
+}
+
 void Eagle3::stage_state(int slot, void* stream) {
     if (slot < 1) return;   // row 0's state is already where it is
     ck(cudaMemcpyAsync(hidden_ + size_t(slot) * n_embd_, hidden_, size_t(n_embd_) * sizeof(float),

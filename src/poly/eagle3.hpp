@@ -62,6 +62,16 @@ public:
     // DBG(eagle3): the recursion state (row 0: the round's anchor) and the cache cursor, for the probe
     const float* hidden_dev() const { return hidden_; }
     int64_t cache_pos() const { return cache_pos_; }
+    // The drafter's own part of a park/restore (the engine's state_bytes/save_state/load_state and
+    // row_bytes/save_rows/load_rows append it to the target's): hidden_[0] (the chain's input at the save
+    // point) and fc_state_ (the pure fc the round's first guess restores), then the cache rows - a row's
+    // k then v, fp16.  load_state also sets cache_pos_ = pos: the rows [0, pos) are the sequence's again.
+    size_t state_bytes() const;
+    void save_state(uint8_t* dst);
+    void load_state(const uint8_t* src, int64_t pos);
+    size_t row_bytes() const;
+    void save_rows(int64_t first, int64_t n, uint8_t* dst);
+    void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
     // DBG(eagle3) one teacher-forced step: the taps of a row already on the device (3*n_embd) and the
     // embedding of the next token ride in, fc + the midlayer run at pos, the logits come back
     const float* teacher_step(const float* taps_row, const float* emb_host, int64_t pos, void* stream);

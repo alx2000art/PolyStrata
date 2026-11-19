@@ -2565,13 +2565,22 @@ void Engine::refreeze_experts() {
     if (next_) next_->refreeze_experts();
 }
 
+size_t Engine::card_state_bytes_all() const {
+    return card_state_bytes() + (eagle3_ ? eagle3_->state_bytes() : 0);
+}
+
+size_t Engine::card_row_bytes_all() const {
+    return card_row_bytes() + (eagle3_ ? eagle3_->row_bytes() : 0);
+}
+
 void Engine::save_state(uint8_t* dst) {
     OnCard here(device_, split_);
     ck(cudaStreamSynchronize(cs(st_)), "save state");
     for (int il = 0; il < (int) layers_.size(); ++il)
         if (runs(il)) save_layer(il, pos_, dst);
     save_last(dst);
-    if (next_) next_->save_state(dst + card_state_bytes());
+    if (eagle3_) eagle3_->save_state(dst + card_state_bytes());     // the drafter rides with the sequence
+    if (next_) next_->save_state(dst + card_state_bytes_all());
 }
 
 // What the state has that is no layer's: the model's output for the last token, which the draft block pairs the
@@ -2588,21 +2597,24 @@ void Engine::load_state(const uint8_t* src, int64_t pos) {
     ck(cudaStreamSynchronize(cs(st_)), "load state");
     ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "load state");
     load_extra(src + state_n_ * sizeof(float), pos);
+    if (eagle3_) eagle3_->load_state(src + card_state_bytes(), pos);
     pos_ = pos;
     ahead_pos_ = -1;
-    if (next_) next_->load_state(src + card_state_bytes(), pos);
+    if (next_) next_->load_state(src + card_state_bytes_all(), pos);
 }
 
 void Engine::save_rows(int64_t first, int64_t n, uint8_t* dst) {
     OnCard here(device_, split_);
     save_card_rows(first, n, dst);
-    if (next_) next_->save_rows(first, n, dst + (size_t) n * card_row_bytes());
+    if (eagle3_) eagle3_->save_rows(first, n, dst + (size_t) n * card_row_bytes());
+    if (next_) next_->save_rows(first, n, dst + (size_t) n * card_row_bytes_all());
 }
 
 void Engine::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
     OnCard here(device_, split_);
     load_card_rows(src, from, count, first, n);
-    if (next_) next_->load_rows(src + (size_t) count * card_row_bytes(), from, count, first, n);
+    if (eagle3_) eagle3_->load_rows(src + (size_t) count * card_row_bytes(), from, count, first, n);
+    if (next_) next_->load_rows(src + (size_t) count * card_row_bytes_all(), from, count, first, n);
 }
 
 const Stats& Engine::stats() const {
