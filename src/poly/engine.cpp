@@ -1368,7 +1368,7 @@ Dev Engine::upload_ext_mat(const TensorInfo* t, const TensorInfo* e, const std::
     if (!dense_) return d;
     if (dense_at_ > dense_bytes_) throw std::logic_error("the dense arena is too small for " + name);
     h2d(d.p, home(*t).data(*t), bytes);
-    h2d(d.p + bytes, vx_->data(*e), ebytes);
+    h2d(static_cast<uint8_t*>(d.p) + bytes, vx_->data(*e), ebytes);
     return d;
 }
 
