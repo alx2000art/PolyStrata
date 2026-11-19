@@ -206,7 +206,34 @@ class Eagle3Head(nn.Module):
         o = self._residual(x, pos)
         hidden = self._head_out(h, o)
         normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
-        return self.lm_head(normed), hidden
+        return self.lm_head(normed), hidden, x
+
+    def chain_depth(self, K, V, h_prev, embs_cur, pos_cur, pos_stack):
+        """Одна глубина цепочки В ДВИЖКОВОМ КОНТЕКСТЕ: строка j смотрит на позиционный стек K/V
+        (в движке это кэш: строки инжекта = leg1-строки на своих позициях, затёртые ранними
+        строками раунда) + на свою строку.  Референс держит ровно такой кэш сквозь глубины
+        (traineagle3/cnets.py: cache_hidden = [[], []] до цикла, обновляется каждую глубину).
+        K/V: [T, kv, hd] по позициям pos_stack; возвращает (logits, hidden, k_cur, v_cur)."""
+        M = embs_cur.shape[0]
+        x = torch.cat((rmsnorm(embs_cur, self.ln1.weight, self.eps),
+                       rmsnorm(h_prev, self.hnorm.weight, self.eps)), dim=-1)
+        q = rope_apply(self.wq(x).view(M, self.n_head, self.hd), pos_cur, self.rope)
+        k = rope_apply(self.wk(x).view(M, self.n_kv, self.hd), pos_cur, self.rope)
+        v = self.wv(x).view(M, self.n_kv, self.hd)
+        per = self.n_head // self.n_kv
+        qg = q.view(M, self.n_kv, per, self.hd)
+        ka = torch.cat((K, k), dim=0)                                            # [T+M, kv, hd]
+        va = torch.cat((V, v), dim=0)
+        att = torch.einsum("tqph,skh->tqps", qg, ka) / math.sqrt(self.hd)
+        j = torch.arange(M, device=embs_cur.device)
+        causal = (pos_stack.view(1, -1) < pos_cur.view(-1, 1))                    # [M, T]
+        own = (j.view(-1, 1) == j.view(1, -1))                                    # [M, M]
+        mask = torch.cat((causal, own), dim=1)                                    # [M, T+M]
+        w = torch.softmax(att.masked_fill(~mask[:, None, None, :], float("-inf")), dim=-1)
+        o = torch.einsum("tqps,skh->tqph", w, va).reshape(M, self.n_head * self.hd)
+        hidden = self._head_out(h_prev, o)
+        normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
+        return self.lm_head(normed), hidden, k, v
 
     def step_hidden(self, h_prev, embs, pos):
         """Шаг рекурсии decode-раунда: вход h - СОБСТВЕННОЕ скрытое состояние головы с прошлого шага
@@ -407,7 +434,7 @@ def main() -> int:
                     pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                         # нога 1: (emb p, h p) -> p+1 - строка p несёт и embs[p], и taps[p]
-                        logits, hid = model(torch.from_numpy(embs_b[start:start + length]).to(device),
+                        logits, hid, x_att = model(torch.from_numpy(embs_b[start:start + length]).to(device),
                                             torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                     lab1 = map_labels(np.asarray(tokens_b[start + 1:start + length + 1]), tgt2draft)
                     pred = logits.argmax(-1).cpu().numpy()
@@ -418,7 +445,7 @@ def main() -> int:
                     # (нужны строки p+1 и метка p+2: в парном decode-блоке из 2 строк её нет - пропуск)
                     if start + length + 1 < n_rows:
                         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                            logits2, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
+                            logits2, _, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
                                             torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                         lab2 = map_labels(np.asarray(tokens_b[start + 2:start + length + 2]), tgt2draft)
                         pred2 = logits2.argmax(-1).cpu().numpy()
@@ -437,14 +464,17 @@ def main() -> int:
                     hit3 += int(ok3.sum())
                     # нога 4 - ПАРА ЦЕПОЧКИ, на которой едут decode-раунды: (emb x_{j+1},
                     # накопленное hidden головы с строки j) на позиции j+1 -> x_{j+2}.
-                    # Честный офлайн-номер того, что меряет движковая TEACH-рекурсия.
+                    # Внимание - ДВИЖКОВОГО контекста: позиционный стек leg1-ключей (как кэш
+                    # инжекта) + своя строка - ровно то, что видит раунд в движке.
                     rows4 = length - 2
                     if rows4 >= 1:
                         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                            logits4, _ = model.step_hidden_h(
-                                hid[:rows4],
+                            Kst4 = rope_apply(model.wk(x_att).view(length, model.n_kv, model.hd), pos, model.rope)
+                            Vst4 = model.wv(x_att).view(length, model.n_kv, model.hd)
+                            logits4, _, _, _ = model.chain_depth(
+                                Kst4, Vst4, hid[:rows4],
                                 torch.from_numpy(embs_b[start + 1:start + 1 + rows4]).to(device),
-                                pos[1:1 + rows4])
+                                pos[1:1 + rows4], pos)
                         lab4 = map_labels(np.asarray(tokens_b[start + 2:start + 2 + rows4]), tgt2draft)
                         pred4 = logits4.argmax(-1).cpu().numpy()
                         ok4 = (lab4 >= 0) & (pred4 == lab4)
@@ -486,7 +516,7 @@ def main() -> int:
                 pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                 # bf16-автокаст: веса в fp32, матмулы в bf16 - активации и логиты вдвое меньше
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                    logits, hid = model(x_embs, x_taps, pos)         # [n, dvocab], [n, E]
+                    logits, hid, x_att = model(x_embs, x_taps, pos)  # [n, dvocab], [n, E], [n, 2E]
                     if tgt2draft is not None:
                         lab_d = torch.from_numpy(map_labels(np.asarray(tokens_b[start + 1:start + length + 1]),
                                                             tgt2draft)).to(device)  # -100: вне словаря
@@ -534,13 +564,24 @@ def main() -> int:
                     # сквозь глубины, и голова учится не только потреблять, но и ПРОИЗВОДИТЬ
                     # состояния, пригодные для собственной цепочки (одношаговая detached-нога
                     # оставляла цепочку на 6.5-8% при leg1 41%).  Веса 0.8^d как в референсе.
+                    # Контекст внимания - ДВИЖКОВЫЙ: позиционный стек K/V из leg1-строк (инжект),
+                    # который ранние глубины перезаписывают покрытыми строками (референс держит
+                    # cache_hidden сквозь глубины) - иначе строка цепочки в обучении видит не тот
+                    # контекст, что в decode-раунде, и живьём проваливается в вырожденный токен.
                     if args.chain_depth > 0 and tgt2draft is not None:
+                        Kst = rope_apply(model.wk(x_att).view(length, model.n_kv, model.hd), pos, model.rope)
+                        Vst = model.wv(x_att).view(length, model.n_kv, model.hd)
                         h = hid
                         for d in range(1, args.chain_depth + 1):
                             rows = length - d - 1
                             if rows < 1:
                                 break
-                            logits_d, h = model.step_hidden_h(h[:rows], x_embs[d:d + rows], pos[d:d + rows])
+                            logits_d, h_new, k_c, v_c = model.chain_depth(
+                                Kst, Vst, h[:rows], x_embs[d:d + rows], pos[d:d + rows], pos)
+                            # строки глубины d занимают позиции d..d+rows-1 - пишем их в стек
+                            Kst = torch.cat((Kst[:d], k_c, Kst[d + rows:]), dim=0)
+                            Vst = torch.cat((Vst[:d], v_c, Vst[d + rows:]), dim=0)
+                            h = h_new
                             lab_d2 = torch.from_numpy(
                                 map_labels(np.asarray(tokens_b[start + d + 1:start + d + 1 + rows]),
                                            tgt2draft)).to(device)
