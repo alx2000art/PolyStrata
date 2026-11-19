@@ -50,8 +50,8 @@ die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 
 [[ -f "$CONFIG" ]] || die "нет конфига $CONFIG"
 [[ -x "$STRATA_DIR/.venv/bin/python" ]] || die "нет $STRATA_DIR/.venv — запустите ./setup.sh"
-strings "$STRATA_DIR/engine-poly/strata-poly" 2>/dev/null | grep -q vocab-ext \
-  || die "бинарник без vocab-ext — соберите ветку feat/vocab-ext (rm engine.cpp.o, cmake --build, cp)"
+MARKERS=$(strings "$STRATA_DIR/engine-poly/strata-poly" 2>/dev/null | grep -c vocab-ext || true)
+[[ "$MARKERS" -ge 1 ]] || die "бинарник без vocab-ext — соберите ветку feat/vocab-ext (rm engine.cpp.o, cmake --build, cp)"
 
 mkdir -p "$OUT_DIR"
 log "=============================================================="
