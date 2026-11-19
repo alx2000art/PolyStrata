@@ -5061,6 +5061,33 @@ def flag_value(args: list, flag: str):
     return None
 
 
+def warm_start_into(cfg: dict, a) -> str | None:
+    """--warm-start [FILE]: bare - the server reads the first turn of the last long prompt with tools when it starts
+    (the server's own "warm_start": true, keep_start()); a file - that chat request's messages ({"messages": [...]}
+    or {"prompt": "..."}), rendered and tokenized at every (re)start.  The key is not in SETUP_KEYS: a setup run again
+    keeps what the user set by hand.  Returns the note, or None when the flag was not given."""
+    if getattr(a, "warm_start", None) is None:
+        return None
+    if a.warm_start is True:
+        cfg["warm_start"] = True
+        return "warm start: the server reads its kept prompt start when it starts"
+    path = os.path.abspath(os.path.expanduser(str(a.warm_start)))
+    if not Path(path).is_file():
+        raise SystemExit(f"[strata] --warm-start: {path} does not exist")
+    try:
+        body = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"[strata] --warm-start: {path} cannot be read ({e})")
+    ok_body = isinstance(body, (dict, list)) and (
+        (isinstance(body, list) and bool(body))
+        or (isinstance(body, dict) and isinstance(body.get("messages"), list) and bool(body["messages"]))
+        or (isinstance(body, dict) and isinstance(body.get("prompt"), str)))
+    if not ok_body:
+        raise SystemExit(f"[strata] --warm-start: {path} holds no messages (want a chat request's JSON)")
+    cfg["warm_start"] = path
+    return f"warm start: the server reads {path} when it starts"
+
+
 def carry_profile_args(old: dict, cfg: dict) -> list[str]:
     """#775: a learned expert profile the user wired in by hand (--expert-profile <their file>, --expert-profile-save
     <file>) survives a setup run: setup writes the shipped profile, which a measured one of their own beats (2.5-3.1x at
@@ -7304,6 +7331,11 @@ def main() -> int:
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
+    ap.add_argument("--warm-start", nargs="?", const=True, default=None, metavar="FILE",
+                    help="the server reads a prompt before the first request: bare - the first turn of the last long "
+                         "prompt with tools (kept next to the config); FILE - that chat request's JSON "
+                         "({\"messages\": [...]} or {\"prompt\": \"...\"}), read at every (re)start; "
+                         "see docs/DETAILS.md")
     ap.add_argument("--port", type=int, help="the server's port (default: the one the install was set up with, 8080 for a new one)")
     ap.add_argument("--gpu", help="one GPU, numbered as nvidia-smi numbers them (AMD: as setup lists them) (default: asked when several can be "
                                   "used; with --setup it is saved, when starting it is for that start only)")
@@ -8408,6 +8440,9 @@ def main() -> int:
         warn("--vision-tokens: images are off for this model, so it is not used")
     if a.images:                                       # only when given: else an earlier "images" is carried over
         cfg["images"] = setup_images(a, gpu, hip, Path(a.models_dir))
+    note = warm_start_into(cfg, a)                     # --warm-start: only when given, else carried over
+    if note:
+        ok(note)
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
     if cal is not None:
