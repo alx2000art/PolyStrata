@@ -16,7 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-UP_HOST = "127.0.0.1"
+UP_HOST = os.environ.get("UP_HOST", "127.0.0.1")
 UP_PORT = int(os.environ.get("UP_PORT", "8080"))
 LISTEN = int(sys.argv[1]) if len(sys.argv) > 1 else 8090
 OUT = os.path.expanduser("~/eagle_gen/dialogs.jsonl")
