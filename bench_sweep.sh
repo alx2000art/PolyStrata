@@ -63,6 +63,11 @@ WARM_PASSES="${WARM_PASSES:-1}"     # полных проходов сьюта �
                                     # (греет файловый кэш GGUF; одного хватает — остаточное
                                     # смещение первого варианта гасят контролы 15/99 и пары)
 FORCE="${FORCE:-0}"
+WARM_CHECK="${WARM_CHECK:-1}"       # префлайт: файл-режим warm_start — пин читается на старте, запрос с
+                                    # совпадающим префиксом переиспользует его (reused >= 2048). 0 = пропустить;
+                                    # WARM_CHECK_ONLY=1 — только проверка, без свипа (конфиг восстанавливается).
+WARM_CHECK_ONLY="${WARM_CHECK_ONLY:-0}"
+WARM_CHECK_PROMPT="${WARM_CHECK_PROMPT:-}"   # текстовый файл для пина (>= 2048 токенов); иначе синтетический
 
 # ------------------------- фичи форка (docs/FORK_FEATURES.ru.md) ------------
 # Формат: "имя|--ключ|значение-ВКЛ|значение-ВЫКЛ".
@@ -430,6 +435,81 @@ variant_done() {  # $1 = имя: уже есть валидный захват �
   python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") and d.get("meta",{}).get("suite")==sys.argv[2] else 1)' "$f" "$SUITE" 2>/dev/null
 }
 
+# ------------------------- префлайт: warm_start файл-режим -------------------
+# Пин-файл {"prompt": <текст>} кладётся в конфиг, сервер рестартует: в логе должна
+# появиться строка завершённого тёплого чтения, а запрос, начинающийся с того же
+# текста, должен переиспользовать >= 2048 токенов (строка «... tokens = N reused»
+# печатает сервер после каждого запроса).  Конфиг после проверки восстанавливается
+# из бэкапа (restore_config), сервер поднимается на исходных настройках.
+warm_check() {
+  local pin="$OUT_DIR/warm-check-request.json" text reused verdict=1 okboot=0 reuse_count=0
+  if [[ -n "$WARM_CHECK_PROMPT" && -f "$WARM_CHECK_PROMPT" ]]; then
+    text="$(cat "$WARM_CHECK_PROMPT")"
+  else
+    text="$(printf 'Проверка тёплого старта движка страта. %.0s' $(seq 1 400))"   # ~15k симв >= 2048 токенов
+  fi
+  log "  warm-check: пин-файл $pin ($(printf '%s' "$text" | wc -c) символов)"
+  python3 - "$pin" "$text" <<'PY'
+import json, sys
+json.dump({"prompt": sys.argv[2]}, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+PY
+  python3 - "$CONFIG" "$pin" <<'PY'
+import json, os, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+cfg["warm_start"] = sys.argv[2]
+with open(sys.argv[1] + ".tmp", "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=1)
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+PY
+  log "  warm-check: конфиг warm_start -> $pin; рестарт ..."
+  stop_server
+  start_server
+  if ! wait_ready; then
+    log "  !!! warm-check: сервер не поднялся с пин-файлом — ПРОВАЛ"
+    restore_config; stop_server; start_server; wait_ready || true
+    return 1
+  fi
+  # ждём завершения тёплого чтения (запрос во время чтения останавливает его —
+  # тогда переиспользуется только прочитанная часть, и проверка ложно падает)
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    grep -q "warm start: read " "$OUT_DIR/server.log.last" && { okboot=1; break; }
+    sleep 2
+  done
+  (( okboot )) || log "  warm-check: тёплое чтение не завершилось за 300 s — продолжаю по факту"
+  reused=$(python3 - "$BASE_URL" "$API_KEY" "$MODEL" "$pin" <<'PY'
+import json, sys, urllib.request
+base, key, model, pin = sys.argv[1:5]
+text = json.load(open(pin, encoding="utf-8"))["prompt"]
+body = json.dumps({"model": model,
+                   "messages": [{"role": "user",
+                                 "content": text + "\n\nОтветь ровно одним словом: готово"}],
+                   "max_tokens": 8, "temperature": 0, "stream": False}).encode()
+req = urllib.request.Request(base + "/chat/completions", data=body,
+                             headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+r = json.load(urllib.request.urlopen(req, timeout=600))
+print("ok" if r.get("choices") else "no-answer")
+PY
+)
+  sleep 2   # строка «... tokens = N reused» печатается сервером после ответа
+  reuse_count=$(grep -oE "prompt [0-9]+ tokens = [0-9]+ reused" "$OUT_DIR/server.log.last" | tail -1 \
+                | grep -oE "[0-9]+ reused" | grep -oE "^[0-9]+")
+  reuse_count=${reuse_count:-0}
+  if [[ "$okboot" == 1 && "$reused" == "ok" && "$reuse_count" -ge 2048 ]]; then
+    log "  warm-check: ПРОЙДЕНА — пин прочитан на старте, запрос переиспользовал $reuse_count токенов"
+  else
+    verdict=0
+    log "  !!! warm-check: ПРОВАЛ (прочитано: $okboot, ответ: $reused, reused: $reuse_count) — лог: $OUT_DIR/server.log.last"
+  fi
+  rm -f "$pin"
+  log "  warm-check: восстанавливаю конфиг и сервер ..."
+  restore_config
+  stop_server
+  start_server
+  wait_ready || log "  (!) сервер не поднялся после warm-check — смотри $OUT_DIR/server.log.last"
+  return $verdict
+}
+
 # ------------------------- главный цикл -------------------------------------
 restore_config() { cp "$BACKUP" "$CONFIG"; }
 on_interrupt() {
@@ -444,8 +524,23 @@ trap on_interrupt INT TERM
 cp "$CONFIG" "$BACKUP" || die "не смог забэкапить конфиг"
 log "бэкап конфига: $BACKUP"
 [[ "$FORCE" == "1" ]] && rm -f "$OUT_DIR"/*.json
-
 failed=()
+
+warm_check_rc=0
+if [[ "$WARM_CHECK" == "1" || "$WARM_CHECK_ONLY" == "1" ]]; then
+  if warm_check; then
+    log "warm-check: файл-режим warm_start работает"
+  else
+    warm_check_rc=1
+    failed+=("warm-check")
+    log "warm-check: ПРОВАЛ — файл-режим warm_start сломан (свит продолжается)"
+  fi
+fi
+if [[ "$WARM_CHECK_ONLY" == "1" ]]; then
+  log "WARM_CHECK_ONLY: свип пропущен"
+  exit $warm_check_rc
+fi
+
 for entry in "${VARIANTS[@]}"; do
   name="${entry%%|*}"
   spec="${entry#|}"
