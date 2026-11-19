@@ -273,5 +273,43 @@ class VisionTokens(unittest.TestCase):
         self.assertIn("images are off", out)
 
 
+class WarmStartFlag(unittest.TestCase):
+    """--warm-start [FILE]: bare - the config's "warm_start" is true (the server reads its kept start); a file - that
+    chat request's path; not given - the key as before (a setup run again keeps it: the key is not a SETUP_KEY)."""
+
+    def setUp(self):
+        self.ram, self.found = PROFILES["64GB-1x32GB"]
+
+    def run_setup(self, *extra, configs=()):
+        return install(self.ram, self.found, ["--family", "qwen", "--model", "Q2_0", "--no-start", *extra],
+                       configs=configs)
+
+    def test_the_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            pin = Path(d) / "warm.json"
+            pin.write_text(json.dumps({"messages": [{"role": "user", "content": "S" * 3000}]}), encoding="utf-8")
+            code, out, cfg, _ = self.run_setup("--warm-start")
+            self.assertEqual(code, 0, out)
+            self.assertIs(cfg["warm_start"], True)
+            code, out, cfg, _ = self.run_setup("--warm-start", str(pin))
+            self.assertEqual(code, 0, out)
+            self.assertEqual(Path(cfg["warm_start"]), pin)          # abspath normalizes the separators
+            self.assertIn("warm start: the server reads", out)
+            code, out, cfg, _ = self.run_setup(configs=[("strata-q2_0.json", {"warm_start": str(pin)})])
+            self.assertEqual(code, 0, out)
+            self.assertEqual(Path(cfg["warm_start"]), pin)   # not given: kept (#629, not a SETUP_KEY)
+
+    def test_missing_file_refuses(self):
+        with self.assertRaises(SystemExit):
+            quiet(setup.warm_start_into, {}, unittest.mock.Mock(warm_start="no-such-file.json"))
+        with self.assertRaises(SystemExit):
+            quiet(setup.warm_start_into, {}, unittest.mock.Mock(warm_start=""))
+        with self.assertRaises(SystemExit):
+            with tempfile.TemporaryDirectory() as d:
+                bad = Path(d) / "warm.json"
+                bad.write_text("{", encoding="utf-8")
+                quiet(setup.warm_start_into, {}, unittest.mock.Mock(warm_start=str(bad)))
+
+
 if __name__ == "__main__":
     unittest.main()

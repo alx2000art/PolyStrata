@@ -1838,6 +1838,71 @@ class WarmStart(unittest.TestCase):
         self.assertEqual(self.engine.calls, [])
 
 
+class WarmStartPinned(unittest.TestCase):
+    """"warm_start" as a chat request's path: its messages are rendered and tokenized like any request's and read at
+    every (re)start; the captured start (keep_start()) stays out of the way - the config's pin wins."""
+
+    TOOLS = ToolCallTerminators.SCHEMA
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.pin = self.dir / "warm.json"
+        self.tok = ByteTokenizer()
+        self.engine = SamplingEngine(self.tok, "ok", max_context=1 << 20)
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc.config_path = str(self.dir / "strata-m.json")
+        self.svc.warm_start = str(self.pin)
+
+    def write_pin(self, body):
+        self.pin.write_text(json.dumps(body), encoding="utf-8")
+
+    def want(self, system):
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": "hi"}]
+        return self.svc.encode_prompt(msgs, None, {})       # the pin file carries no tools: rendered without them
+
+    def test_pinned_prompt_is_read(self):
+        self.write_pin({"messages": [{"role": "system", "content": "S" * 3000}, {"role": "user", "content": "hi"}]})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.svc.start_warm()
+            join_warm_read()
+        want = self.want("S" * 3000)
+        self.assertEqual([(ids, n) for ids, n, _ in self.engine.calls], [(want, 1)])
+        self.assertIn(f"read {len(want)} tokens", out.getvalue())
+
+    def test_a_bare_prompt_and_a_message_list(self):
+        self.write_pin({"prompt": "P" * 3000})
+        self.svc.start_warm()
+        join_warm_read()
+        self.assertEqual(len(self.engine.calls), 1)
+        self.write_pin([{"role": "user", "content": "Q" * 3000}])
+        self.svc.start_warm()
+        join_warm_read()
+        self.assertEqual(len(self.engine.calls), 2)
+
+    def test_short_or_broken_pins_are_ignored(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.write_pin({"messages": [{"role": "user", "content": "S" * 100}]})    # under WARM_MIN_TOKENS
+            self.svc.start_warm()
+            self.write_pin({"messages": "no"})
+            self.svc.start_warm()
+            self.write_pin({"messages": [{"role": "user", "content": ["list", "content"]}]})
+            self.svc.start_warm()
+            self.pin.unlink()
+            self.svc.start_warm()                                                     # gone: noted, no read
+        join_warm_read()
+        self.assertEqual(self.engine.calls, [])
+
+    def test_a_request_does_not_recapture(self):
+        self.write_pin({"messages": [{"role": "system", "content": "S" * 3000}, {"role": "user", "content": "hi"}]})
+        self.svc.start_warm()
+        join_warm_read()
+        ids = self.svc.encode_prompt([{"role": "system", "content": "T" * 3000}, {"role": "user", "content": "hi"}],
+                                     self.TOOLS, {})
+        list(self.svc.run(ids, False, self.TOOLS, 4, {}, threading.Event()))
+        self.assertFalse(self.svc.warm_path().exists())     # the pinned path wins: nothing captured over it
+
+
 class GpuChoice(unittest.TestCase):
     """Issue #51: the config's \"gpu\" reaches the engine as CUDA_VISIBLE_DEVICES, numbered like nvidia-smi."""
 

@@ -934,7 +934,10 @@ print(r.choices[0].message.content)
   tokens in common with the kept start and read the other 4,363 in 3.5 s. A request that comes in during that read
   stops it and goes first (one sent 3 s after the start waited
   0.5 s), and the part read stays cached. It is off by default because the read keeps the GPU busy at every start,
-  also when no agent comes.
+  also when no agent comes. `"warm_start"` can also name a chat request's file (`--warm-start [FILE]` writes it):
+  `{"messages": [...]}` (with optional `"tools"` and `"reasoning_effort"`), a bare message list, or
+  `{"prompt": "..."}` - its messages are rendered and tokenized like any request's and read at every start and
+  after every reload, so the pinned prompt wins over the captured one (nothing is re-captured over it).
 - **Streaming.** With `"stream": true` everything arrives as it is made: the thinking, the answer, and tool calls
   (the tool's name first, then its arguments piece by piece, like OpenAI and Anthropic do). While the model reads a
   long prompt the stream sends keep-alives, so agents do not time out; the server window prints progress every
