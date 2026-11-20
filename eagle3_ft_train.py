@@ -552,13 +552,26 @@ def main() -> int:
         rng.shuffle(order)
         tot_loss, tot_rows = 0.0, 0
         for bi in order:
-            path, off, pos0, n_rows, tokens_meta = blocks[bi]
-            # блок целиком в CPU f32 (одна загрузка с диска), нарезается на шаги по max_rows строк:
-            # память шага ограничена, а данные используются полностью.  Каждая нарезка - каузальная
-            # последовательность со своими абсолютными позициями (срез учится на локальном контексте,
-            # как и в штатном обучении EAGLE на последовательностях ограниченной длины)
-            pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
-                                                          meta["n_embd"], meta["taps_n"])
+            # decode-дампы = парные 2-строчные блоки ОДНОЙ последовательности (перекрываются на
+            # строку): доклеиваем следующий блок, если его pos0 продолжает последовательность -
+            # иначе тренер их выбрасывал (<8 строк) и НИКОГДА не видел decode-состояния, к
+            # которым голова в раунде хрупка.  Ошибку покрытия строк держим строгой.
+            chain = [blocks[bi]]
+            pos_end = blocks[bi][2] + blocks[bi][3]
+            k2 = bi + 1
+            while k2 < len(blocks) and blocks[k2][2] <= pos_end <= blocks[k2][2] + blocks[k2][3] + 1:
+                chain.append(blocks[k2])
+                pos_end = max(pos_end, blocks[k2][2] + blocks[k2][3])
+                k2 += 1
+            parts = [load_block(p2, o2, n2, meta["n_embd"], meta["taps_n"])
+                     for (p2, o2, _p02, n2, _t2) in chain]
+            pos0_b = min(x[0] for x in parts)
+            tokens_b = np.concatenate([x[1] for x in parts])
+            embs_b = np.concatenate([x[2] for x in parts])
+            taps_b = np.concatenate([x[3] for x in parts])
+            n_rows = int(len(tokens_b))
+            if n_rows < 8:
+                continue
             for start in range(0, n_rows - 1, args.max_rows):
                 length = min(args.max_rows, n_rows - 1 - start)
                 if length < 8:
