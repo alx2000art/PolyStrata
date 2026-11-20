@@ -221,7 +221,7 @@ EXT_LINE=$(tail -c +$((LOG_MARK + 1)) "$ENG_LOG" 2>/dev/null \
 log "  движок: $EXT_LINE"
 [[ "$EXT_LINE" == *"$N rows over the main"* ]] || die "строка vocab-ext не сходится с N=$N: $EXT_LINE"
 log "  запрос (temperature=$TEMPERATURE, max_tokens=$MAX_TOKENS) ..."
-ask > "$OUT_DIR/A.txt" || die "запрос A не удался (лог: $OUT_DIR/engine-a.log)"
+ask "$OUT_DIR/A.txt" || die "запрос A не удался (лог: $OUT_DIR/engine-a.log)"
 log "  ответ A: $(wc -c < "$OUT_DIR/A.txt") байт -> $OUT_DIR/A.txt"
 
 # ------------------------- прогон B: без сайдкара ---------------------------
@@ -234,7 +234,7 @@ wait_ready "$OUT_DIR/engine-b.log"
 tail -c +$((LOG_MARK + 1)) "$ENG_LOG" 2>/dev/null | grep -q "vocab-ext:" \
   && die "в прогоне B движок неожиданно загрузил сайдкар (лог движка: $ENG_LOG)"
 log "  запрос ..."
-ask > "$OUT_DIR/B.txt" || die "запрос B не удался (лог: $OUT_DIR/engine-b.log)"
+ask "$OUT_DIR/B.txt" || die "запрос B не удался (лог: $OUT_DIR/engine-b.log)"
 log "  ответ B: $(wc -c < "$OUT_DIR/B.txt") байт -> $OUT_DIR/B.txt"
 
 # ------------------------- вердикт ------------------------------------------
