@@ -16,6 +16,21 @@ strata_tokenizer.extract() из GGUF; формат воспроизводим.  
 import argparse
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strata_tokenizer as ST  # noqa: E402  (байт-unicode обратное преобразование)
+
+_INV = {u: b for b, u in ST.bytes_to_unicode().items()}
+
+
+def to_raw(tok):
+    """Байт-мапленная строка HF-токенайзера -> сырой UTF-8 токен пака.
+    None: не декодируется в валидный UTF-8 (частичный символ - в паке это <0xNN>)."""
+    try:
+        return bytes(_INV[c] for c in tok).decode("utf-8")
+    except (KeyError, UnicodeDecodeError):
+        return None
 
 
 def load_pack(d):
@@ -75,27 +90,37 @@ def main():
                     n_merges.append(tuple(p))
     print(f"[*] новый: vocab {len(n_vocab)}, merges {len(n_merges)}, конвенция '{n_conv}'")
 
-    # канонический набор базовых токенов: что уже есть (перенос сверху) и что ново
-    base_canon = {to_canon(t, b_conv) for t in b_vocab}
+    # пак хранит СЫРЫЕ UTF-8 токены (llama.cpp DeepSeek), HF - байт-мапленные (Ġ-стиль):
+    # приводим новые к сырым и сравниваем напрямую с паком
+    base_set = set(b_vocab)
     out_vocab = dict(b_vocab)                        # id базовых не двигаются
-    added = 0
+    added = bad = 0
     for t, _id in sorted(n_vocab.items(), key=lambda kv: kv[1]):
-        c = to_canon(t, n_conv)
-        if c in base_canon:
+        raw = to_raw(t) if n_conv == "g" else t
+        if raw is None:
+            bad += 1
             continue
-        out_vocab[from_canon(c, b_conv)] = len(out_vocab)
+        if raw in base_set:
+            continue
+        if raw in out_vocab:
+            continue
+        out_vocab[raw] = len(out_vocab)
         added += 1
-    print(f"[*] добавлено новых токенов: {added} (итого {len(out_vocab)})")
+    print(f"[*] добавлено новых токенов: {added} (итого {len(out_vocab)}; не декодировались {bad})")
 
     base_merges = {tuple(m) for m in b_merges}
     out_merges = list(b_merges)
     added_m = 0
     for m in n_merges:
-        cm = (to_canon(m[0], n_conv), to_canon(m[1], n_conv))
-        # переводим правило в конвенцию пака; нужно, чтобы все три части были в вокабе
-        mm = (from_canon(cm[0], b_conv), from_canon(cm[1], b_conv))
-        j = from_canon(cm[0] + cm[1], b_conv)
-        if mm in base_merges or len(cm[0]) == 0 or len(cm[1]) == 0:
+        if n_conv == "g":
+            a, b2 = to_raw(m[0]), to_raw(m[1])
+        else:
+            a, b2 = m[0], m[1]
+        if a is None or b2 is None or not a or not b2:
+            continue
+        mm = (a, b2)
+        j = a + b2
+        if mm in base_merges:
             continue
         if mm[0] in out_vocab and mm[1] in out_vocab and j in out_vocab:
             out_merges.append(mm)
