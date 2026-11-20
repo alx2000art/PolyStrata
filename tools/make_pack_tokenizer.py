@@ -142,8 +142,13 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     json.dump(out_vocab, open(os.path.join(args.out, "vocab.json"), "w", encoding="utf-8"),
               ensure_ascii=False)
-    with open(os.path.join(args.out, "merges.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(f"{a} {b}" for a, b in out_merges))
+    # merges.json: штатный вариант пака для словарей, чьи куски могут содержать перевод строки
+    # (строковый merges.txt на таких рвётся; загрузчик предпочитает JSON)
+    json.dump([f"{a} {b}" for a, b in out_merges],
+              open(os.path.join(args.out, "merges.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    stale = os.path.join(args.out, "merges.txt")
+    if os.path.exists(stale):
+        os.remove(stale)
     if b_types:
         types = list(b_types) + [1] * added         # 1 = обычный токен (как у пака)
         json.dump(types, open(os.path.join(args.out, "token_type.json"), "w", encoding="utf-8"))
