@@ -360,6 +360,8 @@ def main() -> int:
                     help="без обучения: top-1/рекурсия головы на дампах - как TEACH движка; "
                          "сверка форварда тренера с движком")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--replay-round", default=None,
+                    help="дамп раунда mov'а (STRATA_EAGLE_DUMP_ROUND): прогнать голову на ЕГО состоянии")
     args = ap.parse_args()
 
     head_cfg = {}
@@ -370,6 +372,28 @@ def main() -> int:
     model, meta = load_model(args.safetensors, head_cfg, eps, device)
     print(f"модель: E {meta['n_embd']}, голов {meta['n_head']}:{meta['n_kv']}, dvocab {meta['dvocab']}, "
           f"device {device}")
+
+    if args.replay_round:
+        # Реплей ТОЧНОГО входа раунда: hidden_ + emb + pos, снятые движком (STRATA_EAGLE_DUMP_ROUND).
+        # step_hidden(h, emb, pos) = тот же шаг цепочки, что draft_logits: если argmax совпадает с
+        # движковым draft_id - head и входы у движка верны, и расхождение вне этого шага; если нет -
+        # движок и тренер не согласны ЛИБО на этом входе (голова/квант), ЛИБО состояние - не то.
+        import struct as _st
+        raw = open(args.replay_round, "rb").read()
+        ne, tok = _st.unpack("<ii", raw[:8])
+        posr, = _st.unpack("<q", raw[8:16])
+        hv = np.frombuffer(raw[16:16 + 4 * ne], dtype="<f4")
+        ev = np.frombuffer(raw[16 + 4 * ne:16 + 8 * ne], dtype="<f4")
+        print(f"round dump: token {tok} pos {posr}, |h| {np.linalg.norm(hv):.4g}")
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+            lg = model.step_hidden(torch.from_numpy(hv[None]).to(device),
+                                   torch.from_numpy(ev[None]).to(device),
+                                   torch.tensor([posr], device=device))
+        lgf = lg.float().cpu().numpy()[0]
+        top = np.argsort(-lgf)[:5]
+        print("офлайн (тот же вход):", " ".join(f"{int(i)}/{lgf[i]:.2f}" for i in top))
+        print("(сравни с движковым 'draft 1/3: ... draft_id=...')")
+        return 0
 
     # t2d: какие target-токены есть в draft-словаре (метки вне - маска)
     t2d = meta.get("t2d")

@@ -5100,6 +5100,34 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // row - so the first draft_logits below runs the chain's CHILD (emb of the fresh pick, the
         // root's state) at its own position, the pair the TEACH recursion measures (6.5% at read,
         // the chain the rounds are supposed to ride).
+        // DBG(eagle3) STRATA_EAGLE_DUMP_ROUND=<file>: the first round's EXACT input - the whole
+        // hidden_ vector, the embedding it is paired with, the token and pos - so the trainer's
+        // head can be replayed on the engine's own state and the two argmaxes compared.
+        static const char* g_round_path = std::getenv("STRATA_EAGLE_DUMP_ROUND");
+        static bool g_round_done = false;
+        if (i == 0 && g_round_path && !g_round_done) {
+            g_round_done = true;
+            {
+                embed(token, eagle_emb_);
+                ck(cudaStreamSynchronize(cs(st_)), "round dump sync");
+                std::vector<float> hv((size_t) n_embd_), ev((size_t) n_embd_);
+                ck(cudaMemcpy(hv.data(), eagle3_->hidden_dev(), hv.size() * sizeof(float), cudaMemcpyDeviceToHost),
+                   "round dump h");
+                std::memcpy(ev.data(), eagle_emb_, ev.size() * sizeof(float));
+                FILE* f = std::fopen(g_round_path, "wb");
+                if (f) {
+                    const int32_t hdr[2] = {n_embd_, token};
+                    const int64_t posr = eagle3_->cache_pos();   // the row the child's midlayer will take
+                    std::fwrite(hdr, sizeof hdr, 1, f);
+                    std::fwrite(&posr, sizeof posr, 1, f);
+                    std::fwrite(hv.data(), sizeof(float), hv.size(), f);
+                    std::fwrite(ev.data(), sizeof(float), ev.size(), f);
+                    std::fclose(f);
+                    std::fprintf(stderr, "[eagle] round dump: token %d pos %lld -> %s\n", (int) token,
+                                 (long long) posr, g_round_path);
+                }
+            }
+        }
         // DBG(eagle3) STRATA_EAGLE_ROUND_AB=1: is the restored fc_state_ the fc of THIS row?
         // (the earlier teacher_step A/B crashed inside its attend: cuBLAS 14 at m=26k; this check
         // needs no attention at all)
