@@ -183,30 +183,31 @@ wait_ready() {  # $1 = лог сервера; $2 = "want-ext" — ждём СВ�
   die "сервер не готов за ${BOOT_TIMEOUT}s (лог движка: $ENG_LOG, сервера: $1)"
 }
 
-ask() {  # $1 = файл ответа; жадный запрос; сырой ответ тоже сохраняется (.raw) для диагностики
+ask() {  # $1 = файл ответа; жадный запрос без thinking; сырой ответ тоже сохраняется (.raw)
   local raw="$1.raw"
   curl -s -m 600 -o "$raw" "$BASE_URL/chat/completions" -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
     -d "$(python3 - "$PROMPT" "$TEMPERATURE" "$MAX_TOKENS" "$MODEL" <<'PY'
 import json, sys
 print(json.dumps({"model": sys.argv[4], "messages": [{"role": "user", "content": sys.argv[1]}],
-                  "max_tokens": int(sys.argv[3]), "temperature": float(sys.argv[2])}, ensure_ascii=False))
+                  "max_tokens": int(sys.argv[3]), "temperature": float(sys.argv[2]),
+                  "chat_template_kwargs": {"enable_thinking": False},
+                  "reasoning_effort": "none", "thinking": {"type": "disabled"}}, ensure_ascii=False))
 PY
 )"
-  python3 - "$raw" <<'PY'
+  python3 - "$raw" "$1" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
     c = d.get("choices", [{}])[0]
-    text = (c.get("message") or c.get("delta") or {}).get("content", "")
-    if d.get("finish_reason") or c.get("finish_reason"):
+    text = (c.get("message") or c.get("delta") or {}).get("content") or ""
+    if c.get("finish_reason") or d.get("finish_reason"):
         sys.stderr.write(f"[finish: {c.get('finish_reason') or d.get('finish_reason')}]\n")
     if "error" in d:
         sys.stderr.write(f"[ОТВЕТ-ОШИБКА: {json.dumps(d['error'], ensure_ascii=False)[:400]}]\n")
-        text = ""
 except Exception:
     text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-print(text, end="")
+open(sys.argv[2], "w", encoding="utf-8").write(text)
 PY
 }
 
