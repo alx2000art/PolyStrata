@@ -75,17 +75,40 @@ def main():
         special_tokens=["<unk>", "<s>", "</s>"],
     )
     tk.train_from_iterator(texts, trainer=trainer)
-    os.makedirs(args.out, exist_ok=True)
-    tk.save(os.path.join(args.out, "tokenizer.json"))
+    # Ассемблер: BpeTrainer пересобирает вокаб и выбрасывает базовые токены, которых не было
+    # в миксе (и нумерует заново) - а нам нельзя двигать базовые id: строки эмбеддингов в паре
+    # с ними.  Финальный вокаб: база как есть (id не тронуты) + новые токены в хвост.
+    trained = tk.get_vocab()
+    new_tokens = [t for t in trained if t not in vocab]
+    final = dict(vocab)
+    for t in new_tokens:
+        final[t] = len(final)
+    tr_merges = json.loads(tk.to_str())["model"]["merges"]
 
-    vs = tk.get_vocab()
+    def norm(m):
+        return (m[0], m[1]) if isinstance(m, list) else tuple(str(m).split(" "))
+
+    base_set = set(merges)
+    fm = list(merges)
+    for m in tr_merges:
+        mm = norm(m)
+        if mm in base_set or len(mm) != 2:
+            continue
+        if mm[0] in final and mm[1] in final and (mm[0] + mm[1]) in final:
+            fm.append(mm)
+    from tokenizers import Tokenizer as T2, models as M2
+    tk2 = T2(M2.BPE(vocab=final, merges=fm))
+    tk2.pre_tokenizer = tk.pre_tokenizer
+    tk2.decoder = tk.decoder
+    os.makedirs(args.out, exist_ok=True)
+    tk2.save(os.path.join(args.out, "tokenizer.json"))
     with open(os.path.join(args.out, "vocab.json"), "w", encoding="utf-8") as f:
-        json.dump(vs, f, ensure_ascii=False)
+        json.dump(final, f, ensure_ascii=False)
     with open(os.path.join(args.out, "merges.txt"), "w", encoding="utf-8") as f:
         f.write("#version: 0.2\n")
-        # tokenizers 0.23 не отдаёт мерджи у модели - читаем их из сериализации (model.merges)
-        for m in json.loads(tk.to_str())["model"]["merges"]:
-            f.write((f"{m[0]} {m[1]}" if isinstance(m, list) else str(m)) + "\n")
+        for m in fm:
+            f.write(f"{m[0]} {m[1]}\n")
+    vs = final
     print(f"[+] готово: {args.out} ({len(vs)} токенов, +{len(vs) - len(vocab)})")
     print("[далее] экспорт в движковый формат и TokenAdapt-синтез эмбеддингов новых токенов")
 
