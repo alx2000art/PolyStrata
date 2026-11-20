@@ -352,6 +352,9 @@ def main() -> int:
                     help="8-битный Adam (bitsandbytes): состояния ~0.8 ГБ вместо ~6.3")
     ap.add_argument("--rec-weight", type=float, default=1.0,
                     help="вес ноги рекурсии (0 = как раньше, только leg1)")
+    ap.add_argument("--noise", type=float, default=0.0,
+                    help="шумовая аугментация taps: sigma = noise * rms(taps) на каждом шаге "
+                         "(голова хрупка к сдвигу read->decode 3-4%%; 0 = выкл, рекомендовано 0.08)")
     ap.add_argument("--chain-depth", type=int, default=0,
                     help="глубокая цепочка как у референса: глубины 1..D без detach, веса 0.8^d "
                          "(0 = нога рекурсии как раньше; D>=1 заменяет её)")
@@ -625,6 +628,11 @@ def main() -> int:
                     break
                 x_embs = torch.from_numpy(embs_b[start:start + length]).to(device)
                 x_taps = torch.from_numpy(taps_b[start:start + length]).to(device)
+                # шумовая аугментация: те же taps, сдвинутые как read->decode (cos 0.90-0.99).
+                # Голова учится не заучивать конкретные состояния, а быть устойчивой к гулу.
+                if args.noise > 0:
+                    sig = float(x_taps.pow(2).mean().sqrt()) * args.noise
+                    x_taps = x_taps + torch.randn_like(x_taps) * sig
                 pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                 # bf16-автокаст: веса в fp32, матмулы в bf16 - активации и логиты вдвое меньше
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
