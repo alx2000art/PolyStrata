@@ -463,7 +463,11 @@ def main() -> int:
         # допускаем перекрытие и при склейке пропускаем уже покрытые строки
         groups, cur = [], []
         for b in blocks:
-            if cur and not (cur[-1][2] <= b[2] <= cur[-1][2] + cur[-1][3]):
+            # та же логика, что в TRAIN: внутри файла + малое перекрытие 1-2 строки
+            # (read-чанки тоже начинаются с pos 0 - широкое перекрытие слило бы их)
+            same_file = bool(cur) and cur[-1][0] == b[0]
+            small = cur and (cur[-1][2] + cur[-1][3] - 2 <= b[2] <= cur[-1][2] + cur[-1][3] + 1)
+            if cur and not (same_file and small):
                 groups.append(cur)
                 cur = []
             cur.append(b)
@@ -585,7 +589,16 @@ def main() -> int:
     groups, cur_g = [], []
     for bi in range(len(blocks)):
         b2 = blocks[bi]
-        if cur_g and not (blocks[cur_g[-1]][2] <= b2[2] <= blocks[cur_g[-1]][2] + blocks[cur_g[-1]][3] + 1):
+        # ТОЛЬКО внутри одного файла: read- и decode-дампы в смеси нумеруют позиции
+        # абсолютно (0..1470 и 1088..1470) - склейка через границу файла смешала бы
+        # чужие строки с одинаковыми позициями
+        same_file = bool(cur_g) and blocks[cur_g[-1]][0] == b2[0]
+        # склеиваем ТОЛЬКО decode-пары со смещением 1-2 строки.  Read-блоки одного файла
+        # тоже начинаются с pos 0 (каждый чанк - своё чтение с нуля): широкое перекрытие
+        # слило бы их, а дедуп выбросил бы почти весь корпус.
+        small_overlap = cur_g and (blocks[cur_g[-1]][2] + blocks[cur_g[-1]][3] - 2 <= b2[2]
+                                   <= blocks[cur_g[-1]][2] + blocks[cur_g[-1]][3] + 1)
+        if cur_g and not (same_file and small_overlap):
             groups.append(cur_g)
             cur_g = []
         cur_g.append(bi)
