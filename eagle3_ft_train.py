@@ -426,9 +426,11 @@ def main() -> int:
         # decode-дамп приходит ПАРНЫМИ 2-строчными блоками ОДНОЙ последовательности: склеиваем
         # соседние блоки по непрерывности pos0 в длинные срезы - иначе внимание и цепочка видят
         # 2 ключа вместо живого контекста (нога 4 на 2 строках вообще не измерима)
+        # блоки ПЕРЕКРЫВАЮТСЯ: окно [p, p+1], следующее [p+1, p+2] (decode-шаг 1 токен) -
+        # допускаем перекрытие и при склейке пропускаем уже покрытые строки
         groups, cur = [], []
         for b in blocks:
-            if cur and b[2] != cur[-1][2] + cur[-1][3]:
+            if cur and not (cur[-1][2] <= b[2] <= cur[-1][2] + cur[-1][3]):
                 groups.append(cur)
                 cur = []
             cur.append(b)
@@ -439,11 +441,20 @@ def main() -> int:
         with torch.no_grad():
             for grp in groups:
                 pos0_b = grp[0][2]
-                parts = [load_block(p, o, n, meta["n_embd"], meta["taps_n"])
-                         for (p, o, _p0, n, _t) in grp]
-                tokens_b = np.concatenate([x[1] for x in parts])
-                embs_b = np.concatenate([x[2] for x in parts])
-                taps_b = np.concatenate([x[3] for x in parts])
+                expect = pos0_b
+                toks, embs, taps = [], [], []
+                for (p, o, p0, n, _t) in grp:
+                    part = load_block(p, o, n, meta["n_embd"], meta["taps_n"])
+                    skip = max(0, expect - p0)          # строки, уже покрытые предыдущими блоками
+                    if skip >= n:
+                        continue
+                    toks.append(part[1][skip:])
+                    embs.append(part[2][skip:])
+                    taps.append(part[3][skip:])
+                    expect = p0 + n
+                tokens_b = np.concatenate(toks)
+                embs_b = np.concatenate(embs)
+                taps_b = np.concatenate(taps)
                 n_rows = int(len(tokens_b))
                 for start in range(0, max(n_rows - 1, 0), args.max_rows):
                     length = min(args.max_rows, n_rows - 1 - start)
