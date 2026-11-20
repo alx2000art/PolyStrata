@@ -423,10 +423,28 @@ def main() -> int:
         # Нога 1 меряется на n_rows-1 строках, ноги 2/3 - на n_rows-2 (их метки на строку дальше):
         # decode-дамп приходит ПАРНЫМИ блоками по 2 строки - нога 1 там единственная измеримая.
         tot1 = hit1 = tot2 = hit2 = tot3 = hit3 = tot4 = hit4 = 0
+        # decode-дамп приходит ПАРНЫМИ 2-строчными блоками ОДНОЙ последовательности: склеиваем
+        # соседние блоки по непрерывности pos0 в длинные срезы - иначе внимание и цепочка видят
+        # 2 ключа вместо живого контекста (нога 4 на 2 строках вообще не измерима)
+        groups, cur = [], []
+        for b in blocks:
+            if cur and b[2] != cur[-1][2] + cur[-1][3]:
+                groups.append(cur)
+                cur = []
+            cur.append(b)
+        if cur:
+            groups.append(cur)
+        if len(groups) != len(blocks):
+            print(f"eval-only: блоков {len(blocks)} -> склеенных срезов {len(groups)}")
         with torch.no_grad():
-            for path, off, pos0, n_rows, _tokens_meta in blocks:
-                pos0_b, tokens_b, embs_b, taps_b = load_block(path, off, n_rows,
-                                                              meta["n_embd"], meta["taps_n"])
+            for grp in groups:
+                pos0_b = grp[0][2]
+                parts = [load_block(p, o, n, meta["n_embd"], meta["taps_n"])
+                         for (p, o, _p0, n, _t) in grp]
+                tokens_b = np.concatenate([x[1] for x in parts])
+                embs_b = np.concatenate([x[2] for x in parts])
+                taps_b = np.concatenate([x[3] for x in parts])
+                n_rows = int(len(tokens_b))
                 for start in range(0, max(n_rows - 1, 0), args.max_rows):
                     length = min(args.max_rows, n_rows - 1 - start)
                     if length < 1:
