@@ -61,7 +61,8 @@ def scan_blocks(paths):
         with open(path, "rb") as f:
             magic, ver, n_embd, taps_n, has_emb = struct.unpack("<5I", f.read(20))
             if magic != MAGIC or ver != 2 or has_emb != 1:
-                raise SystemExit(f"{path}: не дамп v2 (magic={magic:#x}, ver={ver})")
+                print(f"пропускаю не-дамп: {path} (magic={magic:#x}, ver={ver})", file=sys.stderr)
+                continue   # в каталоге смеси бывают и посторонние .bin
             while True:
                 off = f.tell()
                 head = f.read(12)
@@ -421,7 +422,9 @@ def main() -> int:
     if os.path.isfile(os.path.expanduser(args.dump)):
         files = [os.path.expanduser(args.dump)]        # задан сам файл дампа - берём его
     else:
-        files = sorted(glob.glob(os.path.join(args.dump, "taps-*.bin")))
+        # *.bin, а не только "taps-*.bin": оверсэмплинг-ссылки называются <prefix>-taps-...,
+        # и прежний glob их НЕ видел - ft7 молча обучался без диалоговых данных
+        files = sorted(glob.glob(os.path.join(args.dump, "*.bin")))
     blocks, _, _ = scan_blocks(files)
     if not blocks:
         print("нет блоков дампа", file=sys.stderr)
