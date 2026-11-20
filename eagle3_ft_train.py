@@ -494,6 +494,9 @@ def main() -> int:
                             logits2, _, _ = model(torch.from_numpy(embs_b[start + 1:start + length + 1]).to(device),
                                             torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                         lab2 = map_labels(np.asarray(tokens_b[start + 2:start + length + 2]), tgt2draft)
+                        if _er:   # та же маска диапазона, что у leg1: строка пары = p+1
+                            lab2 = np.where((pos0_b + start + np.arange(length) + 1 >= _lo) &
+                                            (pos0_b + start + np.arange(length) + 1 < _hi), lab2, -100)
                         pred2 = logits2.argmax(-1).cpu().numpy()
                         ok2 = (lab2 >= 0) & (pred2 == lab2)
                         tot2 += int((lab2 >= 0).sum())
@@ -522,6 +525,9 @@ def main() -> int:
                                 torch.from_numpy(embs_b[start + 1:start + 1 + rows4]).to(device),
                                 pos[1:1 + rows4], pos)
                         lab4 = map_labels(np.asarray(tokens_b[start + 2:start + 2 + rows4]), tgt2draft)
+                        if _er:   # строка пары глубины 1 = j+1
+                            lab4 = np.where((pos0_b + start + np.arange(rows4) + 1 >= _lo) &
+                                            (pos0_b + start + np.arange(rows4) + 1 < _hi), lab4, -100)
                         pred4 = logits4.argmax(-1).cpu().numpy()
                         ok4 = (lab4 >= 0) & (pred4 == lab4)
                         tot4 += int((lab4 >= 0).sum())
