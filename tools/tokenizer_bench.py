@@ -26,8 +26,17 @@ CANDIDATES = [
 
 
 def load(path):
+    """HF-имя или каталог; каталог может быть и не HF-формата — пробуем raw tokenizers."""
     from transformers import AutoTokenizer
-    return AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    try:
+        return AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    except Exception as e:
+        import os
+        tj = os.path.join(path, "tokenizer.json")
+        if os.path.exists(tj):
+            from tokenizers import Tokenizer
+            return Tokenizer.from_file(tj)
+        raise
 
 
 def main():
@@ -60,7 +69,10 @@ def main():
         except Exception as e:
             print(f"{name:<34}  НЕ ЗАГРУЗИЛСЯ: {str(e)[:90]}")
             continue
-        toks = sum(len(tk.encode(c, add_special_tokens=False).ids) for c in chunks)
+        toks = 0
+        for c in chunks:
+            r = tk.encode(c, add_special_tokens=False)
+            toks += len(r.ids) if hasattr(r, "ids") else len(r)
         ratio = toks / total_chars * 1000.0
         if base_ratio is None:
             base_ratio = ratio
