@@ -33,6 +33,7 @@ CORPUS_CHARS="${CORPUS_CHARS:-6000000}"
 EPOCHS="${EPOCHS:-2}"
 MAX_ROWS="${MAX_ROWS:-512}"
 LR="${LR:-1e-4}"
+FT_NOISE="${FT_NOISE:-0.08}"     # шумовая аугментация taps: устойчивость к сдвигу read->decode
 DEC_OVER="${DEC_OVER:-2}"        # оверсэмплинг decode-дампов
 DLG_OVER="${DLG_OVER:-2}"        # оверсэмплинг диалогов
 MIN_FREE_GB="${MIN_FREE_GB:-95}"
@@ -192,7 +193,7 @@ log "[train] старт ($EPOCHS эпох, --chain-depth 3) ..."
 pkill -f "strata-poly" 2>/dev/null || true
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup "$GPU_PY" "$STRATA_DIR/eagle3_ft_train.py" \
   --dump "$MIX_DIR" --safetensors "$BASE_HEAD" --config "$HEAD_CFG" --out "$OUT_HEAD" \
-  --epochs "$EPOCHS" --max-rows "$MAX_ROWS" --lr "$LR" --opt8 --chain-depth 3 \
+  --epochs "$EPOCHS" --max-rows "$MAX_ROWS" --lr "$LR" --opt8 --chain-depth 3 --noise "$FT_NOISE" \
   > "$FT_LOG" 2>&1 &
 TP=$!
 log "  pid $TP, лог $FT_LOG"
