@@ -109,13 +109,39 @@ python3 - "$PROMPT_FILE" "$CORPUS" "$N" "$WORK" <<'PY'
 import os, random, sys
 prompt_file, corpus, n, work = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 prompts = [open(prompt_file, encoding="utf-8").read()]
-if n > 1:
+# РЕАЛЬНЫЕ запросы: твои диалоги (user-сообщения, chat-домен) + куски корпуса (doc-домен).
+# Никакой синтетики.
+dialogs = os.path.expanduser("~/eagle_gen/dialogs.jsonl")
+nd = 0
+if os.path.exists(dialogs):
+    import json
+    seen = set()
+    with open(dialogs, encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            for m in (rec.get("messages") or []):
+                if m.get("role") == "user":
+                    c = (m.get("content") or "").strip()
+                    if 200 <= len(c) <= 4000 and c[:80] not in seen:
+                        seen.add(c[:80])
+                        prompts.append(c[:4000])
+                        nd += 1
+                    break   # один первый вопрос на диалог
+    print(f"  из диалогов: {nd}")
+nc = 0
+if n > len(prompts):
     text = open(corpus, encoding="utf-8", errors="ignore").read()
     text = "\n".join(s for s in text.splitlines() if s.strip())
     rng = random.Random(42)
     while len(prompts) < n:
         st = rng.randrange(0, max(1, len(text) - 4000))
         prompts.append(text[st:st + 4000])
+        nc += 1
+print(f"  из корпуса: {nc}")
+prompts = prompts[:n]
 open(os.path.join(work, "prompts.txt"), "w", encoding="utf-8").write("\0".join(prompts))
 print(f"  промптов: {len(prompts)}")
 PY
