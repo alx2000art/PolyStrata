@@ -47,6 +47,8 @@ def main():
     ap.add_argument("--chunks", type=int, default=20, help="сколько кусков текста мерить")
     ap.add_argument("--chunk-chars", type=int, default=4000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--whole", action="store_true",
+                    help="мерить весь файл одним куском (сравнение с движковым 'reading the prompt: N tokens')")
     args = ap.parse_args()
 
     text = open(args.text, encoding="utf-8", errors="ignore").read()
@@ -54,9 +56,12 @@ def main():
     text = "\n".join(s for s in text.splitlines() if s.strip())
     if len(text) < args.chunk_chars * 2:
         raise SystemExit(f"текст короткий: {len(text)} символов")
-    rng = random.Random(args.seed)
-    starts = [rng.randrange(0, len(text) - args.chunk_chars) for _ in range(args.chunks)]
-    chunks = [text[s:s + args.chunk_chars] for s in starts]
+    if args.whole:
+        chunks = [text]
+    else:
+        rng = random.Random(args.seed)
+        starts = [rng.randrange(0, len(text) - args.chunk_chars) for _ in range(args.chunks)]
+        chunks = [text[s:s + args.chunk_chars] for s in starts]
     total_chars = sum(len(c) for c in chunks)
     print(f"текст: {args.text}: {len(text):,} символов, {args.chunks} кусков по {args.chunk_chars:,}")
 
