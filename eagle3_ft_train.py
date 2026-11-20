@@ -466,6 +466,13 @@ def main() -> int:
                         logits, hid, x_att = model(torch.from_numpy(embs_b[start:start + length]).to(device),
                                             torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                     lab1 = map_labels(np.asarray(tokens_b[start + 1:start + length + 1]), tgt2draft)
+                    # STRATA_EVAL_ROWS=from:to - считать только строки в диапазоне (ответ в turn-дампе)
+                    _er = os.environ.get("STRATA_EVAL_ROWS", "")
+                    if _er:
+                        _a, _, _b = _er.partition(":")
+                        _lo, _hi = int(_a or 0), int(_b or (1 << 62))
+                        _rp = pos0_b + start + np.arange(length)
+                        lab1 = np.where((_rp >= _lo) & (_rp < _hi), lab1, -100)
                     pred = logits.argmax(-1).cpu().numpy()
                     # DBG: состояние строк вокруг первого decode-раунда (STRATA_EVAL_POS, default 1088):
                     # сравнить с движковым "draft step: ... hidden ..." - подача hidden_ в раунд
