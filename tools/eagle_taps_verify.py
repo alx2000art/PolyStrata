@@ -90,6 +90,9 @@ def main():
     ap.add_argument("--decode", required=True, help="taps-decode-*.bin из DUMP_DECODE на diag-прогоне")
     ap.add_argument("--read", required=True, help="read-дамп того же текста (prompt+ответ)")
     ap.add_argument("--probe", type=int, default=16)
+    ap.add_argument("--by-pos", action="store_true",
+                    help="сравнивать строки с РАВНЫМИ позициями (read и decode нумеруют абсолютно)")
+    ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
     dp, dt, de, dk, n_embd, taps_n = load_dump(args.decode)
@@ -99,7 +102,15 @@ def main():
     print(f"decode: {len(dt)} строк, pos {dp[0]}..{dp[-1]}")
     print(f"read:   {len(rt)} строк, pos {rp[0]}..{rp[-1]}")
 
-    pairs = align(dt, rt, args.probe)
+    if args.by_pos:
+        # строки с РАВНЫМИ позициями (оба дампа нумеруют абсолютно): чистая сверка capture
+        rm = {int(p): i for i, p in enumerate(rp)}
+        pairs = [(i2, rm[int(p)]) for i2, p in enumerate(dp) if int(p) in rm]
+        pairs = pairs[: args.limit] if args.limit else pairs
+        print(f"по позициям: {len(pairs)} общих строк, pos {dp[pairs[0][0]]}..{dp[pairs[-1][0]]}" if pairs
+              else "по позициям: общих строк нет")
+    else:
+        pairs = align(dt, rt, args.probe)
     if pairs is None:
         raise SystemExit(f"выравнивание не удалось (нет >= {args.probe} согласованных строк): "
                          f"decode[:8]={dt[:8].tolist()} read[:8]={rt[:8].tolist()}")
