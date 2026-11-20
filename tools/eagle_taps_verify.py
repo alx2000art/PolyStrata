@@ -67,15 +67,22 @@ def cos_rows(a, b):
     return np.einsum("ij,ij->i", a, b) / np.maximum(na * nb, 1e-12)
 
 
-def align(dec_toks, rd_toks, probe=16):
-    n = min(probe, len(dec_toks))
-    if n < 4:
-        return None
-    head = list(dec_toks[:n])
-    for start in range(0, len(rd_toks) - n + 1):
-        if list(rd_toks[start:start + n]) == head:
-            return start
-    return None
+def align(dec_toks, rd_toks, min_run=8):
+    """decode-дамп содержит и ОТКЛОНЁННЫЕ draft-строки (токены-выдумки), read — только текст:
+    матчим строки по 3-окну токенов (в тексте почти уникальны, вставки-выдумки окон не дают).
+    Возвращает список пар (decode_row, read_row)."""
+    rmap = {}
+    for k in range(len(rd_toks) - 2):
+        rmap.setdefault((int(rd_toks[k]), int(rd_toks[k + 1]), int(rd_toks[k + 2])), []).append(k)
+    pairs, used = [], set()
+    for i2 in range(len(dec_toks) - 2):
+        key = (int(dec_toks[i2]), int(dec_toks[i2 + 1]), int(dec_toks[i2 + 2]))
+        for k in rmap.get(key, ()):
+            if k not in used:
+                pairs.append((i2, k))
+                used.add(k)
+                break
+    return pairs if len(pairs) >= min_run else None
 
 
 def main():
@@ -92,12 +99,17 @@ def main():
     print(f"decode: {len(dt)} строк, pos {dp[0]}..{dp[-1]}")
     print(f"read:   {len(rt)} строк, pos {rp[0]}..{rp[-1]}")
 
-    start = align(dt, rt, args.probe)
-    if start is None:
-        raise SystemExit(f"последовательность decode-токенов не найдена в read (первые {args.probe} не совпали) "
-                         f"decode[:8]={dt[:8].tolist()} read[:8]={rt[:8].tolist()} — тексты точно те же?")
-    n = min(len(dt), len(rt) - start)
-    print(f"выравнивание: read-строка {start} (pos {rp[start]}), сравниваем {n} строк")
+    pairs = align(dt, rt, args.probe)
+    if pairs is None:
+        raise SystemExit(f"выравнивание не удалось (нет >= {args.probe} согласованных строк): "
+                         f"decode[:8]={dt[:8].tolist()} read[:8]={rt[:8].tolist()}")
+    di = np.array([p[0] for p in pairs]); ri = np.array([p[1] for p in pairs])
+    print(f"выравнивание: {len(pairs)} согласованных строк, decode pos {dp[di[0]]}..{dp[di[-1]]} <-> "
+          f"read pos {rp[ri[0]]}..{rp[ri[-1]]}")
+    dt = dt[di]; dp = dp[di]; de = de[di]; dk = dk[di]
+    rt = rt[ri]; rp = rp[ri]; re_ = re_[ri]; rk = rk[ri]
+    start = 0
+    n = len(pairs)
 
     ce = cos_rows(de[:n], re_[start:start + n])
     print(f"\n{'embs':>6}: cos min={ce.min():+.4f} median={np.median(ce):+.4f} max={ce.max():+.4f}")
@@ -118,7 +130,7 @@ def main():
               f"tok={dt[i]}")
 
     print("\n=== полный офлайн-замер на read-дампе (полный контекст) ===")
-    print(f"STRATA_EVAL_POS={rp[start]} PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+    print(f"STRATA_EVAL_POS={rp[0]} PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
           f"~/.gpu-bench/bin/python eagle3_ft_train.py --dump {args.read} "
           f"--safetensors <голова> --config <конфиг головы> --eval-only --max-rows 512")
 
