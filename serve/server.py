@@ -5195,6 +5195,9 @@ class Service:
                             if last.get("drafts_offered") is not None:
                                 a, o = last.get("drafts_accepted") or 0, last["drafts_offered"]
                                 draft_msg = f", drafts {a}/{o} accepted" + (f" ({a / o:.2f})" if o else "")
+                                # the share of the answer the drafts produced: the rest is the model's own
+                                if o and n:
+                                    draft_msg += f", {a} of {n} tokens ({100.0 * a / n:.1f}%) from drafts"
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                                   f"({finish}, cancel={cancel.is_set()}){draft_msg}{hit_msg}", flush=True)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530

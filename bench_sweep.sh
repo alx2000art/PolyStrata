@@ -140,6 +140,14 @@ VARIANTS=()
 VARIANTS+=("00-all-off|$(all_off_spec)")     # ЭТАЛОН: всё выключено
 VARIANTS+=("01-all-off-b|$(all_off_spec)")   # эталон ещё раз — пол шума
 VARIANTS+=("10-all-on|$WORKING_SPEC")       # рабочий конфиг 2026-11-02 (эталон набора)
+# Драфтер и расширенный вокаб: 10-all-on уже несёт драфтер (он в args конфига);
+# 16 снимает его для прямого A/B скорости с/без; 17 — сайдкар расширенного
+# вокаба (--vocab-ext), 18 — явный путь драфтера (если конфиг без него).
+DRAFT_MODEL="${DRAFT_MODEL:-$HOME/models/DeepSeek-V4-Flash-0731-eagle3.gguf}"
+VOCAB_EXT="${VOCAB_EXT:-$HOME/models/vocab_ext_test.gguf}"
+VARIANTS+=("16-no-drafter|$WORKING_SPEC DEL:--draft-model")
+[[ -f "$DRAFT_MODEL" ]] && VARIANTS+=("18-drafter|$WORKING_SPEC --draft-model $DRAFT_MODEL")
+[[ -f "$VOCAB_EXT" ]] && VARIANTS+=("17-vocab-ext|$WORKING_SPEC --vocab-ext $VOCAB_EXT")
 i=20
 for e in "${FEATURES[@]}"; do
   split_feat "$e"
