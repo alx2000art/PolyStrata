@@ -132,6 +132,9 @@ for k in list(env):
 env["STRATA_EAGLE_DUMP_TAPS"] = rdir
 env["STRATA_EAGLE_DUMP_DECODE"] = ddir
 env["STRATA_EAGLE_DUMP_ROUND"] = os.path.expanduser("~/eagle_round.bin")
+# lm_head в BF16: Q8_0 переворачивал близкие аргмаксы (top1-top2 0.24 лога на decode-входах);
+# в реплее движок и тренер должны стоять на ОДНОМ кванте
+env["STRATA_EAGLE_LM_Q8"] = os.environ.get("EAGLE_LM_Q8", "0")
 args = [str(a) for a in (cfg.get("args") or [])]
 out, i = [], 0
 while i < len(args):
