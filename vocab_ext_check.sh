@@ -163,7 +163,7 @@ start_server() {  # $1 = куда писать лог движка
 
 wait_ready() {  # $1 = лог сервера; $2 = "want-ext" — ждём СВЕЖУЮ строку vocab-ext в логе движка
                 # (лог движка аппендится между прогонами — ищем только после байт-отметки)
-  local deadline=$((SECONDS + BOOT_TIMEOUT)) body want_ext="$2"
+  local deadline=$((SECONDS + BOOT_TIMEOUT)) body want_ext="${2:-}"
   if [[ -n "$want_ext" ]]; then
     LOG_MARK=$(stat -c%s "$ENG_LOG" 2>/dev/null || echo 0)
     log "  отметка лога движка: $LOG_MARK байт (vocab-ext ищу только после неё)"
@@ -183,20 +183,31 @@ wait_ready() {  # $1 = лог сервера; $2 = "want-ext" — ждём СВ�
   die "сервер не готов за ${BOOT_TIMEOUT}s (лог движка: $ENG_LOG, сервера: $1)"
 }
 
-ask() {  # $1 = файл ответа; жадный запрос, текст ответа без обёртки
-  curl -s -m 600 "$BASE_URL/chat/completions" -H "Authorization: Bearer $API_KEY" \
+ask() {  # $1 = файл ответа; жадный запрос; сырой ответ тоже сохраняется (.raw) для диагностики
+  local raw="$1.raw"
+  curl -s -m 600 -o "$raw" "$BASE_URL/chat/completions" -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
     -d "$(python3 - "$PROMPT" "$TEMPERATURE" "$MAX_TOKENS" "$MODEL" <<'PY'
 import json, sys
 print(json.dumps({"model": sys.argv[4], "messages": [{"role": "user", "content": sys.argv[1]}],
                   "max_tokens": int(sys.argv[3]), "temperature": float(sys.argv[2])}, ensure_ascii=False))
 PY
-)" | python3 -c "
+)"
+  python3 - "$raw" <<'PY'
 import json, sys
-d = json.load(sys.stdin)
-c = d.get('choices', [{}])[0]
-print((c.get('message') or c.get('delta') or {}).get('content', ''), end='')
-"
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    c = d.get("choices", [{}])[0]
+    text = (c.get("message") or c.get("delta") or {}).get("content", "")
+    if d.get("finish_reason") or c.get("finish_reason"):
+        sys.stderr.write(f"[finish: {c.get('finish_reason') or d.get('finish_reason')}]\n")
+    if "error" in d:
+        sys.stderr.write(f"[ОТВЕТ-ОШИБКА: {json.dumps(d['error'], ensure_ascii=False)[:400]}]\n")
+        text = ""
+except Exception:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+print(text, end="")
+PY
 }
 
 # ------------------------- прогон A: с сайдкаром ----------------------------
