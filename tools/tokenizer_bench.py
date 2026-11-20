@@ -54,8 +54,11 @@ def main():
     text = open(args.text, encoding="utf-8", errors="ignore").read()
     # чистим: без пустых строк и без обрывов — меряем на связном тексте
     text = "\n".join(s for s in text.splitlines() if s.strip())
-    if len(text) < args.chunk_chars * 2:
-        raise SystemExit(f"текст короткий: {len(text)} символов")
+    if args.whole:
+        if len(text) < 100:
+            raise SystemExit(f"текст короткий: {len(text)} символов")
+    elif len(text) < args.chunk_chars * 2:
+        raise SystemExit(f"текст короткий: {len(text)} символов (или добавь --whole)")
     if args.whole:
         chunks = [text]
     else:
