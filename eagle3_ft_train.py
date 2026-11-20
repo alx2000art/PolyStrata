@@ -352,6 +352,9 @@ def main() -> int:
                     help="8-битный Adam (bitsandbytes): состояния ~0.8 ГБ вместо ~6.3")
     ap.add_argument("--rec-weight", type=float, default=1.0,
                     help="вес ноги рекурсии (0 = как раньше, только leg1)")
+    ap.add_argument("--mask-draft0", action="store_true",
+                    help="маскировать метки draft-0 (target-1): decode-дампы кладут в метки "
+                         "отклонённые draft-токены - голова выучивает аттрактор копии")
     ap.add_argument("--noise", type=float, default=0.0,
                     help="шумовая аугментация taps: sigma = noise * rms(taps) на каждом шаге "
                          "(голова хрупка к сдвигу read->decode 3-4%%; 0 = выкл, рекомендовано 0.08)")
@@ -653,6 +656,8 @@ def main() -> int:
                     if tgt2draft is not None:
                         lab_d = torch.from_numpy(map_labels(np.asarray(tokens_b[start + 1:start + length + 1]),
                                                             tgt2draft)).to(device)  # -100: вне словаря
+                        if args.mask_draft0:
+                            lab_d = torch.where(lab_d == 0, torch.full_like(lab_d, -100), lab_d)
                         keep = (lab_d >= 0)
                         lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
                         # чанковый CE: fp32-временники логитов держим по куску строк, не целиком
