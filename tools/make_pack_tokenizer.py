@@ -96,7 +96,8 @@ def main():
     out_vocab = dict(b_vocab)                        # id базовых не двигаются
     added = bad = 0
     for t, _id in sorted(n_vocab.items(), key=lambda kv: kv[1]):
-        raw = to_raw(t) if n_conv == "g" else t
+        # базовые строки пака уже в его конвенции (их не трогаем); новые - байт-мапленные
+        raw = t if t in base_set else (to_raw(t) if n_conv == "g" else t)
         if raw is None:
             bad += 1
             continue
@@ -112,10 +113,9 @@ def main():
     out_merges = list(b_merges)
     added_m = 0
     for m in n_merges:
-        if n_conv == "g":
-            a, b2 = to_raw(m[0]), to_raw(m[1])
-        else:
-            a, b2 = m[0], m[1]
+        # части мерджа: как и токены - базовые в конвенции пака, новые конвертим
+        conv_part = lambda x: x if x in base_set else (to_raw(x) if n_conv == "g" else x)
+        a, b2 = conv_part(m[0]), conv_part(m[1])
         if a is None or b2 is None or not a or not b2:
             continue
         mm = (a, b2)
