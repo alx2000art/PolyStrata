@@ -193,7 +193,7 @@ log "[train] старт ($EPOCHS эпох, --chain-depth 3) ..."
 pkill -f "strata-poly" 2>/dev/null || true
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup "$GPU_PY" "$STRATA_DIR/eagle3_ft_train.py" \
   --dump "$MIX_DIR" --safetensors "$BASE_HEAD" --config "$HEAD_CFG" --out "$OUT_HEAD" \
-  --epochs "$EPOCHS" --max-rows "$MAX_ROWS" --lr "$LR" --opt8 --chain-depth 3 --noise "$FT_NOISE" \
+  --epochs "$EPOCHS" --max-rows "$MAX_ROWS" --lr "$LR" --opt8 --chain-depth 3 --noise "$FT_NOISE" --mask-draft0 \
   > "$FT_LOG" 2>&1 &
 TP=$!
 log "  pid $TP, лог $FT_LOG"
