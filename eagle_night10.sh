@@ -103,9 +103,69 @@ if [[ "$SKIP_DATA" != "1" ]]; then
 
   log "[data] PDF -> текст (${PDF_CHARS} симв) ..."
   if [[ -z "$PDF_DIR" ]]; then
-    PDF_DIR=$(find "$HOME" -maxdepth 4 -type d -name "docs" 2>/dev/null | head -1)
+    PDF_DIR=$(find "$HOME" /mnt /data /srv -maxdepth 5 -type d -name "docs" 2>/dev/null | head -1)
   fi
-  [[ -n "$PDF_DIR" && -d "$PDF_DIR" ]] || die "нет каталога PDF (PDF_DIR=...)"
+  PDF_N=0
+  [[ -n "$PDF_DIR" && -d "$PDF_DIR" ]] && PDF_N=$(find "$PDF_DIR" -iname "*.pdf" 2>/dev/null | wc -l)
+  if [[ "$PDF_N" -eq 0 ]]; then
+    # PDF на сервере нет - берём ЧИСТУЮ часть старого корпуса (U+FFFD-строки выкидываются)
+    log "  PDF не найдены - чищу старый corpus_full.txt (выкидываю мохибейк)"
+    python3 - "$HOME/corpus/corpus_full.txt" "$WORK/pdf.txt" "$PDF_CHARS" <<'PY'
+import sys
+src, out, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+t = open(src, encoding="utf-8", errors="ignore").read()
+first = t.find("\ufffd")
+clean = t[:first] if first > 0 else t          # до первого битого - гарантированно чисто
+lines = [l for l in t[first:].splitlines() if "\ufffd" not in l] if first > 0 else []
+text = (clean + "\n" + "\n".join(lines)) if first > 0 else clean
+text = text[:limit]
+bad = text.count("�")
+open(out, "w", encoding="utf-8").write(text)
+print(f"  очищено: {len(text)} символов, U+FFFD {bad} ({100*bad/max(len(text),1):.2f}%)")
+PY
+  else
+    log "  PDF найдены: $PDF_N в $PDF_DIR"
+    "$STRATA_DIR/.venv/bin/python" - "$PDF_DIR" "$WORK/pdf.txt" "$PDF_CHARS" <<'PY'
+import sys
+import fitz  # pymupdf
+
+src, out, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+import glob, os
+files = sorted(glob.glob(os.path.join(src, "**", "*.pdf"), recursive=True))
+print(f"  PDF: {len(files)} файлов")
+chunks, total = [], 0
+for f in files:
+    if total >= limit:
+        break
+    try:
+        doc = fitz.open(f)
+        text = "\n".join(page.get_text("text") for page in doc)
+    except Exception as e:
+        print(f"  пропуск {os.path.basename(f)}: {e}")
+        continue
+    paras, cur = [], []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s:
+            if cur:
+                paras.append(" ".join(cur)); cur = []
+            continue
+        cur.append(s)
+        if s.endswith((".", "!", "?", ":")):
+            paras.append(" ".join(cur)); cur = []
+    if cur:
+        paras.append(" ".join(cur))
+    block = "\n".join(paras)
+    if len(block.strip()) < 200:
+        continue
+    chunks.append(block)
+    total += len(block)
+text = "\n\n".join(chunks)[:limit]
+open(out, "w", encoding="utf-8").write(text)
+bad = text.count("�")
+print(f"  очищено: {len(text)} символов, U+FFFD {bad} ({100*bad/max(len(text),1):.2f}%)")
+PY
+  fi
   "$STRATA_DIR/.venv/bin/python" - "$PDF_DIR" "$WORK/pdf.txt" "$PDF_CHARS" <<'PY'
 import sys
 import fitz  # pymupdf
