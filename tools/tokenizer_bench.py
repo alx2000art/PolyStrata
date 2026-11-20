@@ -19,9 +19,9 @@ import argparse
 import random
 
 CANDIDATES = [
+    "deepseek-ai/DeepSeek-V3",   # клан текущего (вокаб 129280): числится "текущим", если каталог пака не читается
     "Qwen/Qwen2.5-7B",
     "ai-forever/ruGPT-3.5-13B",
-    "ai-forever/ruT5-base",
 ]
 
 
@@ -80,6 +80,8 @@ def main():
         print(f"{name:<34}{toks:>9,}{ratio:>15.1f}{total_chars / max(toks, 1):>12.1f}{vs:>12}")
         if label == "текущий":
             base_ratio = ratio
+        elif base_ratio is None:
+            base_ratio = ratio   # текущий не читается: база = первый успешный (DeepSeek-V3 = его клан)
     print("\n(tok/1000 симв: меньше = лучше; 'к текущему' — сколько % токенов даёт кандидат против текущего)")
 
 
