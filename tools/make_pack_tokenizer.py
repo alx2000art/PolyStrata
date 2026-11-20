@@ -93,6 +93,13 @@ def main():
     # пак хранит СЫРЫЕ UTF-8 токены (llama.cpp DeepSeek), HF - байт-мапленные (Ġ-стиль):
     # приводим новые к сырым и сравниваем напрямую с паком
     base_set = set(b_vocab)
+    # как пак помечает пробел: если в его ключах есть Ġ - пишем новые так же (иначе сырой пробел
+    # ломает формат мерджей "a b", а словарь разъезжается с мердж-ключами)
+    marked = any("Ġ" in k for k in b_vocab)
+
+    def pack_form(raw):
+        return raw.replace(" ", "Ġ") if marked else raw
+
     out_vocab = dict(b_vocab)                        # id базовых не двигаются
     added = bad = 0
     for t, _id in sorted(n_vocab.items(), key=lambda kv: kv[1]):
@@ -101,11 +108,10 @@ def main():
         if raw is None:
             bad += 1
             continue
-        if raw in base_set:
+        tok = pack_form(raw)
+        if tok in base_set or tok in out_vocab:
             continue
-        if raw in out_vocab:
-            continue
-        out_vocab[raw] = len(out_vocab)
+        out_vocab[tok] = len(out_vocab)
         added += 1
     print(f"[*] добавлено новых токенов: {added} (итого {len(out_vocab)}; не декодировались {bad})")
 
@@ -114,7 +120,7 @@ def main():
     added_m = 0
     for m in n_merges:
         # части мерджа: как и токены - базовые в конвенции пака, новые конвертим
-        conv_part = lambda x: x if x in base_set else (to_raw(x) if n_conv == "g" else x)
+        conv_part = lambda x: x if x in base_set else pack_form(to_raw(x)) if n_conv == "g" else x
         a, b2 = conv_part(m[0]), conv_part(m[1])
         if a is None or b2 is None or not a or not b2:
             continue
