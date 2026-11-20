@@ -467,6 +467,16 @@ def main() -> int:
                                             torch.from_numpy(taps_b[start:start + length]).to(device), pos)
                     lab1 = map_labels(np.asarray(tokens_b[start + 1:start + length + 1]), tgt2draft)
                     pred = logits.argmax(-1).cpu().numpy()
+                    # DBG: состояние строк вокруг первого decode-раунда (STRATA_EVAL_POS, default 1088):
+                    # сравнить с движковым "draft step: ... hidden ..." - подача hidden_ в раунд
+                    dbg_pos = int(os.environ.get("STRATA_EVAL_POS", "1088"))
+                    i0 = dbg_pos - pos0_b - start
+                    if 0 <= i0 < length:
+                        for jj in range(i0, min(length, i0 + 3)):
+                            hv = [round(float(v), 4) for v in hid[jj][:3]]
+                            lab = int(lab1[jj])
+                            print(f"[dbg] pos {int(pos0_b + start + jj)}: hid {hv}, "
+                                  f"pred draft {int(pred[jj])}, label draft {lab}")
                     ok = (lab1 >= 0) & (pred == lab1)
                     tot1 += int((lab1 >= 0).sum())
                     hit1 += int(ok.sum())
