@@ -305,14 +305,19 @@ void DeepSeek4::load_layer(int il) {
     }
     if (il < hash_layers_) {
         const TensorInfo* t = tensor(il, "ffn_gate_tid2eid.weight");
+        const int64_t main_rows = main_vocab_ ? main_vocab_ : n_vocab_;   // vocab-ext's rows are the engine's
         if (!t || t->type != kTypeI32 || t->shape.size() != 2 || (int64_t) t->shape[0] != n_used_ ||
-            (int64_t) t->shape[1] < n_vocab_)
+            (int64_t) t->shape[1] < main_rows)
             throw std::runtime_error(blk(il, "ffn_gate_tid2eid.weight") + " is " + (t ? shape_of(*t) : "missing") +
-                                     ", expected I32 [" + std::to_string(n_used_) + ", " + std::to_string(n_vocab_) +
-                                     "]");
-        home(*t).payload(*t);
+                                     ", expected I32 [" + std::to_string(n_used_) + ", " + std::to_string(main_rows) +
+                                     "+]");
+        // the file's table covers the main vocab (vocab-ext grows n_vocab_ beyond it): the main
+        // rows come from the file, the extended vocab's tokens have no per-token hints yet -
+        // expert 0 (valid, reachable only with the extended tokenizer)
+        const size_t main_cnt = (size_t) n_used_ * main_rows;
         B.by_token.resize((size_t) n_used_ * n_vocab_);
-        std::memcpy(B.by_token.data(), home(*t).data(*t), B.by_token.size() * sizeof(int32_t));
+        std::memcpy(B.by_token.data(), home(*t).data(*t), main_cnt * sizeof(int32_t));
+        for (size_t i = main_cnt; i < B.by_token.size(); ++i) B.by_token[i] = 0;
         for (int32_t e : B.by_token)
             if (e < 0 || e >= n_expert_) throw std::runtime_error(t->name + " names an expert the layer has not");
     }
