@@ -83,8 +83,9 @@ def main():
         json.dump(vs, f, ensure_ascii=False)
     with open(os.path.join(args.out, "merges.txt"), "w", encoding="utf-8") as f:
         f.write("#version: 0.2\n")
-        for m in tk.model.get_merges():
-            f.write(f"{m[0]} {m[1]}\n")
+        # tokenizers 0.23 не отдаёт мерджи у модели - читаем их из сериализации (model.merges)
+        for m in json.loads(tk.to_str())["model"]["merges"]:
+            f.write((f"{m[0]} {m[1]}" if isinstance(m, list) else str(m)) + "\n")
     print(f"[+] готово: {args.out} ({len(vs)} токенов, +{len(vs) - len(vocab)})")
     print("[далее] экспорт в движковый формат и TokenAdapt-синтез эмбеддингов новых токенов")
 
