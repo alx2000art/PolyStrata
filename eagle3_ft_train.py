@@ -551,7 +551,10 @@ def main() -> int:
         order = list(range(len(blocks)))
         rng.shuffle(order)
         tot_loss, tot_rows = 0.0, 0
+        consumed = set()
         for bi in order:
+            if bi in consumed:
+                continue   # блок уже уехал в склеенную группу
             # decode-дампы = парные 2-строчные блоки ОДНОЙ последовательности (перекрываются на
             # строку): доклеиваем следующий блок, если его pos0 продолжает последовательность -
             # иначе тренер их выбрасывал (<8 строк) и НИКОГДА не видел decode-состояния, к
@@ -563,6 +566,7 @@ def main() -> int:
                 chain.append(blocks[k2])
                 pos_end = max(pos_end, blocks[k2][2] + blocks[k2][3])
                 k2 += 1
+            consumed.update(range(bi, k2))
             parts = [load_block(p2, o2, n2, meta["n_embd"], meta["taps_n"])
                      for (p2, o2, _p02, n2, _t2) in chain]
             pos0_b = min(x[0] for x in parts)
