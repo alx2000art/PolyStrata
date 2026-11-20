@@ -120,7 +120,13 @@ def main():
     added_m = 0
     for m in n_merges:
         # части мерджа: как и токены - базовые в конвенции пака, новые конвертим
-        conv_part = lambda x: x if x in base_set else pack_form(to_raw(x)) if n_conv == "g" else x
+        def conv_part(x):
+            if x in base_set:
+                return x
+            if n_conv != "g":
+                return x
+            r = to_raw(x)
+            return pack_form(r) if r is not None else None
         a, b2 = conv_part(m[0]), conv_part(m[1])
         if a is None or b2 is None or not a or not b2:
             continue
