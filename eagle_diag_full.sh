@@ -42,7 +42,7 @@ die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 [[ -f "$HEAD" ]] || die "нет головы $HEAD"
 [[ -x "$STRATA_DIR/.venv/bin/python" ]] || die "нет $STRATA_DIR/.venv"
 mkdir -p "$OUT_DIR" "$READ_DIR" "$DEC_DIR"
-rm -f "$READ_DIR"/taps-*.bin "$DEC_DIR"/taps-decode-*.bin 2>/dev/null || true
+rm -f "$READ_DIR"/taps-*.bin "$DEC_DIR"/taps-decode-*.bin ~/eagle_round.bin 2>/dev/null || true
 
 API_KEY="$(python3 - "$CONFIG" <<'PY'
 import json,sys
@@ -131,6 +131,7 @@ for k in list(env):
         del env[k]
 env["STRATA_EAGLE_DUMP_TAPS"] = rdir
 env["STRATA_EAGLE_DUMP_DECODE"] = ddir
+env["STRATA_EAGLE_DUMP_ROUND"] = os.path.expanduser("~/eagle_round.bin")
 args = [str(a) for a in (cfg.get("args") or [])]
 out, i = [], 0
 while i < len(args):
@@ -179,6 +180,7 @@ log "[2] живой запрос (max_tokens=$MAX_TOKENS, thinking off)"
 ask "$OUT_DIR/answer.txt" || die "запрос не удался"
 log "  ответ: $(wc -c < "$OUT_DIR/answer.txt") байт"
 LIVE=$(tail -c +$((MARK + 1)) "$ENG_LOG" 2>/dev/null | grep -E "first guess|rounds:|pays=" | tail -4)
+RDUMP=$(tail -c +$((MARK + 1)) "$ENG_LOG" 2>/dev/null | grep -E "round dump|draft 1/3" | head -2)
 log "  живые числа движка:"; printf '%s\n' "$LIVE" | sed 's/^/    /'
 grep -E "from drafts" "$OUT_DIR/server.log.last" | tail -2 | sed 's/^/    /' || true
 
@@ -210,11 +212,19 @@ STRATA_EVAL_POS="${EVAL_POS:-1088}" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:
   --config "$HEAD_CFG" --eval-only --max-rows 512 > "$OUT_DIR/eval-read.log" 2>&1
 grep -E "eval-only|склеенных" "$OUT_DIR/eval-read.log" | tail -2 | sed 's/^/    /'
 
+log "[7] реплей ТОЧНОГО входа раунда (движковый round dump -> тренерский head)"
+"$GPU_PY" "$STRATA_DIR/eagle3_ft_train.py" --safetensors "$HEAD" --config "$HEAD_CFG"   --replay-round "$HOME/eagle_round.bin" > "$OUT_DIR/replay.log" 2>&1   || log "  (реплей не отработал: см. $OUT_DIR/replay.log)"
+grep -E "round dump|офлайн|draft 1/3" "$OUT_DIR/replay.log" | sed 's/^/    /'
+printf '%s
+' "$RDUMP" | sed 's/^/    живьём: /'
+
 log "=============================================================="
 log "ИТОГ:"
 log "  живые:   $(printf '%s' "$LIVE" | grep -oE "[0-9]+ of [0-9]+ \([0-9.]+%\)" | tail -1)  (first guess)"
 log "  taps:    $(grep -E '^tap 0|^tap  0' "$OUT_DIR/taps-verify.log" | head -1 | sed 's/ *//;s/  */ /g')"
 log "  офлайн:  $(grep 'eval-only (top-1' "$OUT_DIR/eval-read.log" | tail -1 | sed 's/.*: //' | cut -c1-160)"
+log "  реплей:  $(grep 'офлайн (тот же вход)' "$OUT_DIR/replay.log" | tail -1 | sed 's/^ *//')"
+log "  движок:  $(printf '%s' "$RDUMP" | grep -oE 'draft_id=[0-9]+' | head -1)"
 log "  логи:    $OUT_DIR"
 log "=============================================================="
 exit $RC
