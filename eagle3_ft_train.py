@@ -343,7 +343,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--safetensors", required=True)
     ap.add_argument("--config", default=None, help="config.json головы (rope/eps); иначе дефолты")
-    ap.add_argument("--dump", required=True, help="каталог дампа v2 (taps-*.bin)")
+    ap.add_argument("--dump", help="каталог дампа v2 (taps-*.bin); не нужен для --replay-round")
     ap.add_argument("--out", default="eagle3-ft.safetensors")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -369,6 +369,9 @@ def main() -> int:
         head_cfg = json.load(open(args.config, encoding="utf-8"))
     eps = float(head_cfg.get("rms_norm_eps", 1e-6))
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+    if not args.replay_round and not args.dump:
+        print("нужен --dump (или --replay-round для одного входа)", file=sys.stderr)
+        return 2
     model, meta = load_model(args.safetensors, head_cfg, eps, device)
     print(f"модель: E {meta['n_embd']}, голов {meta['n_head']}:{meta['n_kv']}, dvocab {meta['dvocab']}, "
           f"device {device}")
