@@ -199,6 +199,30 @@ def main() -> int:
                     dh2 = int(np.argmax(np.abs(e_sc - t_sc).sum(1)))
                     e3 = np.argsort(-e_sc[dh2])[:3]
                     t3 = np.argsort(-t_sc[dh2])[:3]
+                    # по головам: cos по всем 64 головам сразу скрывает картину - часть голов может
+                    # совпадать идеально, а часть быть мусором (тогда дело в раскладке q по kv-головам)
+                    hc = []
+                    for h in range(nh2):
+                        ae, at = e_sc[h], t_sc[h]
+                        hc.append(float(ae @ at / (np.linalg.norm(ae) * np.linalg.norm(at) + 1e-12)))
+                    hc = np.array(hc)
+                    good = int((hc > 0.99).sum())
+                    print(f"         голов: {good} из {nh2} с cos>0.99; худшие " +
+                          " ".join(f"{int(h)}/{hc[h]:.3f}" for h in np.argsort(hc)[:5]) +
+                          f"; медиана {np.median(hc):.3f}")
+                    # альтернативная раскладка: голова h -> kv h%n_kv (интерлив) вместо h//per
+                    with torch.no_grad():
+                        q_int = torch.stack([qq[h] for h in range(nh2)]).view(model.n_kv, per, model.hd)
+                        q_alt = torch.stack([qq[p2_ * model.n_kv + kv2] for kv2 in range(model.n_kv)
+                                             for p2_ in range(per)]).view(model.n_kv, per, model.hd)
+                        t_alt = (torch.einsum("qph,skh->qps", q_alt, Ka) / (model.hd ** 0.5)
+                                 ).reshape(nh2, nk2).double().cpu().numpy()
+                    hc2 = []
+                    for h in range(nh2):
+                        ae, at = e_sc[h], t_alt[h]
+                        hc2.append(float(ae @ at / (np.linalg.norm(ae) * np.linalg.norm(at) + 1e-12)))
+                    print(f"         интерлив-раскладка: {int((np.array(hc2) > 0.99).sum())} из {nh2} с cos>0.99 "
+                          f"(медиана {np.median(hc2):.3f})")
                     # сдвиг по ключам: если скор движка на ключе j равен скору тренера на j+s,
                     # значит строки кэша повёрнуты rope на другую позицию (off-by-one в inject)
                     for sh in (-2, -1, 1, 2):
