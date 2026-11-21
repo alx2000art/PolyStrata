@@ -514,6 +514,10 @@ def main() -> int:
                         _rp = pos0_b + start + np.arange(length)
                         lab1 = np.where((_rp >= _lo) & (_rp < _hi), lab1, -100)
                     pred = logits.argmax(-1).cpu().numpy()
+                    if args.mask_draft0:
+                        # метрика без "draft 0": иначе попадания по отравленным декодным рядам
+                        # (label 0) завышают число и голова, всегда отвечающая 0, выглядит хорошей
+                        lab1 = np.where(lab1 == 0, -100, lab1)
                     # DBG: состояние строк вокруг первого decode-раунда (STRATA_EVAL_POS, default 1088):
                     # сравнить с движковым "draft step: ... hidden ..." - подача hidden_ в раунд
                     dbg_pos = int(os.environ.get("STRATA_EVAL_POS", "1088"))
@@ -538,6 +542,8 @@ def main() -> int:
                             lab2 = np.where((pos0_b + start + np.arange(length) + 1 >= _lo) &
                                             (pos0_b + start + np.arange(length) + 1 < _hi), lab2, -100)
                         pred2 = logits2.argmax(-1).cpu().numpy()
+                        if args.mask_draft0:
+                            lab2 = np.where(lab2 == 0, -100, lab2)
                         ok2 = (lab2 >= 0) & (pred2 == lab2)
                         tot2 += int((lab2 >= 0).sum())
                         hit2 += int(ok2.sum())
@@ -569,6 +575,8 @@ def main() -> int:
                             lab4 = np.where((pos0_b + start + np.arange(rows4) + 1 >= _lo) &
                                             (pos0_b + start + np.arange(rows4) + 1 < _hi), lab4, -100)
                         pred4 = logits4.argmax(-1).cpu().numpy()
+                        if args.mask_draft0:
+                            lab4 = np.where(lab4 == 0, -100, lab4)
                         ok4 = (lab4 >= 0) & (pred4 == lab4)
                         tot4 += int((lab4 >= 0).sum())
                         hit4 += int(ok4.sum())
@@ -658,17 +666,17 @@ def main() -> int:
                                                             tgt2draft)).to(device)  # -100: вне словаря
                         if args.mask_draft0:
                             lab_d = torch.where(lab_d == 0, torch.full_like(lab_d, -100), lab_d)
-                        keep = (lab_d >= 0)
-                        lab_d = torch.where(keep, lab_d, torch.zeros_like(lab_d))
+                        # -100 (вне draft-словаря и строки, снятые --mask-draft0) остаётся -100.
+                        # Подстановка нулей ДО взятия маски превращала каждый такой ряд в цель
+                        # "предскажи draft 0": четверть словаря таргета - хвост вне d2t, и голова
+                        # уезжала в константу (logit 9.5 на id 0 в живом декоде).
                         # чанковый CE: fp32-временники логитов держим по куску строк, не целиком
                         csum, ckeep = 0.0, 0
                         for cs in range(0, length, 256):
                             ce = cs + 256
                             part = logits[cs:ce].float()
-                            lab_p = lab_d[cs:ce]
                             kp = (lab_d[cs:ce] >= 0)
-                            csum = csum + F.cross_entropy(part, torch.where(kp, lab_p,
-                                                                            torch.zeros_like(lab_p)),
+                            csum = csum + F.cross_entropy(part, lab_d[cs:ce],
                                                           ignore_index=-100, reduction="sum")
                             ckeep += int(kp.sum())
                         loss = csum / max(ckeep, 1)
@@ -689,10 +697,8 @@ def main() -> int:
                         for cs in range(1, length, 256):     # строка 0 без предшественника - мимо
                             ce = min(cs + 256, length)
                             part = logits2[cs:ce].float()
-                            lab_p = lab_d[cs:ce]
                             kp = (lab_d[cs:ce] >= 0)
-                            csum2 = csum2 + F.cross_entropy(part, torch.where(kp, lab_p,
-                                                                              torch.zeros_like(lab_p)),
+                            csum2 = csum2 + F.cross_entropy(part, lab_d[cs:ce],
                                                             ignore_index=-100, reduction="sum")
                             ckeep2 += int(kp.sum())
                         loss = loss + args.rec_weight * (csum2 / max(ckeep2, 1))
@@ -723,14 +729,17 @@ def main() -> int:
                             lab_d2 = torch.from_numpy(
                                 map_labels(np.asarray(tokens_b[start + d + 1:start + d + 1 + rows]),
                                            tgt2draft)).to(device)
+                            # та же маска, что у глубины 0: без неё цель "draft 0" учится на
+                            # каждой строке вне словаря и на отравленных декодных рядах
+                            if args.mask_draft0:
+                                lab_d2 = torch.where(lab_d2 == 0, torch.full_like(lab_d2, -100), lab_d2)
                             csum_d, ckeep_d = 0.0, 0
                             for cs in range(0, rows, 256):
                                 ce = min(cs + 256, rows)
                                 part = logits_d[cs:ce].float()
                                 kp = (lab_d2[cs:ce] >= 0)
-                                csum_d = csum_d + F.cross_entropy(
-                                    part, torch.where(kp, lab_d2[cs:ce], torch.zeros_like(lab_d2[cs:ce])),
-                                    ignore_index=-100, reduction="sum")
+                                csum_d = csum_d + F.cross_entropy(part, lab_d2[cs:ce],
+                                                                  ignore_index=-100, reduction="sum")
                                 ckeep_d += int(kp.sum())
                             loss = loss + (0.8 ** d) * (csum_d / max(ckeep_d, 1))
                 opt.zero_grad(set_to_none=True)
