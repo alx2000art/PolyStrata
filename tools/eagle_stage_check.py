@@ -180,6 +180,10 @@ def main() -> int:
                     rb2 = open(sp, "rb").read()
                     nh2, nkv2, nk2 = struct.unpack("<iii", rb2[:12])
                     p2, = struct.unpack("<q", rb2[12:20])
+                    if p2 != pos or nk2 != int(Ka.shape[0]):
+                        print(f"  scores ПРОПУСК: файл от pos {p2} ({nk2} ключей), стадии от {pos} "
+                              f"({Ka.shape[0]} ключей) - нужен STRATA_EAGLE_DUMP_SCORES_POS={pos}")
+                        raise SystemExit(0)
                     e_sc = np.frombuffer(rb2[20:20 + 4 * nh2 * nk2], dtype="<f4").reshape(nh2, nk2)
                     with torch.no_grad():
                         t_sc = (torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd),

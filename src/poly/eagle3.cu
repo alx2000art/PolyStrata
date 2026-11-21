@@ -429,8 +429,14 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // the scores are the one number a trainer-side q.k must reproduce, and their spread says whether
     // the key set matches at all (one key thousands of times above the rest names a wrong K).
     static const char* g_sc_path = std::getenv("STRATA_EAGLE_DUMP_SCORES");
+    // _POS: без него первый одиночный шаг (хвост чтения, pos 1088) опережает шаг драфта и файл
+    // оказывается от другой позиции, чем стадии - сравнивать нельзя
+    static const long long g_sc_pos = [] {
+        const char* v = std::getenv("STRATA_EAGLE_DUMP_SCORES_POS");
+        return v ? std::atoll(v) : -1LL;
+    }();
     static bool g_sc_done = false;
-    if (g_sc_path && !g_sc_done && n == 1) {
+    if (g_sc_path && !g_sc_done && n == 1 && (g_sc_pos < 0 || (long long) pos == g_sc_pos)) {
         g_sc_done = true;
         ck(cudaStreamSynchronize(cs(stream)), "scores dump sync");
         const int n_keys = int(pos) + 1;
