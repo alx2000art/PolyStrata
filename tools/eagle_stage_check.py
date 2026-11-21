@@ -73,6 +73,8 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--round", default=None, help="round-дамп (hidden/emb); по умолчанию stage-файл без .stage")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--kv-layout", choices=["row", "kv"], default="row",
+                    help="раскладка кэша: row=[row][kv][hd] (attend_batch так и читает), kv=[kv][row][hd]")
     ap.add_argument("--kv-order", choices=["hf", "raw"], default="hf",
                     help="порядок K в кэше: hf - развернуть w_rope (по умолчанию), raw - как лежит")
     ap.add_argument("--scores", default=None, help="дамп скоров (по умолчанию <kv>.scores)")
@@ -134,6 +136,9 @@ def main() -> int:
                 K = np.frombuffer(raw[off2:off2 + 2 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 V = np.frombuffer(raw[off2 + 2 * part:off2 + 4 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 # кэш в порядке движка - в HF, как и q/k стадий
+                if args.kv_layout == "kv":      # [kv][row][hd] вместо [row][kv][hd]
+                    K = K.reshape(nkv, rows, hd).transpose(1, 0, 2)
+                    V = V.reshape(nkv, rows, hd).transpose(1, 0, 2)
                 if args.kv_order == "hf":
                     K = K[..., _idx]      # кэш в порядке w_rope -> HF
                 # o ДО _head_out: та же арифметика внимания, но результат наружу - иначе не видно,
