@@ -20,6 +20,11 @@ CORPUS="${CORPUS:-$HOME/corpus/corpus_full.txt}"
 DEC_DIR="${DEC_DIR:-$HOME/eagle_taps_dec}"
 N="${N:-100}"
 MAX_TOKENS="${MAX_TOKENS:-384}"
+# EXTRA_ARGS="--window 1 --lookup 0" - аргументы движка поверх конфига.  Снимать дампы
+# для ОБУЧЕНИЯ нужно без спекуляции: при окне >1 соседние строки - это догадки
+# головы, и метка "следующая строка" становится её собственным предложением, а не
+# выбором модели (офлайн получается 60% на само-предсказании и 15% живьём).
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 STOP_WAIT="${STOP_WAIT:-90}"
 WORK="$STRATA_DIR/eagle_collect"
@@ -98,6 +103,23 @@ elif _li >= 0:
     args.insert(_li + 1, _lk)
 else:
     args += ["--lookup", _lk]
+# EXTRA_ARGS: пары "--ключ значение" поверх конфига (например --window 1 --lookup 0)
+_extra = os.environ.get("EXTRA_ARGS", "").split()
+_k = 0
+while _k + 1 < len(_extra) + 1 and _k < len(_extra):
+    _key = _extra[_k]
+    if _k + 1 < len(_extra) and not _extra[_k + 1].startswith("--"):
+        _val = _extra[_k + 1]; _k += 2
+    else:
+        _val = None; _k += 1
+    _idx = args.index(_key) if _key in args else -1
+    if _idx >= 0 and _val is not None and _idx + 1 < len(args):
+        args[_idx + 1] = _val
+    elif _idx >= 0 and _val is not None:
+        args.insert(_idx + 1, _val)
+    elif _idx < 0:
+        args += [_key] + ([_val] if _val is not None else [])
+print("  args:", " ".join(args[-6:]) if args else "")
 cfg["args"] = args
 cfg["env"] = env
 json.dump(cfg, open(p + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
