@@ -16,13 +16,22 @@ import sys
 
 
 def main() -> int:
-    if len(sys.argv) < 3 or (len(sys.argv) - 2) % 2:
+    raw = sys.argv[2:]
+    dels = [p for p in raw if p.startswith("del:")]
+    pairs = [p for p in raw if not p.startswith("del:")]
+    if len(sys.argv) < 3 or (not pairs and not dels) or len(pairs) % 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     path = sys.argv[1]
-    pairs = sys.argv[2:]
     cfg = json.load(open(path, encoding="utf-8-sig"))
     args = [str(a) for a in (cfg.get("args") or [])]
+    # "del:--flag" убирает ключ вместе со значением (leftover экспериментов в конфиге)
+    for k in dels:
+        name = k[4:]
+        idx = args.index(name) if name in args else -1
+        if idx >= 0:
+            has_val = idx + 1 < len(args) and not args[idx + 1].startswith("--")
+            del args[idx:(idx + 2 if has_val else idx + 1)]
     for i in range(0, len(pairs), 2):
         key, val = pairs[i], pairs[i + 1]
         idx = args.index(key) if key in args else -1

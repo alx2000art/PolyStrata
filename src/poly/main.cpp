@@ -521,7 +521,10 @@ struct Session {
                 // A repeat that fills the window, from a match of a length that has been right nine times in ten,
                 // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
                 // block guesses, each guess from the one before, while a guess more pays (Guesses).
-                const bool blocks = engine.drafts() && room && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
+                // taps-only: снимаем состояния, но догадок не спрашиваем - офлайн-метки должны быть
+                // выбором модели, а не предложением головы
+                const bool blocks = engine.drafts() && !Engine::eagle_taps_only() && room &&
+                                    !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
                 const bool ask = guesses.begin(blocks, policy);
                 // the round's time, as the policy counts it: a window of `in` tokens wrote n of them
                 const auto count = [&](int in, int n) {

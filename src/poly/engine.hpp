@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -319,6 +320,19 @@ public:
     /// context.  logits() is left alone.  An architecture may guess with a small model of its own instead of a
     /// block (draft_step()); the calls are the same.
     bool drafts() const { return next_ ? next_->drafts() : draft_ || eagle3_ != nullptr; }
+    /// DBG(eagle3) STRATA_EAGLE_TAPS_ONLY=1: capture the decode taps and never ask the head.
+    /// The dumps for TRAINING need exactly this: with --window >1 the neighbouring rows are the
+    /// head's own guesses, so the trainer's next-row label would be the head's proposal rather
+    /// than the model's pick (ft13 read 60% offline on such a set and 15% live).  --window 1
+    /// would silence the guesses but it also refuses to configure the tap layers, and no taps
+    /// means no dump.
+    static bool eagle_taps_only() {
+        static const bool on = [] {
+            const char* v = std::getenv("STRATA_EAGLE_TAPS_ONLY");
+            return v != nullptr && v[0] == '1';
+        }();
+        return on;
+    }
     /// Test only: the calls read()'s layer-major path gave the draft block's rows (draft_rows()) on the card that has
     /// the block, since load.  Two or more in one read are back-to-back refills of its pinned input rows.
     int64_t read_draft_calls_for_test() const { return next_ ? next_->read_draft_calls_for_test() : read_draft_calls_; }

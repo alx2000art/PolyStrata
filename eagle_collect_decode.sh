@@ -110,6 +110,13 @@ else:
     args += ["--lookup", _lk]
 # EXTRA_ARGS: пары "--ключ значение" поверх конфига (например --window 1 --lookup 0)
 _extra = os.environ.get("EXTRA_ARGS", "").split()
+# "@NAME=value" кладёт переменную в env движка (конфиг), а не в его CLI-аргументы -
+# например @STRATA_EAGLE_TAPS_ONLY=1, чтобы снимать taps без догадок
+for _tok in [t for t in _extra if t.startswith("@")]:
+    _name, _, _val = _tok[1:].partition("=")
+    if _name:
+        env[_name] = _val
+_extra = [t for t in _extra if not t.startswith("@")]
 _k = 0
 while _k + 1 < len(_extra) + 1 and _k < len(_extra):
     _key = _extra[_k]

@@ -2073,7 +2073,7 @@ void Engine::load(const Options& o) {
     }
     if (const MetaValue* taps = meta_in(*gg_, "dspark_target_layer_ids"))
         if (taps->type == MetaType::ARRAY && taps->items.size() == 3 && !opt_.draft_model.empty() &&
-            opt_.draft && opt_.window != 1 && dspark_taps_n_ == 0) {
+            opt_.draft && (opt_.window != 1 || eagle_taps_only()) && dspark_taps_n_ == 0) {
             for (int i = 0; i < 3; ++i) dspark_tap_layers_[(size_t) i] = (int) taps->items[(size_t) i].u;
             dspark_taps_n_ = 3;
         }
