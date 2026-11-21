@@ -201,6 +201,20 @@ def main() -> int:
                     with torch.no_grad():
                         t_sc = (torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd),
                                              Ka) / (model.hd ** 0.5)).reshape(nh2, nk2).double().cpu().numpy()
+                        if args.head is not None:
+                            # два контрольных произведения: чем тренерский q отличается от
+                            # движкового и не перепутан ли порядок у K
+                            _hv = args.head // per
+                            _qe = torch.from_numpy(qe).to(device).view(model.n_kv, per, model.hd)
+                            _qr = torch.from_numpy(st["q"].reshape(model.n_head, model.hd)[:, _idx].reshape(-1)).to(device).view(model.n_kv, per, model.hd)
+                            _rawK = np.frombuffer(raw[off2:off2 + 2 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
+                            _Kr = torch.from_numpy(_rawK).to(device)
+                            _ar = torch.cat((_Kr, kk[None]), dim=0)
+                            _a = (torch.einsum("qph,skh->qps", _qe, Ka) / (model.hd ** 0.5))[_hv, 0, :8]
+                            _b = (torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd), _ar)
+                                  / (model.hd ** 0.5))[_hv, 0, :8]
+                            print(f"         stage-q(HF) . K(HF): " + " ".join(f"{v:.2f}" for v in _a.cpu().numpy().tolist()))
+                            print(f"         trainer-q . K(RAW): " + " ".join(f"{v:.2f}" for v in _b.cpu().numpy().tolist()))
                     cmp("scores", e_sc.reshape(-1), t_sc.reshape(-1))
                     # движок приводит q к half перед GEMM (attn_group_kernel: __float2half), K и так
                     # half.  Если с q, округлённым до half, cos подскакивает - это вся разница
