@@ -431,6 +431,17 @@ def main() -> int:
         V = np.frombuffer(raw[off + 2 * part:off + 4 * part], dtype="<f2").reshape(rows, nkv, hd)
         print(f"round dump: token {tok} pos {posr}, |h| {np.linalg.norm(hv):.4g}, "
               f"кэш {rows} строк ({(len(raw) - 16 - 8 * ne - 8) / 1e6:.2f} МБ)")
+        # логиты того же шага (STRATA_EAGLE_DUMP_CTX_LOGITS): без них гейт сводится к argmax, а он
+        # при p~0.01 шум - сравнивать надо распределения
+        eng = None
+        _lgpath = args.replay_ctx + ".logits"
+        if os.path.exists(_lgpath):
+            _raw = open(_lgpath, "rb").read()
+            _n, = _st.unpack("<i", _raw[:4])
+            eng = np.frombuffer(_raw[4:4 + 4 * _n], dtype="<f4")
+            print(f"логиты движка: {_n}, его top-1 {int(np.argmax(eng))}")
+        else:
+            print(f"(нет {_lgpath}: сними шаг с STRATA_EAGLE_DUMP_CTX_LOGITS=<файл>)")
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             lg_noctx = model.step_hidden(torch.from_numpy(hv[None]).to(device),
                                          torch.from_numpy(ev[None]).to(device),
@@ -446,6 +457,14 @@ def main() -> int:
             lgf = lg.float().cpu().numpy()[0]
             top = np.argsort(-lgf)[:5]
             print(f"{name}:", " ".join(f"{int(i)}/{lgf[i]:.2f}" for i in top))
+            if eng is not None and len(eng) == len(lgf):
+                a = lgf.astype(np.float64)
+                b = eng.astype(np.float64)
+                cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+                mxd = float(np.max(np.abs(a - b)))
+                eid = int(np.argmax(eng))
+                rank = int((a > a[eid]).sum())     # сколько классов тренера выше id движка
+                print(f"   vs движок: cos={cos:+.5f} maxdiff={mxd:.2f} id_движка={eid} у_тренера_ранг={rank}")
         print("(сравни 'с кэшем' с движковым 'draft 1/3: ... draft_id=...': совпало -> тренер "
               "воспроизводит раунд, и обучению не хватает именно контекста)")
         return 0

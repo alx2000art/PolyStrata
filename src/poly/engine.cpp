@@ -5254,6 +5254,28 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         ck(cudaStreamSynchronize(cs(st_)), "draft after likeliest");
         ck(cudaStreamSynchronize(cs(st_)), "draft");
         *prob = h_guess_->prob;
+        // DBG(eagle3) STRATA_EAGLE_DUMP_CTX_LOGITS=<file>: the step's raw logits beside the state.
+        // The argmax is useless as a gate when the head is unsure - at p ~0.01 it flips on any
+        // numeric hair - while the DISTRIBUTION is not: a cosine of 1.000 and the engine's id at
+        // rank 0 inside the trainer's own order say the two implementations agree; anything else
+        // says where they do not.
+        static const char* g_logits_path = std::getenv("STRATA_EAGLE_DUMP_CTX_LOGITS");
+        if (g_logits_path && i == g_round_idx && g_round_no == g_round_want) {
+            static bool lg_done = false;
+            if (!lg_done) {
+                lg_done = true;
+                std::vector<float> lgv((size_t) eagle3_->dvocab());
+                ck(cudaMemcpy(lgv.data(), logits, lgv.size() * sizeof(float), cudaMemcpyDeviceToHost),
+                   "ctx logits");
+                if (FILE* lf = std::fopen(g_logits_path, "wb")) {
+                    const int32_t n = eagle3_->dvocab();
+                    std::fwrite(&n, sizeof n, 1, lf);
+                    std::fwrite(lgv.data(), sizeof(float), lgv.size(), lf);
+                    std::fclose(lf);
+                    std::fprintf(stderr, "[eagle] ctx logits: %d -> %s\n", (int) n, g_logits_path);
+                }
+            }
+        }
         // DBG(eagle3) A drafter that answers with the token it was handed is predicting the NEXT token one step
         // early: its input pair is (embedding of t, the hidden before t) instead of (t's own hidden).
         {
