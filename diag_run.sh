@@ -150,7 +150,8 @@ for key in [k for k in cfg.get("env", {})
 # конфига, не из вызывающего.  EAGLE_TEACH=<шаг>, EAGLE_DUMP_ATT=1 (путь по умолчанию), EAGLE_TAPS=...
 for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE_GUESSES", "ONE_DRAFT",
              "STATS", "DRAFT_PREV", "LM_Q8", "TOP5", "ROUND_AB", "DUMP_DECODE", "DUMP_ATT_POS", "STALE_FC",
-             "DUMP_ROUND", "DUMP_ROUND_I", "DUMP_ROUND_N", "DUMP_CTX_KV", "ROUND_REWIND"):
+             "DUMP_ROUND", "DUMP_ROUND_I", "DUMP_ROUND_N", "DUMP_CTX_KV", "DUMP_CTX_LOGITS",
+             "ROUND_REWIND"):
     val = os.environ.get("EAGLE_" + name)
     if val:
         if name == "DUMP_ATT" and val == "1":
@@ -159,6 +160,8 @@ for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE
             val = os.path.expanduser("~/eagle_taps")
         if name == "DUMP_ROUND" and val == "1":
             val = os.path.expanduser("~/eagle_round.bin")
+        if name == "DUMP_CTX_LOGITS" and val == "1":
+            val = os.path.expanduser("~/eagle_round.bin.logits")
         cfg.setdefault("env", {})["STRATA_EAGLE_" + name] = val
 # STRATA_FREEZE_EXPERTS: a frozen answer's expert split is the first token's - the route, the sums and
 # so the whole trajectory are a function of the request alone.  Benchmarks A/B against each other only
