@@ -343,6 +343,44 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // dim-64 fast path's per == 4, so the cuBLAS path takes it)
     attend_batch(blas_, q_, k_cache_, v_cache_, pos, n, score_, kScoreFloats, work_, o_, head_dim_,
                  n_head_, n_kv_, 1.f / std::sqrt(float(head_dim_)), stream);
+    // DBG(eagle3) STRATA_EAGLE_DUMP_STAGE=<file>: one single-row step's stages, taken HERE because the
+    // gate reuses q_ and the up reuses k_ further down.  The logits of the trainer and the engine
+    // disagree at cos ~0.23 with the engine's own cache fed back, so the difference is either in the
+    // K/V rows (data) or in q/k/v (weights/rope): e_norm/f_norm/q/k/v/o say which, stage by stage.
+    static const char* g_stage_path = std::getenv("STRATA_EAGLE_DUMP_STAGE");
+    // _POS: which position to take (the round dump names it); without it the first single-row step wins,
+    // and that can be a read-tail inject rather than the draft this dump is for
+    static const long long g_stage_pos = [] {
+        const char* v = std::getenv("STRATA_EAGLE_DUMP_STAGE_POS");
+        return v ? std::atoll(v) : -1LL;
+    }();
+    static bool g_stage_done = false;
+    if (g_stage_path && !g_stage_done && n == 1 && (g_stage_pos < 0 || (long long) pos == g_stage_pos)) {
+        g_stage_done = true;
+        ck(cudaStreamSynchronize(cs(stream)), "stage dump sync");
+        if (FILE* f = std::fopen(g_stage_path, "wb")) {
+            const int32_t hdr[3] = {n_embd_, hd, n_kv_ * head_dim_};   // e/f: n_embd, q/o: hd, k/v: kv*hd
+            const int64_t p64 = (int64_t) pos;
+            std::fwrite(hdr, sizeof hdr, 1, f);
+            std::fwrite(&p64, sizeof p64, 1, f);
+            struct Part { const float* src; size_t n; };
+            const Part parts[6] = {{e_norm_, (size_t) n_embd_}, {f_norm_, (size_t) n_embd_},
+                                   {q_, (size_t) hd}, {k_, (size_t) n_kv_ * head_dim_},
+                                   {v_, (size_t) n_kv_ * head_dim_}, {o_, (size_t) hd}};
+            std::vector<float> buf;
+            for (const Part& pt : parts) {
+                buf.resize(pt.n);
+                std::fwrite(&pt.n, sizeof(size_t), 1, f);
+                // a device read per part: the stage is one row, so this is a few hundred KB in total
+                ck(cudaMemcpy(buf.data(), pt.src, pt.n * sizeof(float), cudaMemcpyDeviceToHost), "stage dump");
+                std::fwrite(buf.data(), sizeof(float), pt.n, f);
+            }
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] stage dump: pos %lld -> %s (e,f,q,k,v,o)
+",
+                         (long long) pos, g_stage_path);
+        }
+    }
     if (dump_att_ && att_dump_ && dump_row_ < (size_t) n) {
         dump_att_ = false;
         ck(cudaMemcpyAsync(att_dump_, o_ + dump_row_ * (size_t) n_head_ * head_dim_,
