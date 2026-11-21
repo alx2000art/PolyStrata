@@ -17,6 +17,7 @@ q/k/v - ПОСЛЕ rope; o - выход внимания до o_proj.
   * q/k/v совпали, o нет -> само внимание (K/V-строки, маска, порядок голов)
 """
 import argparse
+import os
 import struct
 import sys
 
@@ -72,6 +73,7 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--round", default=None, help="round-дамп (hidden/emb); по умолчанию stage-файл без .stage")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--kv", default=None, help="round-дамп с кэшем (по умолчанию <stage без .stage>)")
     args = ap.parse_args()
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
     head_cfg = {}
@@ -114,7 +116,47 @@ def main() -> int:
     cmp("q", qe, q[0].reshape(-1).cpu().numpy())
     cmp("k", ke, k[0].reshape(-1).cpu().numpy())
     cmp("v", st["v"], v[0].reshape(-1).cpu().numpy())
-    print("  o      (выход внимания — сравнивать вместе с --replay-ctx: нужен кэш)")
+    # --- o и логиты: нужен кэш движка (STRATA_EAGLE_DUMP_CTX_KV=1 в том же прогоне) ---
+    kvdump = args.kv or args.stage.replace(".stage", "")
+    if os.path.exists(kvdump):
+        raw = open(kvdump, "rb").read()
+        ne2, tok2 = struct.unpack("<ii", raw[:8])
+        pos2, = struct.unpack("<q", raw[8:16])
+        off2 = 16 + 8 * ne2
+        if off2 + 8 <= len(raw):
+            rows, = struct.unpack("<q", raw[off2:off2 + 8]); off2 += 8
+            part = rows * model.n_kv * model.hd
+            if off2 + 4 * part <= len(raw) and ne2 == len(st["e"]):
+                K = np.frombuffer(raw[off2:off2 + 2 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
+                V = np.frombuffer(raw[off2 + 2 * part:off2 + 4 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
+                # кэш в порядке движка - в HF, как и q/k стадий
+                K = K[..., _idx]
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                    lg, hid2, _, _ = model.chain_depth(
+                        torch.from_numpy(K).to(device), torch.from_numpy(V).to(device),
+                        torch.from_numpy(hv[None]).to(device), torch.from_numpy(ev[None]).to(device),
+                        torch.tensor([pos], device=device), torch.arange(rows, device=device))
+                print(f"  кэш: {rows} строк из {kvdump}")
+                # o стадий движка - выход внимания до o_proj; у тренера он внутри chain_depth,
+                # поэтому сравниваем следующий наблюдаемый уровень: логиты
+                lp = args.stage.replace(".stage", "") + ".logits"
+                if os.path.exists(lp):
+                    rb = open(lp, "rb").read()
+                    n2, = struct.unpack("<i", rb[:4])
+                    engd = np.frombuffer(rb[4:4 + 4 * n2], dtype="<f4")
+                    lgf = lg.float().cpu().numpy()[0]
+                    a = lgf.astype(np.float64); b = engd.astype(np.float64)
+                    cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+                    eid = int(np.argmax(engd))
+                    print(f"  логиты cos={cos:+.6f} maxdiff={np.max(np.abs(a - b)):.4g} "
+                          f"id_движка={eid} тренер_top1={int(np.argmax(lgf))} "
+                          f"ранг_id_движка={int((a > a[eid]).sum())}")
+                else:
+                    print(f"  (нет {lp} - снимай шаг с STRATA_EAGLE_DUMP_CTX_LOGITS)")
+        else:
+            print("  (в дампе нет кэша: снимай с STRATA_EAGLE_DUMP_CTX_KV=1)")
+    else:
+        print("  (нет KV-дампа рядом - пропускаю o/логиты)")
     print("\nчтение: e/f разные -> нормы/входы; q/k/v разные -> веса или rope; "
           "q/k/v совпали -> расходятся сами K/V-строки или маска.")
     return 0
