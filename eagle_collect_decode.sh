@@ -138,7 +138,15 @@ if os.path.exists(dialogs):
                 continue
             for m in (rec.get("messages") or []):
                 if m.get("role") == "user":
-                    c = (m.get("content") or "").strip()
+                    # content бывает СПИСКОМ кусков (мультимодальные сообщения): на строке
+                    # сбор падал с "'list' object has no attribute 'strip'", prompts.txt не
+                    # пересобирался и сбор шёл по старым промптам из прошлого запуска
+                    c = m.get("content")
+                    if isinstance(c, list):
+                        c = " ".join(str(x.get("text") or "") for x in c if isinstance(x, dict))
+                    if not isinstance(c, str):
+                        c = ""
+                    c = c.strip()
                     if 200 <= len(c) <= 4000 and c[:80] not in seen:
                         seen.add(c[:80])
                         prompts.append(c[:4000])
@@ -156,6 +164,8 @@ if n > len(prompts):
         nc += 1
 print(f"  из корпуса: {nc}")
 prompts = prompts[:n]
+if len(prompts) < min(n, 10):
+    raise SystemExit(f"промптов собралось {len(prompts)} при n={n} - проверь PROMPT_FILE/диалоги/корпус")
 open(os.path.join(work, "prompts.txt"), "w", encoding="utf-8").write("\0".join(prompts))
 print(f"  промптов: {len(prompts)}")
 PY
