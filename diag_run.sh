@@ -56,6 +56,19 @@ PROMPT="$(awk -v a="$PROMPT_OFFSET" -v b="$PROMPT_LIMIT" 'NR>=a && (b==0 || NR<a
 PROMPT_CHARS="${#PROMPT}"
 mkdir -p "$OUT_DIR" || die "не создать $OUT_DIR"
 
+# teardown must not block: `nvidia-smi dmon` and `tail -F` outlive TERM in this container, and a bare
+# `wait` on them held the report hostage until Ctrl+C.  Kill, give it a second, then kill -9.
+killbounded() {
+  local p="${1:-}" i
+  [[ -n "$p" ]] || return 0
+  kill "$p" 2>/dev/null || return 0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$p" 2>/dev/null || return 0
+    sleep 0.3
+  done
+  kill -9 "$p" 2>/dev/null || true
+  sleep 0.2
+}
 port_open() { timeout 2 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; }
 stop_server() {
     pkill -f "$STRATA_DIR/serve/server.py" 2>/dev/null || true
@@ -206,12 +219,12 @@ if [[ -n "$LOG" && -f "$LOG" ]]; then WATCH="$LOG"; fi
 ( tail -n0 -F "$WATCH" 2>/dev/null \
     | grep --line-buffered -E "reading the prompt|\[strata\] done:|error|\[eagle\]|draft block|first guess|probe:" ) &
 TAILPID=$!
-trap 'kill "$TAILPID" 2>/dev/null' EXIT INT TERM
+trap 'killbounded "$TAILPID"; pkill -9 -f "tail -n0 -F" 2>/dev/null || true' EXIT INT TERM
 ask "$OUT_DIR/diag-run.txt"
 sleep 2
-kill "$TAILPID" 2>/dev/null; wait "$TAILPID" 2>/dev/null
+killbounded "$TAILPID"; pkill -9 -f "tail -n0 -F" 2>/dev/null || true
 a=$(sectors)
-kill "$DMON" 2>/dev/null; wait "$DMON" 2>/dev/null
+killbounded "$DMON"; pkill -9 -f "nvidia-smi dmon" 2>/dev/null || true
 
 ELOG="$LOG"   # the engine-side lines ([moe], [stage-spec]) go to the engine's own log, not the server's
 log ""
