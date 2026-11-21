@@ -434,8 +434,19 @@ def main() -> int:
         rows, = _st.unpack("<q", raw[off:off + 8]); off += 8
         nkv, hd = int(meta["n_kv"]), int(model.hd)
         part = rows * nkv * hd
-        K = np.frombuffer(raw[off:off + 2 * part], dtype="<f2").reshape(rows, nkv, hd)
-        V = np.frombuffer(raw[off + 2 * part:off + 4 * part], dtype="<f2").reshape(rows, nkv, hd)
+        K = np.frombuffer(raw[off:off + 2 * part], dtype="<f2").reshape(rows, nkv, hd).astype(np.float32)
+        V = np.frombuffer(raw[off + 2 * part:off + 4 * part], dtype="<f2").reshape(rows, nkv, hd).astype(np.float32)
+        # Кэш хранит k в порядке ДВИЖКА: w_rope переставляет строки wq/wk так, что dsv4_rope
+        # поворачивает соседние пары (движок: индекс 2i <- i, 2i+1 <- i+32).  Тренер считает
+        # в HF-порядке (половины), поэтому K надо развернуть обратно, иначе q·k считается между
+        # разноупорядоченными векторами и даёт мусор (cos 0.23 при идеальных q/k/v).
+        _h = hd // 2
+        _idx = np.empty(hd, dtype=np.int64)
+        _idx[:_h] = 2 * np.arange(_h)
+        _idx[_h:] = 2 * np.arange(_h) + 1
+        K = K[..., _idx]
+        # v не поворачивается и не переставляется - он уже в HF-порядке
+        Kf, Vf = K, V
         print(f"round dump: token {tok} pos {posr}, |h| {np.linalg.norm(hv):.4g}, "
               f"кэш {rows} строк ({(len(raw) - 16 - 8 * ne - 8) / 1e6:.2f} МБ)")
         # логиты того же шага (STRATA_EAGLE_DUMP_CTX_LOGITS): без них гейт сводится к argmax, а он
@@ -454,16 +465,16 @@ def main() -> int:
                                          torch.from_numpy(ev[None]).to(device),
                                          torch.tensor([posr], device=device))
             lg_ctx, _, _, _ = model.chain_depth(
-                torch.from_numpy(K.astype(np.float32)).to(device),
-                torch.from_numpy(V.astype(np.float32)).to(device),
+                torch.from_numpy(Kf).to(device),
+                torch.from_numpy(Vf).to(device),
                 torch.from_numpy(hv[None]).to(device),
                 torch.from_numpy(ev[None]).to(device),
                 torch.tensor([posr], device=device),
                 torch.arange(rows, device=device))
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                 lg_ctx_half, _, _, _ = model.chain_depth(
-                    torch.from_numpy(K.astype(np.float32)).to(device),
-                    torch.from_numpy(V.astype(np.float32)).to(device),
+                    torch.from_numpy(Kf).to(device),
+                    torch.from_numpy(Vf).to(device),
                     torch.from_numpy(hv[None]).to(device),
                     torch.from_numpy(ev[None]).to(device),
                     torch.tensor([posr], device=device),

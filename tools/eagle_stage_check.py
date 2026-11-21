@@ -100,11 +100,19 @@ def main() -> int:
         q = rope_apply(model.wq(x).view(1, model.n_head, model.hd), torch.tensor([pos], device=device), model.rope)
         k = rope_apply(model.wk(x).view(1, model.n_kv, model.hd), torch.tensor([pos], device=device), model.rope)
         v = model.wv(x).view(1, model.n_kv, model.hd)
-    print("сверка (движок против тренера):")
+    # движок держит q/k в порядке w_rope (2i <- i, 2i+1 <- i+32); тренер - в HF.  Разворачиваем
+    # стадии движка в HF, и тогда cos должен стать 1.0 - иначе остаётся настоящее расхождение
+    _h = model.hd // 2
+    _idx = np.empty(model.hd, dtype=np.int64)
+    _idx[:_h] = 2 * np.arange(_h)
+    _idx[_h:] = 2 * np.arange(_h) + 1
+    qe = st["q"].reshape(model.n_head, model.hd)[:, _idx].reshape(-1)
+    ke = st["k"].reshape(model.n_kv, model.hd)[:, _idx].reshape(-1)
+    print("сверка (движок против тренера), q/k движка приведены в HF-порядок:")
     cmp("e", st["e"], e_n[0].cpu().numpy())
     cmp("f", st["f"], f_n[0].cpu().numpy())
-    cmp("q", st["q"], q[0].reshape(-1).cpu().numpy())
-    cmp("k", st["k"], k[0].reshape(-1).cpu().numpy())
+    cmp("q", qe, q[0].reshape(-1).cpu().numpy())
+    cmp("k", ke, k[0].reshape(-1).cpu().numpy())
     cmp("v", st["v"], v[0].reshape(-1).cpu().numpy())
     print("  o      (выход внимания — сравнивать вместе с --replay-ctx: нужен кэш)")
     print("\nчтение: e/f разные -> нормы/входы; q/k/v разные -> веса или rope; "
