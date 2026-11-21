@@ -303,6 +303,12 @@ while i < len(kept):
     else:
         final.append(a)
         i += 1
+# lookup делит ОДНО окно раунда с драфтером (арбитр DraftPolicy::choose,
+# src/spec/draft_policy.cpp): при включённом n-граммном lookup часть раундов уходит
+# ему, и приём драфтера в ячейке смешивается с попаданиями n-грамм.  Гасим везде,
+# если спека варианта сама не задаёт --lookup.  Вернуть: SWEEP_LOOKUP=3
+if "--lookup" not in final:
+    final += ["--lookup", os.environ.get("SWEEP_LOOKUP", "0")]
 cfg["args"] = final
 # env-ячейки: спека задаёт значения, а управляемые env-переменные вне спеки сносятся
 cfg.setdefault("env", {})

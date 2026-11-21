@@ -141,6 +141,20 @@ while i < len(args):
     if args[i] in ("--prompt-cache", "--conversation-cache-mib") and i + 1 < len(args):
         args[i + 1] = "0"
     out.append(args[i]); i += 1
+# --- измеряем ТОЛЬКО драфтера: n-граммный lookup выключен ---------------------
+# lookup и голова делят ОДНО окно раунда, а арбитр DraftPolicy::choose
+# (src/spec/draft_policy.cpp) отдаёт раунд тому, кто по замерам платит больше: при
+# включённом lookup часть раундов уходит n-граммам, и числа "drafts N/M accepted"
+# смешивают два механизма - непонятно, кто дал попадание.  Окно остаётся у головы.
+# Переопределить: LOOKUP=3 ./script ...  (0 - выключен, 3 - дефолт движка)
+_lk = os.environ.get("LOOKUP", "0")
+_li = args.index("--lookup") if "--lookup" in args else -1
+if _li >= 0 and _li + 1 < len(args) and not args[_li + 1].startswith("--"):
+    args[_li + 1] = _lk
+elif _li >= 0:
+    args.insert(_li + 1, _lk)
+else:
+    args += ["--lookup", _lk]
 cfg["args"] = out
 cfg["env"] = env
 json.dump(cfg, open(p + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1)

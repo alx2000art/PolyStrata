@@ -344,7 +344,13 @@ while i < len(toks):
 # только разброс (и отравляют ячейку при частичном попадании) — гасим во всех
 # вариантах; продовое значение вернёт финальный restore_config.
 # Переопределить: SWEEP_PROMPT_CACHE=6 ./bench_sweep.sh
-force = {"--prompt-cache": os.environ.get("SWEEP_PROMPT_CACHE", "0")}
+# lookup (n-граммные догадки) делит ОДНО окно раунда с драфтером, а арбитр
+# DraftPolicy::choose (src/spec/draft_policy.cpp) отдаёт раунд тому, кто по замерам
+# платит больше - при включённом lookup часть раундов уходит n-граммам, и приём
+# драфтера в ячейке получается смешанным.  Для свипа гасим его во всех вариантах;
+# продовое значение вернёт финальный restore_config.  Вернуть: SWEEP_LOOKUP=3
+force = {"--prompt-cache": os.environ.get("SWEEP_PROMPT_CACHE", "0"),
+         "--lookup": os.environ.get("SWEEP_LOOKUP", "0")}
 for k, v in force.items():
     idx = args.index(k) if k in args else -1
     if idx >= 0 and idx + 1 < len(args):

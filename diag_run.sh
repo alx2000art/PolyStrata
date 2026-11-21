@@ -165,6 +165,22 @@ for name in ("TEACH", "TEACH_PERM", "DUMP", "DUMP_ATT", "DUMP_R", "TAPS", "FORCE
 # with it (the unfrozen decode's trajectory changes run to run, and the drafter's acceptance with it).
 if os.environ.get("FREEZE_EXPERTS"):
     cfg.setdefault("env", {})["STRATA_FREEZE_EXPERTS"] = os.environ["FREEZE_EXPERTS"]
+# --- измеряем ТОЛЬКО драфтера: n-граммный lookup выключен ---------------------
+# lookup и голова делят ОДНО окно раунда, а арбитр DraftPolicy::choose
+# (src/spec/draft_policy.cpp) отдаёт раунд тому, кто по замерам платит больше: при
+# включённом lookup часть раундов уходит n-граммам, и числа "drafts N/M accepted"
+# смешивают два механизма - непонятно, кто дал попадание.  Окно остаётся у головы.
+# Переопределить: LOOKUP=3 ./diag_run.sh
+args = [str(a) for a in (cfg.get("args") or [])]
+_lk = os.environ.get("LOOKUP", "0")
+_li = args.index("--lookup") if "--lookup" in args else -1
+if _li >= 0 and _li + 1 < len(args) and not args[_li + 1].startswith("--"):
+    args[_li + 1] = _lk
+elif _li >= 0:
+    args.insert(_li + 1, _lk)
+else:
+    args += ["--lookup", _lk]
+cfg["args"] = args
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
