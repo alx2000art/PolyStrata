@@ -189,6 +189,13 @@ def main() -> int:
                         t_sc = (torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd),
                                              Ka) / (model.hd ** 0.5)).reshape(nh2, nk2).double().cpu().numpy()
                     cmp("scores", e_sc.reshape(-1), t_sc.reshape(-1))
+                    # движок приводит q к half перед GEMM (attn_group_kernel: __float2half), K и так
+                    # half.  Если с q, округлённым до half, cos подскакивает - это вся разница
+                    with torch.no_grad():
+                        qh = qq.half().float().view(model.n_kv, per, model.hd)
+                        t_sc_h = (torch.einsum("qph,skh->qps", qh,
+                                               Ka) / (model.hd ** 0.5)).reshape(nh2, nk2).double().cpu().numpy()
+                    cmp("scores(q=half)", e_sc.reshape(-1), t_sc_h.reshape(-1))
                     dh2 = int(np.argmax(np.abs(e_sc - t_sc).sum(1)))
                     e3 = np.argsort(-e_sc[dh2])[:3]
                     t3 = np.argsort(-t_sc[dh2])[:3]
