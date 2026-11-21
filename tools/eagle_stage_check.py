@@ -137,6 +137,13 @@ def main() -> int:
                 K = np.frombuffer(raw[off2:off2 + 2 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 V = np.frombuffer(raw[off2 + 2 * part:off2 + 4 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 # кэш в порядке движка - в HF, как и q/k стадий
+                if args.head is not None:
+                    _kv = args.head // (model.n_head // model.n_kv)
+                    _raw0 = K[0, _kv]
+                    print(f"  дамп: k row0 kv{_kv} dims 0..7:  " +
+                          " ".join(f"{v:.4f}" for v in _raw0[:8]))
+                    print(f"  дамп: k row0 kv{_kv} dims 32..39: " +
+                          " ".join(f"{v:.4f}" for v in _raw0[32:40]))
                 if args.kv_layout == "kv":      # [kv][row][hd] вместо [row][kv][hd]
                     K = K.reshape(model.n_kv, rows, model.hd).transpose(1, 0, 2)
                     V = V.reshape(model.n_kv, rows, model.hd).transpose(1, 0, 2)

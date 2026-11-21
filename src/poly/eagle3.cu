@@ -492,6 +492,27 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
         for (int j = 0; j < 8; ++j)
             std::fprintf(stderr, " %.2f", (double) es[(size_t) chk_head * (size_t(pos) + 1) + j]);
         std::fprintf(stderr, "\n");
+        // сырые k строки 0 той же головы: dims 0..7 и 32..39 (вторая половина покажет, есть ли
+        // перестановка w_rope) - с этим тренер сравнивает то, что он прочитал из дампа
+        std::fprintf(stderr, "[eagle] k row0 kv%d dims 0..7:", kv);
+        for (int i = 0; i < 8; ++i) {
+            const uint32_t hb = kh[(size_t) kv * head_dim_ + i];
+            const uint32_t ex = (hb >> 10) & 0x1Fu, man = hb & 0x3FFu;
+            const uint32_t bits = (ex == 0) ? ((hb & 0x8000u) << 16)
+                                            : (((hb & 0x8000u) << 16) | ((ex + 112) << 23) | (man << 13));
+            float kf; std::memcpy(&kf, &bits, sizeof kf);
+            std::fprintf(stderr, " %.4f", (double) kf);
+        }
+        std::fprintf(stderr, "\n[eagle] k row0 kv%d dims 32..39:", kv);
+        for (int i = 32; i < 40; ++i) {
+            const uint32_t hb = kh[(size_t) kv * head_dim_ + i];
+            const uint32_t ex = (hb >> 10) & 0x1Fu, man = hb & 0x3FFu;
+            const uint32_t bits = (ex == 0) ? ((hb & 0x8000u) << 16)
+                                            : (((hb & 0x8000u) << 16) | ((ex + 112) << 23) | (man << 13));
+            float kf; std::memcpy(&kf, &bits, sizeof kf);
+            std::fprintf(stderr, " %.4f", (double) kf);
+        }
+        std::fprintf(stderr, "\n");
     }
     if (dump_att_ && att_dump_ && dump_row_ < (size_t) n) {
         dump_att_ = false;
