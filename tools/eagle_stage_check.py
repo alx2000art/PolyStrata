@@ -73,6 +73,7 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--round", default=None, help="round-дамп (hidden/emb); по умолчанию stage-файл без .stage")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--weights", default=None, help="дамп весов внимания (по умолчанию <kv>.weights)")
     ap.add_argument("--kv", default=None, help="round-дамп с кэшем (по умолчанию <stage без .stage>)")
     args = ap.parse_args()
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -144,6 +145,24 @@ def main() -> int:
                     w = torch.softmax(att, dim=-1)                     # [n_kv, per, keys]
                     oo = torch.einsum("qps,skh->qph", w, Va).reshape(model.n_head * model.hd)
                 cmp("o", st["o"], oo.cpu().numpy())
+                # веса внимания: у движка они лежат half-ом, строка на (группа, голова группы)
+                wp = args.weights or kvdump + ".weights"
+                if os.path.exists(wp):
+                    rb = open(wp, "rb").read()
+                    nh, nkv_w, nk = struct.unpack("<iii", rb[:12])
+                    eng_w = np.frombuffer(rb[20:20 + 2 * nh * nk], dtype="<f2").reshape(nh, nk).astype(np.float64)
+                    tr_w = w.reshape(nh, nk).double().cpu().numpy()
+                    cmp("w_att", eng_w.reshape(-1), tr_w.reshape(-1))
+                    print(f"         суммы: движок {eng_w.sum(1).mean():.4f}±{eng_w.sum(1).std():.4f}, "
+                          f"тренер {tr_w.sum(1).mean():.4f}±{tr_w.sum(1).std():.4f}")
+                    dh = int(np.argmax(np.abs(eng_w - tr_w).sum(1)))
+                    e3 = np.argsort(-eng_w[dh])[:3]
+                    t3 = np.argsort(-tr_w[dh])[:3]
+                    print(f"         голова {dh}: движок top3 " +
+                          " ".join(f"{int(j)}/{eng_w[dh, j]:.4f}" for j in e3) +
+                          " | тренер top3 " + " ".join(f"{int(j)}/{tr_w[dh, j]:.4f}" for j in t3))
+                else:
+                    print(f"  (нет {wp}: снимай с STRATA_EAGLE_DUMP_WEIGHTS)")
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                     lg, hid2, _, _ = model.chain_depth(
                         torch.from_numpy(K).to(device), torch.from_numpy(V).to(device),

@@ -393,6 +393,31 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
                          (long long) pos, g_stage_path);
         }
     }
+    // DBG(eagle3) STRATA_EAGLE_DUMP_WEIGHTS=<file>: the softmax weights of one single-row step.
+    // attend_batch keeps them as halves past the score scratch (weight = score + 2/3*score_floats,
+    // a row a (group, token, head of group)), so the engine's own normalisation can be compared with
+    // the trainer's: with identical q/k/v the weights must be identical, and if they are not, the
+    // K rows the engine reads are not the ones the dump gave back.
+    static const char* g_w_path = std::getenv("STRATA_EAGLE_DUMP_WEIGHTS");
+    static bool g_w_done = false;
+    if (g_w_path && !g_w_done && n == 1) {
+        g_w_done = true;
+        ck(cudaStreamSynchronize(cs(stream)), "weights dump sync");
+        const int n_keys = int(pos) + 1;                       // window=0, whole=false
+        const half* wsrc = (const half*) (score_ + (kScoreFloats / 3) * 2);
+        std::vector<uint16_t> wv((size_t) n_head_ * n_keys);
+        ck(cudaMemcpy(wv.data(), wsrc, wv.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost), "weights dump");
+        if (FILE* f = std::fopen(g_w_path, "wb")) {
+            const int32_t hdr[3] = {n_head_, n_kv_, n_keys};
+            const int64_t p64 = (int64_t) pos;
+            std::fwrite(hdr, sizeof hdr, 1, f);
+            std::fwrite(&p64, sizeof p64, 1, f);
+            std::fwrite(wv.data(), sizeof(uint16_t), wv.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] weights dump: pos %lld, %d heads x %d keys -> %s\n",
+                         (long long) pos, n_head_, n_keys, g_w_path);
+        }
+    }
     if (dump_att_ && att_dump_ && dump_row_ < (size_t) n) {
         dump_att_ = false;
         ck(cudaMemcpyAsync(att_dump_, o_ + dump_row_ * (size_t) n_head_ * head_dim_,
