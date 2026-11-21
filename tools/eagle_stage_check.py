@@ -41,11 +41,12 @@ def read_stage(path):
     ne, qc, kvc = struct.unpack("<iii", raw[:12])
     pos, = struct.unpack("<q", raw[12:20])
     off, parts = 20, []
-    for _ in range(6):
+    for _ in range(8):
         n, = struct.unpack("<Q", raw[off:off + 8]); off += 8
         parts.append(np.frombuffer(raw[off:off + 4 * n], dtype="<f4").copy()); off += 4 * n
-    return dict(ne=ne, qc=qc, kvc=kvc, pos=pos,
-                e=parts[0], f=parts[1], q=parts[2], k=parts[3], v=parts[4], o=parts[5])
+    # hidden и emb идут первыми: файл самодостаточен (round-дамп не нужен)
+    return dict(ne=ne, qc=qc, kvc=kvc, pos=pos, hidden=parts[0], emb=parts[1],
+                e=parts[2], f=parts[3], q=parts[4], k=parts[5], v=parts[6], o=parts[7])
 
 
 def cmp(name, a, b):
@@ -74,8 +75,14 @@ def main() -> int:
     eps = float(head_cfg.get("rms_norm_eps", 1e-6))
     model, meta = load_model(args.safetensors, head_cfg, eps, device)
     st = read_stage(args.stage)
-    rpath = args.round or args.stage.replace(".stage", "")
-    ne, tok, pos, hv, ev = read_round(rpath)
+    # hidden/emb уже в файле стадий; --round нужен только старым файлам без них
+    hv, ev = st["hidden"], st["emb"]
+    pos = st["pos"]
+    tok = -1
+    if args.round:
+        _ne, tok, _pos, hv_r, ev_r = read_round(args.round)
+        if len(hv_r) == len(hv):
+            hv, ev = hv_r, ev_r
     print(f"стадии: pos {st['pos']} (round {pos}), token {tok}, E {st['ne']}, "
           f"q {st['qc']}, kv {st['kvc']}")
     with torch.no_grad():

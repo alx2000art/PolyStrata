@@ -374,7 +374,10 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
             std::fwrite(hdr, sizeof hdr, 1, f);
             std::fwrite(&p64, sizeof p64, 1, f);
             struct Part { const float* src; size_t n; };
-            const Part parts[6] = {{e_norm_, (size_t) n_embd_}, {f_norm_, (size_t) n_embd_},
+            // hidden and emb ride along: the stage file is then self-contained (the checker needs no
+            // round dump and no guessed position), and e/f are recomputable from them
+            const Part parts[8] = {{hidden_, (size_t) n_embd_}, {emb_dev_, (size_t) n_embd_},
+                                   {e_norm_, (size_t) n_embd_}, {f_norm_, (size_t) n_embd_},
                                    {q_, (size_t) hd}, {k_, (size_t) n_kv_ * head_dim_},
                                    {v_, (size_t) n_kv_ * head_dim_}, {o_, (size_t) hd}};
             std::vector<float> buf;
