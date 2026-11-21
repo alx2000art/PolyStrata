@@ -156,7 +156,9 @@ log "  модель загружена; собираю $N запросов (по
 python3 - "$PROMPT_FILE" "$CORPUS" "$N" "$WORK" <<'PY'
 import os, random, sys
 prompt_file, corpus, n, work = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-prompts = [open(prompt_file, encoding="utf-8").read()]
+# errors=replace: обрезанный по байтам файл (head -c) рвёт UTF-8 и раньше ронял сборщик,
+# а цикл после падения читал СТАРЫЙ prompts.txt - то есть мерил другие промпты
+prompts = [open(prompt_file, encoding="utf-8", errors="replace").read()]
 # РЕАЛЬНЫЕ запросы: твои диалоги (user-сообщения, chat-домен) + куски корпуса (doc-домен).
 # Никакой синтетики.
 dialogs = os.path.expanduser("~/eagle_gen/dialogs.jsonl")
@@ -200,7 +202,10 @@ print(f"  из корпуса: {nc}")
 prompts = prompts[:n]
 if len(prompts) < min(n, 10):
     raise SystemExit(f"промптов собралось {len(prompts)} при n={n} - проверь PROMPT_FILE/диалоги/корпус")
-open(os.path.join(work, "prompts.txt"), "w", encoding="utf-8").write("\0".join(prompts))
+# атомарно: недописанный или устаревший список не должен достаться циклу
+_tmp = os.path.join(work, "prompts.txt.new")
+open(_tmp, "w", encoding="utf-8").write(chr(0).join(prompts))
+os.replace(_tmp, os.path.join(work, "prompts.txt"))
 print(f"  промптов: {len(prompts)}")
 PY
 
