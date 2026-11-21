@@ -355,6 +355,16 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
         return v ? std::atoll(v) : -1LL;
     }();
     static bool g_stage_done = false;
+    // the first single-row steps name themselves: a gate that never fires is usually a position the
+    // caller did not expect (a read tail, an eval, or cache_pos after a rejected round)
+    if (g_stage_path && n == 1) {
+        static int staged = 0;
+        if (staged < 8) {
+            ++staged;
+            std::fprintf(stderr, "[eagle] stage gate: n=1 pos=%lld want=%lld done=%d\n",
+                         (long long) pos, (long long) g_stage_pos, (int) g_stage_done);
+        }
+    }
     if (g_stage_path && !g_stage_done && n == 1 && (g_stage_pos < 0 || (long long) pos == g_stage_pos)) {
         g_stage_done = true;
         ck(cudaStreamSynchronize(cs(stream)), "stage dump sync");
