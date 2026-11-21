@@ -5110,7 +5110,10 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // The depth-i state pair is exactly what the trainer's --replay-round takes, so the two
         // argmaxes say whether the head or the cache feeding it is at fault.  A depth > 0 dump gets
         // a .i<N> suffix so a depth-0 file is not clobbered.
-        // STRATA_EAGLE_DUMP_ROUND_N=<n>: which ROUND of the request to dump (default 0, the first).
+        // STRATA_EAGLE_DUMP_ROUND_N=<n>: which ROUND of the request to dump (default 0: the first
+        // round of the DECODE, the one whose guesses the run measures).  Rounds are counted only in
+        // the decode: TEACH asks the head three times at the read's tail (draft 1/3..3/3), and a
+        // counter that took those for rounds put the dump on a read state instead of a live round.
         static const int g_round_idx = [] {
             const char* v = std::getenv("STRATA_EAGLE_DUMP_ROUND_I");
             return v ? std::atoi(v) : 0;
@@ -5120,7 +5123,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
             return v ? std::atoll(v) : 0;
         }();
         static long long g_round_no = -1;
-        if (i == 0) ++g_round_no;
+        if (i == 0 && !in_read_) ++g_round_no;
         char dump_path[4096];
         if (g_round_idx > 0)
             std::snprintf(dump_path, sizeof dump_path, "%s.i%d", g_round_path ? g_round_path : "", g_round_idx);
