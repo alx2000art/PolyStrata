@@ -73,6 +73,8 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--round", default=None, help="round-дамп (hidden/emb); по умолчанию stage-файл без .stage")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--kv-order", choices=["hf", "raw"], default="hf",
+                    help="порядок K в кэше: hf - развернуть w_rope (по умолчанию), raw - как лежит")
     ap.add_argument("--weights", default=None, help="дамп весов внимания (по умолчанию <kv>.weights)")
     ap.add_argument("--kv", default=None, help="round-дамп с кэшем (по умолчанию <stage без .stage>)")
     args = ap.parse_args()
@@ -131,7 +133,8 @@ def main() -> int:
                 K = np.frombuffer(raw[off2:off2 + 2 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 V = np.frombuffer(raw[off2 + 2 * part:off2 + 4 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 # кэш в порядке движка - в HF, как и q/k стадий
-                K = K[..., _idx]
+                if args.kv_order == "hf":
+                    K = K[..., _idx]      # кэш в порядке w_rope -> HF
                 # o ДО _head_out: та же арифметика внимания, но результат наружу - иначе не видно,
                 # расходятся ли сами K/V-строки (q/k/v уже совпали до 1e-4)
                 with torch.no_grad():
@@ -157,14 +160,16 @@ def main() -> int:
                         raise SystemExit(0)
                     eng_w = np.frombuffer(rb[20:20 + 2 * nh * nk], dtype="<f2").reshape(nh, nk).astype(np.float64)
                     tr_w = w.reshape(nh, nk).double().cpu().numpy()
-                    cmp("w_att", eng_w.reshape(-1), tr_w.reshape(-1))
+                    rs = eng_w.sum(1, keepdims=True)
+                    eng_n = eng_w / np.where(rs == 0, 1.0, rs)     # в скретче сырые exp: sum делится позже
+                    cmp("w_att", eng_n.reshape(-1), tr_w.reshape(-1))
                     print(f"         суммы: движок {eng_w.sum(1).mean():.4f}±{eng_w.sum(1).std():.4f}, "
                           f"тренер {tr_w.sum(1).mean():.4f}±{tr_w.sum(1).std():.4f}")
-                    dh = int(np.argmax(np.abs(eng_w - tr_w).sum(1)))
-                    e3 = np.argsort(-eng_w[dh])[:3]
+                    dh = int(np.argmax(np.abs(eng_n - tr_w).sum(1)))
+                    e3 = np.argsort(-eng_n[dh])[:3]
                     t3 = np.argsort(-tr_w[dh])[:3]
                     print(f"         голова {dh}: движок top3 " +
-                          " ".join(f"{int(j)}/{eng_w[dh, j]:.4f}" for j in e3) +
+                          " ".join(f"{int(j)}/{eng_n[dh, j]:.4f}" for j in e3) +
                           " | тренер top3 " + " ".join(f"{int(j)}/{tr_w[dh, j]:.4f}" for j in t3))
                 else:
                     print(f"  (нет {wp}: снимай с STRATA_EAGLE_DUMP_WEIGHTS)")
