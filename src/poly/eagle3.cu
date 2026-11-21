@@ -389,8 +389,7 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
                 std::fwrite(buf.data(), sizeof(float), pt.n, f);
             }
             std::fclose(f);
-            std::fprintf(stderr, "[eagle] stage dump: pos %lld -> %s (e,f,q,k,v,o)
-",
+            std::fprintf(stderr, "[eagle] stage dump: pos %lld -> %s (e,f,q,k,v,o)\n",
                          (long long) pos, g_stage_path);
         }
     }
