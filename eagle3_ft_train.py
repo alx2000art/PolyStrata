@@ -26,6 +26,7 @@ import os
 import random
 import struct
 import sys
+import time
 
 import numpy as np
 
@@ -616,11 +617,19 @@ def main() -> int:
     if cur_g:
         groups.append(cur_g)
     print(f"последовательностей: {len(groups)} (из {len(blocks)} блоков)")
+    # штампы времени: без них потом нельзя сказать, сколько шли эпохи и когда стартовали
+    t_run = time.time()
+    print(f"старт {time.strftime('%Y-%m-%d %H:%M:%S')}: эпох {args.epochs}, lr {args.lr}, "
+          f"chain-depth {args.chain_depth}, noise {args.noise}, mask-draft0 {bool(args.mask_draft0)}",
+          flush=True)
     for epoch in range(args.epochs):
         order = list(range(len(groups)))
         rng.shuffle(order)
         tot_loss, tot_rows = 0.0, 0
-        win_loss, win_rows = 0.0, 0      # окно с последней печати: мгновенный лосс
+        win_loss, win_rows = 0.0, 0
+        t_ep = time.time()
+        print(f"эпоха {epoch + 1}/{args.epochs} начата {time.strftime('%H:%M:%S')}", flush=True)
+      # окно с последней печати: мгновенный лосс
         for gi in order:
             # ГРУППА = одна последовательность: decode-блоки идут парами с перекрытием в строку,
             # корпусные - целыми блоками.  Перекрытия схлопываются по абсолютной позиции (иначе
@@ -755,10 +764,15 @@ def main() -> int:
             if steps % 20 == 0:
                 # кумулятивное среднее по эпохе + мгновенное окно: смесь неоднородна (проза, код,
                 # диалоги, декодные ряды), и по одному кумулятиву не видно, учится голова или нет
+                _el = time.time() - t_ep
                 print(f"  epoch {epoch + 1} step {steps}: loss {tot_loss / max(tot_rows, 1):.3f} "
-                      f"(окно {win_loss / max(win_rows, 1):.3f}, {tot_rows} строк)", flush=True)
+                      f"(окно {win_loss / max(win_rows, 1):.3f}, {tot_rows} строк, "
+                      f"{_el / 60:.1f} мин, {tot_rows / max(_el, 1e-9):.0f} строк/с)", flush=True)
                 win_loss, win_rows = 0.0, 0
-        print(f"epoch {epoch + 1}: средний loss {tot_loss / max(tot_rows, 1):.4f}")
+        _dt = time.time() - t_ep
+        print(f"epoch {epoch + 1}: средний loss {tot_loss / max(tot_rows, 1):.4f} за "
+              f"{_dt / 60:.1f} мин ({tot_rows / max(_dt, 1e-9):.0f} строк/с, до "
+              f"{time.strftime('%H:%M:%S')})", flush=True)
     # сохранение: имена как в чекпоинте (eagle3_convert.py берёт их оттуда)
     from safetensors.torch import save_file
     inv = {v: k for k, v in ST_MAP.items()}
