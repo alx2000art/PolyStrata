@@ -193,6 +193,7 @@ print(f"  промптов: {len(prompts)}")
 PY
 
 BEFORE=$(ls "$DEC_DIR"/taps-decode-*.bin 2>/dev/null | wc -l)
+FAILS=0
 i=0
 while IFS= read -r -d '' P; do
   i=$((i+1))
@@ -203,8 +204,23 @@ print(json.dumps({"model": "x", "messages": [{"role": "user", "content": sys.arg
                   "chat_template_kwargs": {"enable_thinking": False},
                   "reasoning_effort": "none", "thinking": {"type": "disabled"}}, ensure_ascii=False))
 PY
-  curl -s -m 600 -o /dev/null "$BASE_URL/chat/completions" -H "Authorization: Bearer $API_KEY" \
-    -H "Content-Type: application/json" -d "@$WORK/req.json" || log "  ! запрос $i не прошёл"
+  if curl -s -m 600 -o /dev/null "$BASE_URL/chat/completions" -H "Authorization: Bearer $API_KEY" \
+       -H "Content-Type: application/json" -d "@$WORK/req.json"; then
+    FAILS=0
+  else
+    FAILS=$((FAILS + 1))
+    log "  ! запрос $i не прошёл (подряд: $FAILS)"
+    # Три подряд - движок лёг (OOM, падение, порт занят другим сбором).  Молча прогонять
+    # остальные девяносто - это час времени и десяток строк дампа, которые выглядят как
+    # рабочий прогон: падаем сразу и показываем хвост серверного лога.
+    if (( FAILS >= 3 )); then
+      log "  хвост лога сервера:"
+      tail -20 "$WORK/server.log" | sed "s/^/    /"
+      restore_config
+      stop_server
+      die "сервер не отвечает на 3 запроса подряд - сбор остановлен"
+    fi
+  fi
   if (( i % 10 == 0 )); then
     NOW=$(ls "$DEC_DIR"/taps-decode-*.bin 2>/dev/null | wc -l)
     log "  $i/$N, файлов дампа: $((NOW - BEFORE))"
