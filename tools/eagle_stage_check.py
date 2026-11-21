@@ -199,6 +199,14 @@ def main() -> int:
                     dh2 = int(np.argmax(np.abs(e_sc - t_sc).sum(1)))
                     e3 = np.argsort(-e_sc[dh2])[:3]
                     t3 = np.argsort(-t_sc[dh2])[:3]
+                    # сдвиг по ключам: если скор движка на ключе j равен скору тренера на j+s,
+                    # значит строки кэша повёрнуты rope на другую позицию (off-by-one в inject)
+                    for sh in (-2, -1, 1, 2):
+                        a_e = e_sc[dh2, max(0, -sh):nk2 - max(0, sh)]
+                        a_t = t_sc[dh2, max(0, sh):nk2 - max(0, -sh)]
+                        if a_e.size > 8:
+                            c = float(a_e @ a_t / (np.linalg.norm(a_e) * np.linalg.norm(a_t) + 1e-12))
+                            print(f"         сдвиг {sh:+d}: cos={c:+.4f}")
                     print(f"         голова {dh2}: движок top3 " +
                           " ".join(f"{int(j)}/{e_sc[dh2, j]:.2f}" for j in e3) +
                           " | тренер top3 " + " ".join(f"{int(j)}/{t_sc[dh2, j]:.2f}" for j in t3))
