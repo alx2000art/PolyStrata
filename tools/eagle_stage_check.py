@@ -141,8 +141,8 @@ def main() -> int:
                     Ka = torch.cat((torch.from_numpy(K).to(device), kk[None]), dim=0)
                     Va = torch.cat((torch.from_numpy(V).to(device), vv[None]), dim=0)
                     att = torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd), Ka) / (model.hd ** 0.5)
-                    w = torch.softmax(att.reshape(-1, att.shape[-1]), dim=-1)
-                    oo = torch.einsum("qp,kph->qph", w.view(model.n_kv, per, -1), Va).reshape(model.n_head * model.hd)
+                    w = torch.softmax(att, dim=-1)                     # [n_kv, per, keys]
+                    oo = torch.einsum("qps,skh->qph", w, Va).reshape(model.n_head * model.hd)
                 cmp("o", st["o"], oo.cpu().numpy())
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                     lg, hid2, _, _ = model.chain_depth(
