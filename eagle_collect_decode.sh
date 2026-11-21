@@ -35,6 +35,11 @@ die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 [[ -f "$CONFIG" ]] || die "нет конфига"
 [[ -f "$PROMPT_FILE" ]] || die "нет промпта $PROMPT_FILE"
 mkdir -p "$DEC_DIR" "$WORK"
+# Один сборщик на машину: второй экземпляр делает stop_server и поднимает свой сервер
+# на том же порту - первый прогон после этого видит "запрос не прошёл" до конца и
+# оставляет недособранный дамп, неотличимый от рабочего.  Лок держится на fd 9.
+exec 9>"$WORK/collect.lock" || die "не открыть лок $WORK/collect.lock"
+flock -n 9 || die "другой сбор уже идёт (лок $WORK/collect.lock) - дождись его конца"
 API_KEY="$(python3 - "$CONFIG" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("api_key") or "")
