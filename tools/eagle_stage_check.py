@@ -150,6 +150,11 @@ def main() -> int:
                 if os.path.exists(wp):
                     rb = open(wp, "rb").read()
                     nh, nkv_w, nk = struct.unpack("<iii", rb[:12])
+                    p_w, = struct.unpack("<q", rb[12:20])
+                    if p_w != pos:
+                        print(f"  w_att  ПРОПУСК: веса сняты с pos {p_w}, стадии с {pos} - "
+                              f"нужен STRATA_EAGLE_DUMP_WEIGHTS_POS={pos}")
+                        raise SystemExit(0)
                     eng_w = np.frombuffer(rb[20:20 + 2 * nh * nk], dtype="<f2").reshape(nh, nk).astype(np.float64)
                     tr_w = w.reshape(nh, nk).double().cpu().numpy()
                     cmp("w_att", eng_w.reshape(-1), tr_w.reshape(-1))

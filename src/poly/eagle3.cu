@@ -399,8 +399,14 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
     // the trainer's: with identical q/k/v the weights must be identical, and if they are not, the
     // K rows the engine reads are not the ones the dump gave back.
     static const char* g_w_path = std::getenv("STRATA_EAGLE_DUMP_WEIGHTS");
+    // _POS: те же соображения, что у стадий - первый одиночный шаг это хвост чтения (pos 1088),
+    // а нужен шаг драфта; без гейта веса и стадии снимаются с РАЗНЫХ позиций и не сравнить
+    static const long long g_w_pos = [] {
+        const char* v = std::getenv("STRATA_EAGLE_DUMP_WEIGHTS_POS");
+        return v ? std::atoll(v) : -1LL;
+    }();
     static bool g_w_done = false;
-    if (g_w_path && !g_w_done && n == 1) {
+    if (g_w_path && !g_w_done && n == 1 && (g_w_pos < 0 || (long long) pos == g_w_pos)) {
         g_w_done = true;
         ck(cudaStreamSynchronize(cs(stream)), "weights dump sync");
         const int n_keys = int(pos) + 1;                       // window=0, whole=false
