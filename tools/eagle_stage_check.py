@@ -56,7 +56,13 @@ def cmp(name, a, b):
         return
     cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
     mxd = float(np.max(np.abs(a - b)))
-    print(f"  {name:6s} cos={cos:+.6f}  maxdiff={mxd:.4g}  |движок|={np.linalg.norm(a):.4g}  |тренер|={np.linalg.norm(b):.4g}")
+    # норма та же, но вектор другой = перестановка компонент: rope поворачивает пары, а
+    # поворот ортогонален (норму бережёт).  Мультимножество отличает перестановку от
+    # настоящего расхождения - и тогда q·k (а значит и внимание) не страдают вовсе.
+    perm = np.allclose(np.sort(a), np.sort(b), atol=1e-3) and cos < 0.99
+    tail = "  <- ПЕРЕСТАНОВКА компонент (мультимножество совпало)" if perm else ""
+    print(f"  {name:6s} cos={cos:+.6f}  maxdiff={mxd:.4g}  |движок|={np.linalg.norm(a):.4g}  "
+          f"|тренер|={np.linalg.norm(b):.4g}{tail}")
 
 
 def main() -> int:
