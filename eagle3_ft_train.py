@@ -210,7 +210,7 @@ class Eagle3Head(nn.Module):
         normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
         return self.lm_head(normed), hidden, x
 
-    def chain_depth(self, K, V, h_prev, embs_cur, pos_cur, pos_stack):
+    def chain_depth(self, K, V, h_prev, embs_cur, pos_cur, pos_stack, half_att=False):
         """Одна глубина цепочки В ДВИЖКОВОМ КОНТЕКСТЕ: строка j смотрит на позиционный стек K/V
         (в движке это кэш: строки инжекта = leg1-строки на своих позициях, затёртые ранними
         строками раунда) + на свою строку.  Референс держит ровно такой кэш сквозь глубины
@@ -223,6 +223,13 @@ class Eagle3Head(nn.Module):
         k = rope_apply(self.wk(x).view(M, self.n_kv, self.hd), pos_cur, self.rope)
         v = self.wv(x).view(M, self.n_kv, self.hd)
         per = self.n_head // self.n_kv
+        if half_att:
+            # движок приводит q к half и держит K/V в fp16-кэше (attn_group_kernel: __float2half),
+            # а считает всё в fp32 - если паритет ловится только так, значит тренер обязан
+            # повторять fp16-арифметику внимания, а не f32
+            q = q.half().float()
+            K = K.half().float()
+            V = V.half().float()
         qg = q.view(M, self.n_kv, per, self.hd)
         ka = torch.cat((K, k), dim=0)                                            # [T+M, kv, hd]
         va = torch.cat((V, v), dim=0)
@@ -453,7 +460,17 @@ def main() -> int:
                 torch.from_numpy(ev[None]).to(device),
                 torch.tensor([posr], device=device),
                 torch.arange(rows, device=device))
-        for name, lg in (("без кэша (step_hidden)", lg_noctx), ("с кэшем движка (chain_depth)", lg_ctx)):
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                lg_ctx_half, _, _, _ = model.chain_depth(
+                    torch.from_numpy(K.astype(np.float32)).to(device),
+                    torch.from_numpy(V.astype(np.float32)).to(device),
+                    torch.from_numpy(hv[None]).to(device),
+                    torch.from_numpy(ev[None]).to(device),
+                    torch.tensor([posr], device=device),
+                    torch.arange(rows, device=device), half_att=True)
+        for name, lg in (("без кэша (step_hidden)", lg_noctx),
+                         ("с кэшем движка (chain_depth)", lg_ctx),
+                         ("с кэшем, внимание fp16 (как в движке)", lg_ctx_half)):
             lgf = lg.float().cpu().numpy()[0]
             top = np.argsort(-lgf)[:5]
             print(f"{name}:", " ".join(f"{int(i)}/{lgf[i]:.2f}" for i in top))
