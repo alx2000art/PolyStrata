@@ -424,6 +424,29 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
                          (long long) pos, n_head_, n_keys, g_w_path);
         }
     }
+    // DBG(eagle3) STRATA_EAGLE_DUMP_SCORES=<file>: the attention SCORES, f32, before any softmax.
+    // The weights are normalised later (attn_scale_kernel), so comparing them mixes two questions;
+    // the scores are the one number a trainer-side q.k must reproduce, and their spread says whether
+    // the key set matches at all (one key thousands of times above the rest names a wrong K).
+    static const char* g_sc_path = std::getenv("STRATA_EAGLE_DUMP_SCORES");
+    static bool g_sc_done = false;
+    if (g_sc_path && !g_sc_done && n == 1) {
+        g_sc_done = true;
+        ck(cudaStreamSynchronize(cs(stream)), "scores dump sync");
+        const int n_keys = int(pos) + 1;
+        std::vector<float> sv((size_t) n_head_ * n_keys);
+        ck(cudaMemcpy(sv.data(), score_, sv.size() * sizeof(float), cudaMemcpyDeviceToHost), "scores dump");
+        if (FILE* f = std::fopen(g_sc_path, "wb")) {
+            const int32_t hdr[3] = {n_head_, n_kv_, n_keys};
+            const int64_t p64 = (int64_t) pos;
+            std::fwrite(hdr, sizeof hdr, 1, f);
+            std::fwrite(&p64, sizeof p64, 1, f);
+            std::fwrite(sv.data(), sizeof(float), sv.size(), f);
+            std::fclose(f);
+            std::fprintf(stderr, "[eagle] scores dump: pos %lld, %d x %d -> %s\n",
+                         (long long) pos, n_head_, n_keys, g_sc_path);
+        }
+    }
     if (dump_att_ && att_dump_ && dump_row_ < (size_t) n) {
         dump_att_ = false;
         ck(cudaMemcpyAsync(att_dump_, o_ + dump_row_ * (size_t) n_head_ * head_dim_,

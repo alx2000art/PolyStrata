@@ -75,6 +75,7 @@ def main() -> int:
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--kv-order", choices=["hf", "raw"], default="hf",
                     help="порядок K в кэше: hf - развернуть w_rope (по умолчанию), raw - как лежит")
+    ap.add_argument("--scores", default=None, help="дамп скоров (по умолчанию <kv>.scores)")
     ap.add_argument("--weights", default=None, help="дамп весов внимания (по умолчанию <kv>.weights)")
     ap.add_argument("--kv", default=None, help="round-дамп с кэшем (по умолчанию <stage без .stage>)")
     args = ap.parse_args()
@@ -173,6 +174,25 @@ def main() -> int:
                           " | тренер top3 " + " ".join(f"{int(j)}/{tr_w[dh, j]:.4f}" for j in t3))
                 else:
                     print(f"  (нет {wp}: снимай с STRATA_EAGLE_DUMP_WEIGHTS)")
+                # сырые скоры: до softmax и до half, поэтому сравнение прямое - самая чистая точка
+                sp = args.scores or kvdump + ".scores"
+                if os.path.exists(sp):
+                    rb2 = open(sp, "rb").read()
+                    nh2, nkv2, nk2 = struct.unpack("<iii", rb2[:12])
+                    p2, = struct.unpack("<q", rb2[12:20])
+                    e_sc = np.frombuffer(rb2[20:20 + 4 * nh2 * nk2], dtype="<f4").reshape(nh2, nk2)
+                    with torch.no_grad():
+                        t_sc = (torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd),
+                                             Ka) / (model.hd ** 0.5)).reshape(nh2, nk2).double().cpu().numpy()
+                    cmp("scores", e_sc.reshape(-1), t_sc.reshape(-1))
+                    dh2 = int(np.argmax(np.abs(e_sc - t_sc).sum(1)))
+                    e3 = np.argsort(-e_sc[dh2])[:3]
+                    t3 = np.argsort(-t_sc[dh2])[:3]
+                    print(f"         голова {dh2}: движок top3 " +
+                          " ".join(f"{int(j)}/{e_sc[dh2, j]:.2f}" for j in e3) +
+                          " | тренер top3 " + " ".join(f"{int(j)}/{t_sc[dh2, j]:.2f}" for j in t3))
+                else:
+                    print(f"  (нет {sp}: снимай с STRATA_EAGLE_DUMP_SCORES)")
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                     lg, hid2, _, _ = model.chain_depth(
                         torch.from_numpy(K).to(device), torch.from_numpy(V).to(device),
