@@ -73,6 +73,7 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--round", default=None, help="round-дамп (hidden/emb); по умолчанию stage-файл без .stage")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--head", type=int, default=None, help="какую голову печатать числами")
     ap.add_argument("--kv-layout", choices=["row", "kv"], default="row",
                     help="раскладка кэша: row=[row][kv][hd] (attend_batch так и читает), kv=[kv][row][hd]")
     ap.add_argument("--kv-order", choices=["hf", "raw"], default="hf",
@@ -228,6 +229,20 @@ def main() -> int:
                         hc2.append(float(ae @ at / (np.linalg.norm(ae) * np.linalg.norm(at) + 1e-12)))
                     print(f"         интерлив-раскладка: {int((np.array(hc2) > 0.99).sum())} из {nh2} с cos>0.99 "
                           f"(медиана {np.median(hc2):.3f})")
+                    # сырые числа по одной голове: cos скрывает и масштаб, и знак.  Печатаем
+                    # первые и последние ключи движка против тренера - если там систематический
+                    # множитель или сдвиг знака, это видно глазом
+                    hd_dbg = args.head if args.head is not None else int(np.argmin(hc)) if 'hc' in dir() else 0
+                    for lbl, keys in (("первые", list(range(8))),
+                                      ("последние", list(range(max(0, nk2 - 8), nk2)))):
+                        line_e = " ".join(f"{e_sc[hd_dbg, k]:8.2f}" for k in keys)
+                        line_t = " ".join(f"{t_sc[hd_dbg, k]:8.2f}" for k in keys)
+                        print(f"         голова {hd_dbg} {lbl:9s} ключи {keys[0]}..{keys[-1]}")
+                        print(f"           движок : {line_e}")
+                        print(f"           тренер : {line_t}")
+                    _r = np.where(np.abs(t_sc[hd_dbg]) > 1e-3, e_sc[hd_dbg] / np.where(t_sc[hd_dbg] == 0, 1, t_sc[hd_dbg]), np.nan)
+                    print(f"         отношение движок/тренер: медиана {np.nanmedian(_r):.3f}, "
+                          f"25% {np.nanpercentile(_r, 25):.3f}, 75% {np.nanpercentile(_r, 75):.3f}")
                     # сдвиг по ключам: если скор движка на ключе j равен скору тренера на j+s,
                     # значит строки кэша повёрнуты rope на другую позицию (off-by-one в inject)
                     for sh in (-2, -1, 1, 2):
