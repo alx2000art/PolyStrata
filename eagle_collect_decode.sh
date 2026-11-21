@@ -159,9 +159,13 @@ prompt_file, corpus, n, work = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.a
 # errors=replace: обрезанный по байтам файл (head -c) рвёт UTF-8 и раньше ронял сборщик,
 # а цикл после падения читал СТАРЫЙ prompts.txt - то есть мерил другие промпты
 prompts = [open(prompt_file, encoding="utf-8", errors="replace").read()]
+_plist = os.environ.get("PROMPT_LIST", "")
+if _plist:   # готовый список (домен-тест): NUL-разделённый файл, корпус и диалоги не нужны
+    prompts = [x for x in open(_plist, encoding="utf-8", errors="replace").read().split(chr(0)) if x.strip()]
+    print(f"  из списка {_plist}: {len(prompts)}")
 # РЕАЛЬНЫЕ запросы: твои диалоги (user-сообщения, chat-домен) + куски корпуса (doc-домен).
 # Никакой синтетики.
-dialogs = os.path.expanduser("~/eagle_gen/dialogs.jsonl")
+dialogs = "" if os.environ.get("PROMPT_LIST") else os.path.expanduser("~/eagle_gen/dialogs.jsonl")
 nd = 0
 if os.path.exists(dialogs):
     import json
@@ -190,7 +194,7 @@ if os.path.exists(dialogs):
                     break   # один первый вопрос на диалог
     print(f"  из диалогов: {nd}")
 nc = 0
-if n > len(prompts):
+if n > len(prompts) and not _plist:
     text = open(corpus, encoding="utf-8", errors="ignore").read()
     text = "\n".join(s for s in text.splitlines() if s.strip())
     rng = random.Random(42)
