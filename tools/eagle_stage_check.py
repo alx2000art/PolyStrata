@@ -139,7 +139,9 @@ def main() -> int:
                 print(f"  кэш: {rows} строк из {kvdump}")
                 # o стадий движка - выход внимания до o_proj; у тренера он внутри chain_depth,
                 # поэтому сравниваем следующий наблюдаемый уровень: логиты
-                lp = args.stage.replace(".stage", "") + ".logits"
+                # логиты движок пишет рядом с ROUND-дампом (STRATA_EAGLE_DUMP_CTX_LOGITS=1
+                # даёт ~/eagle_round.bin.logits), а не рядом со stage-файлом
+                lp = kvdump + ".logits"
                 if os.path.exists(lp):
                     rb = open(lp, "rb").read()
                     n2, = struct.unpack("<i", rb[:4])
