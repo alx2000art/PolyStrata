@@ -472,7 +472,8 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
         std::vector<float> es((size_t) n_head_ * (size_t(pos) + 1));
         ck(cudaMemcpy(es.data(), score_, es.size() * sizeof(float), cudaMemcpyDeviceToHost), "chk scores");
         const float sc_scale = 1.f / std::sqrt(float(head_dim_));
-        std::fprintf(stderr, "[eagle] score check head %d keys 0..7 host:", chk_head);
+        std::fprintf(stderr, "[eagle] score check pos %lld head %d keys 0..7 host:",
+                     (long long) pos, chk_head);
         for (int j = 0; j < 8; ++j) {
             double d = 0;
             for (int i = 0; i < head_dim_; ++i) {
@@ -486,7 +487,8 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
             }
             std::fprintf(stderr, " %.2f", d * (double) sc_scale);
         }
-        std::fprintf(stderr, "\n[eagle] score check head %d keys 0..7 score_:", chk_head);
+        std::fprintf(stderr, "\n[eagle] score check pos %lld head %d keys 0..7 score_:",
+                     (long long) pos, chk_head);
         for (int j = 0; j < 8; ++j)
             std::fprintf(stderr, " %.2f", (double) es[(size_t) chk_head * (size_t(pos) + 1) + j]);
         std::fprintf(stderr, "\n");
