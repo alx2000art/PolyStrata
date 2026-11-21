@@ -453,6 +453,44 @@ void Eagle3::midlayer(float* emb_dev, int64_t pos, int n, void* stream) {
                          (long long) pos, n_head_, n_keys, g_sc_path);
         }
     }
+    // DBG(eagle3) STRATA_EAGLE_CHECK_SCORES=<head>: recompute q.k for one head on the host from
+    // the engine's OWN vectors and print it beside score_[head][0..7].  Equal -> the product is
+    // right and what differs lives in the dump the trainer reads; different -> the product or the
+    // scale in attend_batch is wrong and the cache is innocent.
+    static const int chk_head = [] {
+        const char* v = std::getenv("STRATA_EAGLE_CHECK_SCORES");
+        return v ? std::atoi(v) : -1;
+    }();
+    if (chk_head >= 0 && chk_head < n_head_ && n == 1) {
+        ck(cudaStreamSynchronize(cs(stream)), "score check sync");
+        const int per_ = n_head_ / n_kv_, kv = chk_head / per_;
+        std::vector<float> qh((size_t) head_dim_);
+        std::vector<uint16_t> kh((size_t) 8 * n_kv_ * head_dim_);
+        ck(cudaMemcpy(qh.data(), q_ + (size_t) chk_head * head_dim_, head_dim_ * sizeof(float),
+                      cudaMemcpyDeviceToHost), "chk q");
+        ck(cudaMemcpy(kh.data(), k_cache_, kh.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost), "chk k");
+        std::vector<float> es((size_t) n_head_ * (size_t(pos) + 1));
+        ck(cudaMemcpy(es.data(), score_, es.size() * sizeof(float), cudaMemcpyDeviceToHost), "chk scores");
+        const float sc_scale = 1.f / std::sqrt(float(head_dim_));
+        std::fprintf(stderr, "[eagle] score check head %d keys 0..7 host:", chk_head);
+        for (int j = 0; j < 8; ++j) {
+            double d = 0;
+            for (int i = 0; i < head_dim_; ++i) {
+                const uint32_t hb = kh[((size_t) j * n_kv_ + kv) * head_dim_ + i];
+                const uint32_t ex = (hb >> 10) & 0x1Fu, man = hb & 0x3FFu;
+                const uint32_t bits = (ex == 0) ? ((hb & 0x8000u) << 16)
+                                                : (((hb & 0x8000u) << 16) | ((ex + 112) << 23) | (man << 13));
+                float kf;
+                std::memcpy(&kf, &bits, sizeof kf);
+                d += (double) qh[(size_t) i] * kf;
+            }
+            std::fprintf(stderr, " %.2f", d * (double) sc_scale);
+        }
+        std::fprintf(stderr, "\n[eagle] score check head %d keys 0..7 score_:", chk_head);
+        for (int j = 0; j < 8; ++j)
+            std::fprintf(stderr, " %.2f", (double) es[(size_t) chk_head * (size_t(pos) + 1) + j]);
+        std::fprintf(stderr, "\n");
+    }
     if (dump_att_ && att_dump_ && dump_row_ < (size_t) n) {
         dump_att_ = false;
         ck(cudaMemcpyAsync(att_dump_, o_ + dump_row_ * (size_t) n_head_ * head_dim_,
