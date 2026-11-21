@@ -210,9 +210,12 @@ def main() -> int:
                             _rawK = np.frombuffer(raw[off2:off2 + 2 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                             _Kr = torch.from_numpy(_rawK).to(device)
                             _ar = torch.cat((_Kr, kk[None]), dim=0)
-                            _a = (torch.einsum("qph,skh->qps", _qe, Ka) / (model.hd ** 0.5))[_hv, 0, :8]
+                            _pp = args.head % per
+                            # .view(n_kv, per, hd): голова = kv*per + p, поэтому p обязателен -
+                            # с «0» я брал голову kv*per+0 и сравнивал не те числа
+                            _a = (torch.einsum("qph,skh->qps", _qe, Ka) / (model.hd ** 0.5))[_hv, _pp, :8]
                             _b = (torch.einsum("qph,skh->qps", qq.view(model.n_kv, per, model.hd), _ar)
-                                  / (model.hd ** 0.5))[_hv, 0, :8]
+                                  / (model.hd ** 0.5))[_hv, _pp, :8]
                             print(f"         stage-q(HF) . K(HF): " + " ".join(f"{v:.2f}" for v in _a.cpu().numpy().tolist()))
                             print(f"         trainer-q . K(RAW): " + " ".join(f"{v:.2f}" for v in _b.cpu().numpy().tolist()))
                     cmp("scores", e_sc.reshape(-1), t_sc.reshape(-1))
