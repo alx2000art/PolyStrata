@@ -5100,6 +5100,14 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // row - so the first draft_logits below runs the chain's CHILD (emb of the fresh pick, the
         // root's state) at its own position, the pair the TEACH recursion measures (6.5% at read,
         // the chain the rounds are supposed to ride).
+        // DBG(eagle3) STRATA_EAGLE_ROUND_REWIND=1: the round starts its draft steps at the MODEL's
+        // position.  The class comment (eagle3.hpp:41-43) says that is already so, but the normal
+        // decode path never calls rewind(): a previous round's rejected guesses left their rows in
+        // the head's cache past pos_, and cache_pos_ only comes back to the model's position at the
+        // next window()/eval() inject - AFTER the drafts.  So a round can attend rows the model
+        // never saw.  Off by default (it changes behaviour), on for the A/B.
+        static const bool round_rewind = std::getenv("STRATA_EAGLE_ROUND_REWIND") != nullptr;
+        if (round_rewind && i == 0) eagle3_->rewind(pos_);
         // DBG(eagle3) STRATA_EAGLE_DUMP_ROUND=<file>: the first round's EXACT input - the whole
         // hidden_ vector, the embedding it is paired with, the token and pos - so the trainer's
         // head can be replayed on the engine's own state and the two argmaxes compared.
@@ -5147,6 +5155,22 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                     std::fwrite(&posr, sizeof posr, 1, f);
                     std::fwrite(hv.data(), sizeof(float), hv.size(), f);
                     std::fwrite(ev.data(), sizeof(float), ev.size(), f);
+                    // DBG(eagle3) STRATA_EAGLE_DUMP_CTX_KV=1: the head's OWN KV cache of the whole
+                    // context, appended after the emb.  Without the cache a replay asks the head with
+                    // no attention history (step_hidden), which is not the function the engine runs
+                    // (midlayer attends [0, cache_pos]) - and that gap is the one the offline numbers
+                    // and the live acceptance disagree on.  A row is 2048 B (k then v, 8 kv heads x
+                    // 64 dims, fp16): 2.2 MB at pos 1089, so this is cheap enough to keep on.
+                    static const bool dump_kv = std::getenv("STRATA_EAGLE_DUMP_CTX_KV") != nullptr;
+                    if (dump_kv) {
+                        const int64_t rows = posr;          // rows [0, posr) are the context
+                        std::vector<uint8_t> kv((size_t) rows * eagle3_->row_bytes());
+                        eagle3_->save_rows(0, rows, kv.data());
+                        std::fwrite(&rows, sizeof rows, 1, f);
+                        std::fwrite(kv.data(), 1, kv.size(), f);
+                        std::fprintf(stderr, "[eagle] round dump: +kv rows %lld, %zu bytes\n",
+                                     (long long) rows, kv.size());
+                    }
                     std::fclose(f);
                     std::fprintf(stderr, "[eagle] round dump i=%d round=%lld: token %d pos %lld -> %s\n",
                                  g_round_idx, g_round_no, (int) token, (long long) posr, dump_path);

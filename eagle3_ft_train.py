@@ -370,6 +370,9 @@ def main() -> int:
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--replay-round", default=None,
                     help="дамп раунда mov'а (STRATA_EAGLE_DUMP_ROUND): прогнать голову на ЕГО состоянии")
+    ap.add_argument("--replay-ctx", default=None,
+                    help="дамп раунда С КЭШЕМ (STRATA_EAGLE_DUMP_ROUND + STRATA_EAGLE_DUMP_CTX_KV=1): "
+                         "прогнать голову с ТЕМ ЖЕ вниманием по кэшу, что у движка, и рядом - без него")
     args = ap.parse_args()
 
     head_cfg = {}
@@ -377,7 +380,7 @@ def main() -> int:
         head_cfg = json.load(open(args.config, encoding="utf-8"))
     eps = float(head_cfg.get("rms_norm_eps", 1e-6))
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
-    if not args.replay_round and not args.dump:
+    if not args.replay_round and not args.replay_ctx and not args.dump:
         print("нужен --dump (или --replay-round для одного входа)", file=sys.stderr)
         return 2
     model, meta = load_model(args.safetensors, head_cfg, eps, device)
@@ -404,6 +407,47 @@ def main() -> int:
         top = np.argsort(-lgf)[:5]
         print("офлайн (тот же вход):", " ".join(f"{int(i)}/{lgf[i]:.2f}" for i in top))
         print("(сравни с движковым 'draft 1/3: ... draft_id=...')")
+        return 0
+
+    if args.replay_ctx:
+        # Реплей раунда С КОНТЕКСТОМ: движок снял не только (hidden, emb, pos), но и свой KV-кэш
+        # [0, pos).  chain_depth с этим стеком считает ровно то, что считает midlayer в движке
+        # (маска pos_stack < pos + своя строка), а рядом печатается ответ БЕЗ контекста
+        # (step_hidden) - разница между ними и есть та функция, которой не хватало обучению.
+        import struct as _st
+        raw = open(args.replay_ctx, "rb").read()
+        ne, tok = _st.unpack("<ii", raw[:8])
+        posr, = _st.unpack("<q", raw[8:16])
+        off = 16
+        hv = np.frombuffer(raw[off:off + 4 * ne], dtype="<f4").copy(); off += 4 * ne
+        ev = np.frombuffer(raw[off:off + 4 * ne], dtype="<f4").copy(); off += 4 * ne
+        if off + 8 > len(raw):
+            print("в дампе нет кэша: сними его с STRATA_EAGLE_DUMP_CTX_KV=1", file=sys.stderr)
+            return 2
+        rows, = _st.unpack("<q", raw[off:off + 8]); off += 8
+        nkv, hd = int(meta["n_kv"]), int(model.hd)
+        part = rows * nkv * hd
+        K = np.frombuffer(raw[off:off + 2 * part], dtype="<f2").reshape(rows, nkv, hd)
+        V = np.frombuffer(raw[off + 2 * part:off + 4 * part], dtype="<f2").reshape(rows, nkv, hd)
+        print(f"round dump: token {tok} pos {posr}, |h| {np.linalg.norm(hv):.4g}, "
+              f"кэш {rows} строк ({(len(raw) - 16 - 8 * ne - 8) / 1e6:.2f} МБ)")
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+            lg_noctx = model.step_hidden(torch.from_numpy(hv[None]).to(device),
+                                         torch.from_numpy(ev[None]).to(device),
+                                         torch.tensor([posr], device=device))
+            lg_ctx, _, _, _ = model.chain_depth(
+                torch.from_numpy(K.astype(np.float32)).to(device),
+                torch.from_numpy(V.astype(np.float32)).to(device),
+                torch.from_numpy(hv[None]).to(device),
+                torch.from_numpy(ev[None]).to(device),
+                torch.tensor([posr], device=device),
+                torch.arange(rows, device=device))
+        for name, lg in (("без кэша (step_hidden)", lg_noctx), ("с кэшем движка (chain_depth)", lg_ctx)):
+            lgf = lg.float().cpu().numpy()[0]
+            top = np.argsort(-lgf)[:5]
+            print(f"{name}:", " ".join(f"{int(i)}/{lgf[i]:.2f}" for i in top))
+        print("(сравни 'с кэшем' с движковым 'draft 1/3: ... draft_id=...': совпало -> тренер "
+              "воспроизводит раунд, и обучению не хватает именно контекста)")
         return 0
 
     # t2d: какие target-токены есть в draft-словаре (метки вне - маска)
