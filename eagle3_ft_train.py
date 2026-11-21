@@ -620,6 +620,7 @@ def main() -> int:
         order = list(range(len(groups)))
         rng.shuffle(order)
         tot_loss, tot_rows = 0.0, 0
+        win_loss, win_rows = 0.0, 0      # окно с последней печати: мгновенный лосс
         for gi in order:
             # ГРУППА = одна последовательность: decode-блоки идут парами с перекрытием в строку,
             # корпусные - целыми блоками.  Перекрытия схлопываются по абсолютной позиции (иначе
@@ -749,9 +750,14 @@ def main() -> int:
                 steps += 1
                 tot_loss += float(loss.detach()) * length
                 tot_rows += length
+                win_loss += float(loss.detach()) * length
+                win_rows += length
             if steps % 20 == 0:
+                # кумулятивное среднее по эпохе + мгновенное окно: смесь неоднородна (проза, код,
+                # диалоги, декодные ряды), и по одному кумулятиву не видно, учится голова или нет
                 print(f"  epoch {epoch + 1} step {steps}: loss {tot_loss / max(tot_rows, 1):.3f} "
-                      f"({tot_rows} строк)", flush=True)
+                      f"(окно {win_loss / max(win_rows, 1):.3f}, {tot_rows} строк)", flush=True)
+                win_loss, win_rows = 0.0, 0
         print(f"epoch {epoch + 1}: средний loss {tot_loss / max(tot_rows, 1):.4f}")
     # сохранение: имена как в чекпоинте (eagle3_convert.py берёт их оттуда)
     from safetensors.torch import save_file
