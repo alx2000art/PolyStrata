@@ -137,8 +137,8 @@ def main() -> int:
                 V = np.frombuffer(raw[off2 + 2 * part:off2 + 4 * part], dtype="<f2").reshape(rows, model.n_kv, model.hd).astype(np.float32)
                 # кэш в порядке движка - в HF, как и q/k стадий
                 if args.kv_layout == "kv":      # [kv][row][hd] вместо [row][kv][hd]
-                    K = K.reshape(nkv, rows, hd).transpose(1, 0, 2)
-                    V = V.reshape(nkv, rows, hd).transpose(1, 0, 2)
+                    K = K.reshape(model.n_kv, rows, model.hd).transpose(1, 0, 2)
+                    V = V.reshape(model.n_kv, rows, model.hd).transpose(1, 0, 2)
                 if args.kv_order == "hf":
                     K = K[..., _idx]      # кэш в порядке w_rope -> HF
                 # o ДО _head_out: та же арифметика внимания, но результат наружу - иначе не видно,
