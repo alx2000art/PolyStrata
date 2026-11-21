@@ -5104,8 +5104,30 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
         // hidden_ vector, the embedding it is paired with, the token and pos - so the trainer's
         // head can be replayed on the engine's own state and the two argmaxes compared.
         static const char* g_round_path = std::getenv("STRATA_EAGLE_DUMP_ROUND");
+        // DBG(eagle3) STRATA_EAGLE_DUMP_ROUND_I=<i>: which chain DEPTH to dump (default 0).  The first
+        // draft of a round is what TEACH measures; the recursion (depth 1, 2, ...) was never dumped,
+        // and it is where the live rounds collapse (TEACH p+1 42%, the draft's own recursion 3%).
+        // The depth-i state pair is exactly what the trainer's --replay-round takes, so the two
+        // argmaxes say whether the head or the cache feeding it is at fault.  A depth > 0 dump gets
+        // a .i<N> suffix so a depth-0 file is not clobbered.
+        // STRATA_EAGLE_DUMP_ROUND_N=<n>: which ROUND of the request to dump (default 0, the first).
+        static const int g_round_idx = [] {
+            const char* v = std::getenv("STRATA_EAGLE_DUMP_ROUND_I");
+            return v ? std::atoi(v) : 0;
+        }();
+        static const long long g_round_want = [] {
+            const char* v = std::getenv("STRATA_EAGLE_DUMP_ROUND_N");
+            return v ? std::atoll(v) : 0;
+        }();
+        static long long g_round_no = -1;
+        if (i == 0) ++g_round_no;
+        char dump_path[4096];
+        if (g_round_idx > 0)
+            std::snprintf(dump_path, sizeof dump_path, "%s.i%d", g_round_path ? g_round_path : "", g_round_idx);
+        else
+            std::snprintf(dump_path, sizeof dump_path, "%s", g_round_path ? g_round_path : "");
         static bool g_round_done = false;
-        if (i == 0 && g_round_path && !g_round_done) {
+        if (i == g_round_idx && g_round_no == g_round_want && g_round_path && !g_round_done) {
             g_round_done = true;
             {
                 embed(token, eagle_emb_);
@@ -5114,7 +5136,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                 ck(cudaMemcpy(hv.data(), eagle3_->hidden_dev(), hv.size() * sizeof(float), cudaMemcpyDeviceToHost),
                    "round dump h");
                 std::memcpy(ev.data(), eagle_emb_, ev.size() * sizeof(float));
-                FILE* f = std::fopen(g_round_path, "wb");
+                FILE* f = std::fopen(dump_path, "wb");
                 if (f) {
                     const int32_t hdr[2] = {n_embd_, token};
                     const int64_t posr = eagle3_->cache_pos();   // the row the child's midlayer will take
@@ -5123,8 +5145,8 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
                     std::fwrite(hv.data(), sizeof(float), hv.size(), f);
                     std::fwrite(ev.data(), sizeof(float), ev.size(), f);
                     std::fclose(f);
-                    std::fprintf(stderr, "[eagle] round dump: token %d pos %lld -> %s\n", (int) token,
-                                 (long long) posr, g_round_path);
+                    std::fprintf(stderr, "[eagle] round dump i=%d round=%lld: token %d pos %lld -> %s\n",
+                                 g_round_idx, g_round_no, (int) token, (long long) posr, dump_path);
                 }
             }
         }
