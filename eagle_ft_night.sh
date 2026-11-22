@@ -51,6 +51,14 @@ log "=============================================================="
 [[ -d "$DUMP" ]] || die "нет дампа $DUMP"
 [[ -x "$PY" ]] || die "нет интерпретатора $PY"
 
+# Один тренер за раз: второй делит VRAM с первым, а лог и выход затирает.
+if pgrep -f "eagle3_ft_train.py" >/dev/null; then
+  [[ "${FORCE:-0}" == "1" ]] || die "уже идёт eagle3_ft_train.py (pgrep -af eagle3_ft_train.py). Дождись финиша или FORCE=1"
+fi
+if [[ -f "$OUT_HEAD" && "${FORCE:-0}" != "1" ]]; then
+  die "выход уже есть: $OUT_HEAD (перезапишется). Переименуй OUT_HEAD=... или FORCE=1"
+fi
+
 FREE_GB=$(df --output=avail -BG /home | tail -1 | tr -dc '0-9')
 log "диск свободно: ${FREE_GB} ГБ (нужно >= $MIN_FREE_GB)"
 [[ "$FREE_GB" -ge "$MIN_FREE_GB" ]] || die "мало места: удали старые дампы и повтори"
@@ -69,7 +77,8 @@ FREE_VRAM=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | h
 log "VRAM свободно: ${FREE_VRAM} MiB"
 [[ "${FREE_VRAM:-0}" -ge 4000 ]] || die "мало VRAM (${FREE_VRAM} MiB) — кто-то держит карту"
 
-: > "$LOG"
+printf '\n===== %s start: epochs=%s chain=%s noise=%s ctx=%s =====\n' \
+  "$(date -Is)" "$EPOCHS" "$CHAIN" "$NOISE" "$CTX_WIN" >> "$LOG"
 log "[train] старт $(date -Is), лог $LOG"
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup "$PY" -u "$STRATA_DIR/eagle3_ft_train.py" \
   --dump "$DUMP" --safetensors "$BASE_HEAD" --config "$HEAD_CFG" --out "$OUT_HEAD" \
