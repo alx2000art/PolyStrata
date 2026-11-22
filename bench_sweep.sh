@@ -253,6 +253,21 @@ if [[ -n "$ONLY" ]]; then
     log "ONLY=$ONLY: вариантов ${#VARIANTS[@]}"
 fi
 
+# SKIP_CONTROLS=1: без дублей эталона и контролей дрейфа (01-all-off-b, 15-all-off-m, 99-all-off-c).
+# Для быстрой проверки клеток: пол шума тогда не измерен (дельты <5% не считаем), зато прогон короче на
+# три ячейки.  Полный свип их сохраняет - на них держится «реальный эффект / в пределах шума».
+if [[ "${SKIP_CONTROLS:-0}" == "1" ]]; then
+    drop=()
+    for entry in "${VARIANTS[@]}"; do
+        name="${entry%%|*}"
+        [[ "$name" == "01-all-off-b" || "$name" == "15-all-off-m" || "$name" == "99-all-off-c" ]] \
+            && continue
+        drop+=("$entry")
+    done
+    VARIANTS=("${drop[@]}")
+    log "SKIP_CONTROLS=1: вариантов ${#VARIANTS[@]}"
+fi
+
 # ------------------------- проверки -----------------------------------------
 log()  { printf '%s\n' "$*"; }
 die()  { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
