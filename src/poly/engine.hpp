@@ -195,6 +195,8 @@ struct Layer {
     std::vector<void*> heads;          ///< up to the router
     std::vector<void*> shared;         ///< the shared expert
     std::vector<void*> tail;           ///< after the experts
+    std::vector<void*> merged;         ///< STRATA_POLY_MERGE=1: the previous layer's tail and this layer's
+                                       ///< head + shared expert as ONE recording, keyed like heads
     std::vector<void*> card_moe;       ///< the routed experts, routed on the card (moe_card())
     /// the head of step()'s rows in one call (Engine::batch_heads()): by the rows, their sequences and head keys
     std::map<std::vector<int>, void*> rows_heads;

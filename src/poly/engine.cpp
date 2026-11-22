@@ -3848,15 +3848,20 @@ void Engine::run(const int32_t* tokens, int n) {
     // call's tokens together are [0, window) by their number, and a half of a window comes after those, by the
     // window's tokens and which half it is.  Which tokens leave their state is the window's, so its halves' too.
     const size_t wn = (size_t) opt_.window, recs = 3 * wn + (size_t) opt_.batch + 1;   // step()'s rows after
+    // up() without a recording of its own: layer_head, the router's event, the shared expert.  The recorded form
+    // wraps it, and STRATA_POLY_MERGE=1 records it together with the previous layer's tail.
+    const auto up_body = [&](int il, int m) {
+        Layer& L = layers_[(size_t) il];
+        layer_head(L, il, m);
+        if (!L.moe || batched(L, m)) return;
+        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+        moe_shared(L, il, m);
+    };
     const auto up = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
-        if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, m); });
-        else layer_head(L, il, m);
-        if (!L.moe || batched(L, m)) return;
-        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
-        if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, m); });
-        else moe_shared(L, il, m);
+        if (replay && L.fixed) replayed(L.heads, head, [&] { up_body(il, m); });
+        else up_body(il, m);
     };
     const auto tail = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
@@ -3983,6 +3988,42 @@ void Engine::run(const int32_t* tokens, int n) {
             });
         ck(cudaGraphLaunch((cudaGraphExec_t) pass, cs(st_)), "layer graph");
         for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += layers_[(size_t) il].moe ? n * n_used_ : 0;
+        return;
+    }
+    // STRATA_POLY_MERGE=1: one recording for the previous layer's tail and this layer's head + shared expert.
+    // They are adjacent in the launch stream (nothing runs between them), so a single cudaGraphLaunch replaces
+    // two: 43 layers a token means 43 launches saved, which at a few microseconds of driver time each is a
+    // visible share of a 36 ms token.  The router's event node sits inside the recording, so the host's
+    // cudaEventSynchronize(ev_) after the launch still returns the moment the head is done, and the shared
+    // expert still runs beside the host's route().  The first layer has no tail to merge and the last layer's
+    // tail is followed by the output path, so both keep their own recording.
+    static const bool merge_graphs = std::getenv("STRATA_POLY_MERGE") != nullptr;
+    if (merge_graphs) {
+        up(lo_, n, (size_t) n - 1);
+        for (int il = lo_; il < hi_; ++il) {
+            Layer& L = layers_[(size_t) il];
+            if (L.moe) {
+                if (batched(L, n)) moe_rows(L, il, n);
+                else if (!on_card(il, n, (size_t) n - 1) && moe(L, il, n)) moe_add(n);
+            }
+            if (il + 1 >= hi_) { tail(il, n, (size_t) n - 1); continue; }
+            Layer& N = layers_[(size_t) (il + 1)];
+            const size_t key = (size_t) head_key(il + 1, n) * recs + (size_t) n - 1;
+            if (replay && N.fixed) {
+                auto& made = N.merged;
+                if (made.size() <= key) made.resize(key + 1, nullptr);
+                if (!made[key])
+                    made[key] = record([&] {
+                        layer_tail(L, il, n);
+                        tap_capture(il, n);
+                        up_body(il + 1, n);
+                    });
+                ck(cudaGraphLaunch((cudaGraphExec_t) made[key], cs(st_)), "layer pair graph");
+            } else {
+                tail(il, n, (size_t) n - 1);
+                up_body(il + 1, n);
+            }
+        }
         return;
     }
     for (int il = lo_; il < hi_; ++il) {
