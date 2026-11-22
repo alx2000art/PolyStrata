@@ -361,6 +361,124 @@ __global__ void idx_score_mma_kernel(const float* __restrict__ q, const float* _
         }
 }
 
+// The upstream batch indexer (simplexai-labs 0388ebdb8), kept for the A/B behind --idx-mma 3.  A block takes
+// IDX2_CHUNK keys of ONE token, four warps, a warp 16 of the 64 heads; the keys go IDX2_TILE at a time through
+// shared memory.  The queries go in as a half plus the half of what it left (idx2_split_bits), so a dot is the
+// floats' to about 2^-22 - idx_score_mma_kernel above keeps them as plain halves and scores 16 tokens a block.
+// The default stays ours; this kernel is chosen only for --idx-mma 3 with 64 heads and a prompt batch.
+constexpr int IDX2_HEADS = 64, IDX2_TILE = 64, IDX2_CHUNK = 256, IDX2_ROW = IDX_DIM + 8;
+
+__device__ __forceinline__ void idx2_ldmatrix_x4(uint32_t* r, const half* p) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    const unsigned a = (unsigned) __cvta_generic_to_shared(p);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+#else
+    (void) r, (void) p;
+#endif
+}
+
+__device__ __forceinline__ uint32_t idx2_half2_bits(float lo, float hi) {
+    const __half2 h = __floats2half2_rn(lo, hi);
+    return *reinterpret_cast<const uint32_t*>(&h);
+}
+
+// a pair of floats as halves (hi) and the halves of what they leave (lo): hi + lo holds them to about 2^-22
+__device__ __forceinline__ void idx2_split_bits(float a, float b, uint32_t& hi, uint32_t& lo) {
+    const __half2 h = __floats2half2_rn(a, b);
+    const float2 back = __half22float2(h);
+    hi = *reinterpret_cast<const uint32_t*>(&h);
+    lo = idx2_half2_bits(a - back.x, b - back.y);
+}
+
+__device__ __forceinline__ void idx2_copy16(void* dst, const void* src, bool whole) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+                 :: "r"((unsigned) __cvta_generic_to_shared(dst)), "l"(src), "r"(whole ? 16 : 0));
+#else
+    (void) dst, (void) src, (void) whole;
+#endif
+}
+
+__device__ __forceinline__ void idx2_copies_commit() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.commit_group;\n" ::);
+#endif
+}
+
+template <int ahead>
+__device__ __forceinline__ void idx2_copies_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group %0;\n" :: "n"(ahead));
+#endif
+}
+
+__global__ void __launch_bounds__(4 * WARP)
+idx_mma2_kernel(const float* __restrict__ q, const float* __restrict__ w, const uint16_t* __restrict__ keys,
+                float* __restrict__ score, int score_stride, int ratio, long long pos, float scale,
+                const long long* at) {
+    __shared__ __align__(16) half sk[IDX2_TILE][IDX2_ROW];
+    __shared__ float red[4][IDX2_TILE];
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP, gid = lane / 4, tig = lane % 4;
+    const int t = blockIdx.y;
+    const long long visible = (position(at, pos, 1, t) + 1) / ratio;
+    const long long c0 = (long long) blockIdx.x * IDX2_CHUNK;
+    if (c0 >= visible) return;
+    const int h0 = 16 * wid;
+    uint32_t qa[IDX_DIM / 16][4], ql[IDX_DIM / 16][4];
+    for (int k = 0; k < IDX_DIM / 16; ++k)
+        for (int i = 0; i < 2; ++i)
+            for (int hi = 0; hi < 2; ++hi) {
+                const float2 x = *reinterpret_cast<const float2*>(
+                    q + (size_t(t) * IDX2_HEADS + h0 + gid + 8 * i) * IDX_DIM + 16 * k + 8 * hi + 2 * tig);
+                idx2_split_bits(x.x, x.y, qa[k][i + 2 * hi], ql[k][i + 2 * hi]);
+            }
+    const float w0 = w[size_t(t) * IDX2_HEADS + h0 + gid], w1 = w[size_t(t) * IDX2_HEADS + h0 + gid + 8];
+    const long long end = visible < c0 + IDX2_CHUNK ? visible : c0 + IDX2_CHUNK;
+    for (long long k0 = c0; k0 < end; k0 += IDX2_TILE) {
+        const int nk = (int) (end - k0 < IDX2_TILE ? end - k0 : IDX2_TILE);
+        for (int i = threadIdx.x; i < IDX2_TILE * IDX_DIM / 8; i += 4 * WARP) {
+            const int r = i / (IDX_DIM / 8), c = 8 * (i % (IDX_DIM / 8));
+            idx2_copy16(&sk[r][c], keys + (r < nk ? size_t(k0 + r) * IDX_DIM + c : 0), r < nk);
+        }
+        idx2_copies_commit();
+        idx2_copies_wait<0>();
+        __syncthreads();
+        for (int n = 0; n < IDX2_TILE / 8; ++n) {
+            float s[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < IDX_DIM / 16; k += 2) {
+                uint32_t b[4];   // keys 8 n.., values 16 k.. and 16 (k + 1)..
+                idx2_ldmatrix_x4(b, &sk[8 * n + lane % 8][16 * k + 8 * (lane / 8)]);
+                mma16816(s, qa[k], b[0], b[1]);
+                mma16816(s, ql[k], b[0], b[1]);
+                mma16816(s, qa[k + 1], b[2], b[3]);
+                mma16816(s, ql[k + 1], b[2], b[3]);
+            }
+            // this lane's two keys over its two heads, then over the warp's 16 (the lanes of one tig)
+            float a = fmaxf(s[0], 0.0f) * w0 + fmaxf(s[2], 0.0f) * w1;
+            float bsum = fmaxf(s[1], 0.0f) * w0 + fmaxf(s[3], 0.0f) * w1;
+            for (int o = 4; o < WARP; o <<= 1) {
+                a += __shfl_xor_sync(0xffffffffu, a, o);
+                bsum += __shfl_xor_sync(0xffffffffu, bsum, o);
+            }
+            if (gid == 0) {
+                red[wid][8 * n + 2 * tig] = a;
+                red[wid][8 * n + 2 * tig + 1] = bsum;
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x < nk)
+            score[size_t(t) * score_stride + k0 + threadIdx.x] =
+                (red[0][threadIdx.x] + red[1][threadIdx.x] + red[2][threadIdx.x] + red[3][threadIdx.x]) * scale;
+        __syncthreads();   // sk and red are read: the next tile may write them
+    }
+}
+
+bool idx_mma2_runs() {
+    cudaFuncAttributes a{};
+    return cudaFuncGetAttributes(&a, idx_mma2_kernel) == cudaSuccess && a.ptxVersion >= 80 && a.binaryVersion >= 80;
+}
+
 #endif   // !GGML_USE_HIP
 
 __device__ __forceinline__ uint32_t order_key(float s) {
@@ -1305,6 +1423,19 @@ void dsv4_idx_score(const float* q, const float* w, const uint16_t* keys, float*
         throw std::invalid_argument("dsv4_idx_score: the indexer's keys are not 128 values");
     const long long visible = (at ? room : pos + rows) / ratio;   // the last token sees the most
     if (rows <= 0 || visible == 0) return;
+#if !defined(GGML_USE_HIP)
+    // --idx-mma 3: the upstream batch kernel (64 heads, a prompt batch).  It is the A/B's side only; the
+    // default path below (ours) stays what it was.
+    if (mma == 2 && n_head == IDX2_HEADS && rows >= GROUP_ROWS) {
+        static const bool runs = idx_mma2_runs();
+        if (runs) {
+            idx_mma2_kernel<<<dim3(grid((int) visible, IDX2_CHUNK), rows), 4 * WARP, 0, cs(stream)>>>(
+                q, w, keys, score, score_stride, ratio, (long long) pos, scale, at);
+            ck("dsv4_idx_score");
+            return;
+        }
+    }
+#endif
 #if !defined(GGML_USE_HIP)
     {   // the tensor cores, when the card has them: a block of 16 tokens against 128 compressed rows
         // (--idx-mma 0 keeps the scalar kernel)

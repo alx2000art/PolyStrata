@@ -568,8 +568,10 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
         const float iscale = 1.f / std::sqrt((float) (idx_dim_ * idx_heads_));
         // 1: the tensor cores at the decode windows' shapes only (the prompt batches win with the scalar
         // kernel); 2: always, the prompt batches too - their score kernel is the phase's biggest cost and the
-        // mma's is to be measured against it ([att] score+sel)
-        const bool mma = opt_.idx_mma == 2 || (opt_.idx_mma == 1 && n <= 16);
+        // mma's is to be measured against it ([att] score+sel); 3: the upstream batch kernel (64 heads, a prompt
+        // batch, the queries split into hi/lo halves) behind the same call - an A/B against ours, which stays
+        // the default.
+        const int mma = opt_.idx_mma == 3 ? 2 : (opt_.idx_mma == 2 || (opt_.idx_mma == 1 && n <= 16) ? 1 : 0);
         if (dbg) ck(cudaEventRecord((cudaEvent_t) att_ev_[5], cs(st_)), "att ev5");
         // score_ has room for some of a batch's tokens at a long context; they take turns.  A token that sees
         // top_k compressed rows or fewer takes them all and needs no scores; a recorded launch cannot tell.
