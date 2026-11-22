@@ -410,6 +410,8 @@ def main() -> int:
     ap.add_argument("--eval-ctx", action="store_true",
                     help="офлайн по ЦЕЛОМУ блоку с накопленным K/V (движковый контекст)")
     ap.add_argument("--ctx-chunk", type=int, default=128, help="строк за шаг внимания")
+    ap.add_argument("--ctx-win", type=int, default=0,
+                    help="обучение с контекстом: чанк внимает до N предыдущих строк блока (0 = как раньше)")
 
     ap.add_argument("--replay-round", default=None,
                     help="дамп раунда mov'а (STRATA_EAGLE_DUMP_ROUND): прогнать голову на ЕГО состоянии")
@@ -868,8 +870,39 @@ def main() -> int:
                     x_taps = x_taps + torch.randn_like(x_taps) * sig
                 pos = torch.arange(pos0_b + start, pos0_b + start + length, device=device)
                 # bf16-автокаст: веса в fp32, матмулы в bf16 - активации и логиты вдвое меньше
+                # --ctx-win N: чанк внимает ПРЕДЫДУЩИМ строкам блока (до N), как раунд движка
+                # внимает промпту.  Без этого каждый срез замкнут в max_rows, и голова учится на
+                # контексте, которого в рантайме нет: офлайн 83% против живых 0-13% (замерено).
+                if args.ctx_win > 0:
+                    _cs = max(0, start - args.ctx_win)
+                    _K = _V = None
+                    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16,
+                                                         enabled=device == "cuda"):
+                        for _c0 in range(_cs, start, args.ctx_chunk):
+                            _c1 = min(_c0 + args.ctx_chunk, start)
+                            _e = torch.from_numpy(embs_b[_c0:_c1]).to(device)
+                            _t = torch.from_numpy(taps_b[_c0:_c1]).to(device)
+                            _p = torch.arange(pos0_b + _c0, pos0_b + _c1, device=device)
+                            _h = model.fc(_t.reshape(_c1 - _c0, -1))
+                            _x = torch.cat((rmsnorm(_e, model.ln1.weight, model.eps),
+                                            rmsnorm(_h, model.hnorm.weight, model.eps)), dim=-1)
+                            _k = rope_apply(model.wk(_x).view(_c1 - _c0, model.n_kv, model.hd),
+                                            _p, model.rope)
+                            _v = model.wv(_x).view(_c1 - _c0, model.n_kv, model.hd)
+                            _K = _k if _K is None else torch.cat((_K, _k), dim=0)
+                            _V = _v if _V is None else torch.cat((_V, _v), dim=0)
+                    if _K is None:      # чанк в самом начале блока: контекста нет
+                        _K = torch.zeros((0, model.n_kv, model.hd), device=device)
+                        _V = torch.zeros((0, model.n_kv, model.hd), device=device)
+                    _pos_pre = torch.arange(pos0_b + _cs, pos0_b + start, device=device)
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                    logits, hid, x_att = model(x_embs, x_taps, pos)  # [n, dvocab], [n, E], [n, 2E]
+                    if args.ctx_win > 0:
+                        h_in = model.fc(x_taps.reshape(length, -1))
+                        x_att = torch.cat((rmsnorm(x_embs, model.ln1.weight, model.eps),
+                                           rmsnorm(h_in, model.hnorm.weight, model.eps)), dim=-1)
+                        logits, hid, _, _ = model.chain_depth(_K, _V, h_in, x_embs, pos, _pos_pre)
+                    else:
+                        logits, hid, x_att = model(x_embs, x_taps, pos)  # [n, dvocab], [n, E], [n, 2E]
                     if tgt2draft is not None:
                         lab_d = torch.from_numpy(map_labels(np.asarray(tokens_b[start + 1:start + length + 1]),
                                                             tgt2draft)).to(device)  # -100: вне словаря
