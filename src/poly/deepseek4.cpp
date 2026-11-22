@@ -558,10 +558,13 @@ void DeepSeek4::attention(Block& B, int il, int64_t pos, int n) {
     const float scale = 1.f / std::sqrt((float) dim);
     if (B.ratio == 4) {
         squeeze(B, B.idx, pos, n);
-        lin(B.idx_q_b, qr_, iq_, n);
+        // qr_ was quantized into q8_ for the query projection above, and nothing since has touched q8_: the
+        // index query's matrix has the same n_in, so the same blocks serve it (one quantize + one launch less)
+        lin(B.idx_q_b, qr_, iq_, n, q8_);
         dsv4_rope(iq_, iq_, idx_dim_, idx_heads_, idx_dim_ - n_rot_, n_rot_, rope_comp_, pos, 1, n, false, 0.f, false,
                   st_, at);
-        lin(B.idx_proj, xn_, iw_, n);
+        // xn_ is already in xq_ (layer_head quantized it once for q_a and wkv) - the index projection reuses it
+        lin(B.idx_proj, xn_, iw_, n, xq_);
         const float iscale = 1.f / std::sqrt((float) (idx_dim_ * idx_heads_));
         // 1: the tensor cores at the decode windows' shapes only (the prompt batches win with the scalar
         // kernel); 2: always, the prompt batches too - their score kernel is the phase's biggest cost and the
@@ -719,8 +722,8 @@ bool DeepSeek4::route_card(int il, int n, int32_t* ids, float* w) {
 
 // The shared expert.  It runs on the GPU while the host routes.
 void DeepSeek4::moe_shared(const Layer& L, int il, int n) {
-    lin(L.sh_gate, xn_, g_, n, xq_);
-    lin(L.sh_up, xn_, u_, n, xq_);
+    // gate and up share the layer's input (xq_) and a shape, so a token alone takes them in one launch
+    pair(L.sh_gate, L.sh_up, g_, u_, n);
     swiglu_clamp(g_, u_, h_, n * n_ff_shexp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
 }

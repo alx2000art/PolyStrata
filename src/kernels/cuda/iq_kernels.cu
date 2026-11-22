@@ -34,11 +34,16 @@ void check(const char* what) {
 }
 
 // ---------------------------------------------------------------- llama.cpp helpers (vecdotq.cuh)
+// 4 bytes at a 2-byte-aligned address as one 32-bit load.  nvcc cannot prove the alignment through a
+// uint16_t* (and every block is 2-byte aligned at best), so the naive two-halfword form costs two LDG.E.U16
+// where one LDG.E would do - 4 of them per IQ2_XXS block, 8 per 256-value block.  Same form as the SYCL
+// port's load4_a2 (sycl/src/kernels/cuda/iq_kernels.dp.cpp): read the containing word and shift, never
+// crossing a page.  Bit-identical to the halfword pair.
 __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
-    const uint16_t* x16 = (const uint16_t*) x;
-    int x32 = x16[2 * i32 + 0] << 0;
-    x32 |= x16[2 * i32 + 1] << 16;
-    return x32;
+    const uintptr_t a = reinterpret_cast<uintptr_t>(x) + size_t(i32) * 4;
+    const uint32_t* q = reinterpret_cast<const uint32_t*>(a & ~uintptr_t(3));
+    const uint32_t w0 = q[0];
+    return (a & 2) ? (int) ((w0 >> 16) | (q[1] << 16)) : (int) w0;
 }
 __device__ __forceinline__ int get_int_b4(const void* x, const int& i32) { return ((const int*) x)[i32]; }
 __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
