@@ -228,13 +228,18 @@ VARIANTS+=("78-on-merge|$WORKING_SPEC ENV:STRATA_POLY_MERGE=1")
 
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
+# Разбор строго по запятым (IFS=,): пустое слово (",," или хвостовая запятая) иначе дало бы *""* - «все»,
+# а подстрока цепляла бы лишнее ("10" внутри "share100").  Совпадение - точное имя или префикс ("78" -> 78-on-merge).
 if [[ -n "$ONLY" ]]; then
+    local_wants=()
+    IFS=',' read -r -a local_wants <<< "$ONLY"
     keep=()
     for entry in "${VARIANTS[@]}"; do
         name="${entry%%|*}"
         hit=0
-        for want in ${ONLY//,/ }; do
-            if [[ "$name" == "$want" || "$name" == *"$want"* ]]; then hit=1; break; fi
+        for want in "${local_wants[@]}"; do
+            [[ -z "$want" ]] && continue
+            if [[ "$name" == "$want" || "$name" == "$want"* ]]; then hit=1; break; fi
         done
         (( hit )) && keep+=("$entry")
     done
@@ -244,15 +249,16 @@ if [[ -n "$ONLY" ]]; then
         for entry in "${VARIANTS[@]}"; do
             name="${entry%%|*}"
             hit=0
-            for want in ${ONLY//,/ }; do
-                [[ "$name" == "$want" || "$name" == *"$want"* ]] && { hit=1; break; }
+            for want in "${local_wants[@]}"; do
+                [[ -z "$want" ]] && continue
+                [[ "$name" == "$want" || "$name" == "$want"* ]] && { hit=1; break; }
             done
             (( hit )) || rest+=("$entry")
         done
         keep=("${keep[@]}" "${rest[@]}")
     fi
     VARIANTS=("${keep[@]}")
-    log "ONLY=$ONLY: вариантов ${#VARIANTS[@]}"
+    log "ONLY=$ONLY: вариантов ${#VARIANTS[@]}: $(printf '%s ' "${VARIANTS[@]%%|*}")"
 fi
 
 # SKIP_CONTROLS=1: без дублей эталона и контролей дрейфа (01-all-off-b, 15-all-off-m, 99-all-off-c).
