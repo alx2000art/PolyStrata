@@ -860,6 +860,45 @@ int serve(Session& ss) {
             std::fflush(stdout);
             continue;
         }
+        // LOGP <id,id,...>: teacher-forced scoring for the tokenizer gate.  Each id is fed on its own with
+        // want_logits, and the log-probability of the NEXT id is written as `LP <pos> <id> <logp>`.  One id per
+        // eval, so no prompt batching: the batched read keeps only the last position's logits.
+        if (line.rfind("LOGP ", 0) == 0) {
+            std::vector<int32_t> score_ids;
+            if (!parse_ids(line.c_str() + 5, score_ids) || score_ids.size() < 2) {
+                std::printf("ERR LOGP needs at least two ids\n");
+                std::fflush(stdout);
+                continue;
+            }
+            const int nv = engine.n_vocab();
+            bool outside = false;
+            for (int32_t t : score_ids)
+                outside = outside || t < 0 || t >= nv;
+            if (outside) {
+                std::printf("ERR a token id is outside the vocabulary\n");
+                std::fflush(stdout);
+                continue;
+            }
+            try {
+                engine.bind(0);
+                engine.reset();
+                for (size_t i = 0; i + 1 < score_ids.size(); ++i) {
+                    engine.eval(&score_ids[i], 1, true);
+                    const float* lg = engine.logits();
+                    float mx = lg[0];
+                    for (int v = 1; v < nv; ++v) mx = std::max(mx, lg[v]);
+                    double sum = 0.0;
+                    for (int v = 0; v < nv; ++v) sum += std::exp((double) lg[v] - (double) mx);
+                    const double lp = (double) lg[score_ids[i + 1]] - ((double) mx + std::log(sum));
+                    std::printf("LP %zu %d %.9f\n", i, (int) score_ids[i + 1], lp);
+                }
+                std::printf("LPDONE %zu\n", score_ids.size() - 1);
+            } catch (const std::exception& e) {
+                std::printf("ERR %s\n", e.what());
+            }
+            std::fflush(stdout);
+            continue;
+        }
         if (line.rfind("GEN ", 0) != 0 && line.rfind("GENI ", 0) != 0) {
             std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> image_pad=<id> <file> <id,id,...>\n");
             std::fflush(stdout);

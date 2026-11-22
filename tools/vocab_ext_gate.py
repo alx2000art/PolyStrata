@@ -7,13 +7,12 @@
     nll --tsv TSV --ids IDS.json | --chars N
 
 WHY PER CHARACTER.  The two tokenizations split the same text into a different number of tokens, so
-per-token perplexity is not comparable between them; -sum(logp)/chars is.  The engine writes one
-STRATA_LOGPOS row per read position (pos, target, logp(target), argmax, ...); nll sums column 3.
+per-token perplexity is not comparable between them; -sum(logp)/chars is.
 
-The engine is started from the config as-is (exe/args/env/cwd/lib_dirs), plus --serve and
---short-read <len+64> so the whole prompt is read through the decode windows and scored.  The
-tokenizer switch itself is done in the config before `run`: --pack <ext pack> and --vocab-ext
-<sidecar> for the extended run, the base pack without --vocab-ext for the reference.
+The engine (`strata-poly`) takes token ids, never text - tokenization is the client's job with
+tools/strata_tokenizer.py - and its `LOGP <ids>` command feeds each id on its own with want_logits
+and prints `LP <pos> <id> <logp>` for the next id.  The tokenizer switch is therefore: the client
+encodes with the extended pack, and the engine gets --vocab-ext <sidecar> so those ids have rows.
 """
 import argparse
 import json
@@ -56,19 +55,9 @@ def cmd_run(a) -> int:
     for kv in a.env or []:
         k, _, v = kv.partition("=")
         env[k] = v
-    env["STRATA_LOGPOS"] = out
-    env["STRATA_LOGPOS_TOPK"] = "0"
-
     args = [str(x) for x in (cfg.get("args") or [])]
     args = [x for x in args if x != "--serve"]
-    for name in ("--short-read", "--tokens"):
-        i = 0
-        while i < len(args):
-            if args[i] == name:
-                del args[i:i + 2]
-            else:
-                i += 1
-    args += ["--serve", "--short-read", str(len(ids) + 64)]
+    args.append("--serve")
     err_path = out + ".stderr.txt"
     errf = open(err_path, "w")
     print(f"[*] {cfg['exe']} {' '.join(args)}", flush=True)
@@ -80,14 +69,23 @@ def cmd_run(a) -> int:
                 break
         else:
             raise SystemExit(f"движок завершился до READY (код {p.wait()}); см. {err_path}")
-        p.stdin.write("GEN 1 " + ",".join(map(str, ids)) + "\n")
+        p.stdin.write("LOGP " + ",".join(map(str, ids)) + "\n")
         p.stdin.flush()
         done = None
-        for line in p.stdout:
-            if line.startswith(("DONE", "ERR")):
-                done = line.strip()
-                break
-        if done is None or not done.startswith("DONE") or "nonfinite" in done:
+        rows = 0
+        with open(out, "w", encoding="utf-8") as fo:
+            for line in p.stdout:
+                if line.startswith("LP "):
+                    f = line.split()
+                    fo.write(f"{f[1]}\t{f[2]}\t{f[3]}\n")
+                    rows += 1
+                    if rows % 500 == 0:
+                        print(f"    {rows}/{len(ids) - 1}", flush=True)
+                    continue
+                if line.startswith(("LPDONE", "ERR")):
+                    done = line.strip()
+                    break
+        if done is None or not done.startswith("LPDONE"):
             raise SystemExit(f"движок ответил {done!r}; см. {err_path}")
         p.stdin.write("QUIT\n")
         p.stdin.flush()
@@ -116,7 +114,7 @@ def cmd_nll(a) -> int:
     tot, n = 0.0, 0
     for line in open(a.tsv, encoding="utf-8", errors="replace"):
         f = line.rstrip("\n").split("\t")
-        if len(f) < 8:
+        if len(f) < 3:
             continue
         try:
             pos, lp = int(f[0]), float(f[2])
