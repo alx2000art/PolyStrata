@@ -593,12 +593,22 @@ def main() -> int:
         if reads and decs:
             # ПАРНЫЙ дамп: запрос = read-блок (промпт) + декодные пары, чьи позиции лежат до
             # начала следующего промпта.  Только так контекст = 1088 + 384 строки, как в раунде
+            # ДЕКОДНЫЕ СЕРИИ: позиции растут внутри запроса и сбрасываются на новом, поэтому
+            # границы запросов = места, где pos0 уменьшился.  Привязка по позициям не работает:
+            # каждый промпт начинается с 0, и «до следующего промпта» - пустой интервал.
+            runs, run = [], []
+            for d in decs:
+                if run and d[2] < run[-1][2] + run[-1][3] - 1:
+                    runs.append(run); run = []
+                run.append(d)
+            if run:
+                runs.append(run)
             for k, rb in enumerate(reads):
-                lo = rb[2] + rb[3]                        # промпт кончился здесь
-                hi = reads[k + 1][2] if k + 1 < len(reads) else 1 << 62
-                grp = [rb] + [d for d in decs if lo - 1 <= d[2] < hi]
-                if len(grp) > 1:
-                    groups.append(grp)
+                if k < len(runs) and runs[k]:
+                    groups.append([rb] + runs[k])
+            if len(reads) != len(runs):
+                print(f"  ! read-блоков {len(reads)}, декодных серий {len(runs)} - пар {len(groups)}",
+                      flush=True)
         if groups:
             print(f"  парных запросов: {len(groups)} (read-блоков {len(reads)}, "
                   f"декодных {len(decs)})", flush=True)
