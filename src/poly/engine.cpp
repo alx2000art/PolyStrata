@@ -898,7 +898,15 @@ void Engine::settle_swaps() {
     for (int j = 0; j < n_swap_; ++j)
         while (swap_[(size_t) j].at.load() == Swap::kAsked && !failed()) std::this_thread::yield();
     if (failed()) throw std::runtime_error("expert upload: " + swap_error_);
-    ck(cudaStreamSynchronize(cs(swap_st_)), "expert upload");
+    // STRATA_POLY_SWAP_SYNC=0: no full swap-stream sync at the token's start.  follow() below still takes every
+    // upload that has landed (per-swap cudaEventQuery) and a slot stays reserved from trade_experts() until its
+    // event is seen, so nothing can be handed on early - the only difference is that an upload which landed
+    // mid-token becomes visible one token later instead of stalling the host here.
+    static const bool swap_sync = [] {
+        const char* v = std::getenv("STRATA_POLY_SWAP_SYNC");
+        return !v || *v != '0';
+    }();
+    if (swap_sync) ck(cudaStreamSynchronize(cs(swap_st_)), "expert upload");
     follow(0);
 }
 

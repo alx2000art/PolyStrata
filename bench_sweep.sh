@@ -215,6 +215,9 @@ VARIANTS+=("73-on-stage128|$WORKING_SPEC --stage-mib 128")
 VARIANTS+=("74-on-stage2048|$WORKING_SPEC --stage-mib 2048")
 VARIANTS+=("75-on-swaps0|$WORKING_SPEC --stage-mib 512 --expert-swaps 0")
 VARIANTS+=("76-on-swaps16|$WORKING_SPEC --stage-mib 512 --expert-swaps 16")
+# Без полной синхронизации swap-стрима на старте токена (STRATA_POLY_SWAP_SYNC=0): слоты остаются
+# зарезервированы до прихода события, follow() берёт приземлившиеся - токен не ждёт хост.
+VARIANTS+=("77-on-swapnosync|$WORKING_SPEC ENV:STRATA_POLY_SWAP_SYNC=0")
 
 # ------------------------- проверки -----------------------------------------
 log()  { printf '%s\n' "$*"; }
@@ -323,7 +326,8 @@ env = cfg.get("env") or {}
 # Every variant starts from a clean env for the keys this sweep manages: keys left in the config
 # (or by a previous variant) must not leak into the baselines - the diag runs' stale TEACH/FREEZE
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
-MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC")
+MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
+           "STRATA_POLY_SWAP_SYNC")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
