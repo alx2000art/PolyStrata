@@ -90,9 +90,14 @@ def main():
                     n_merges.append(tuple(p))
     print(f"[*] новый: vocab {len(n_vocab)}, merges {len(n_merges)}, конвенция '{n_conv}'")
 
-    # пак хранит СЫРЫЕ UTF-8 токены (llama.cpp DeepSeek), HF - байт-мапленные (Ġ-стиль):
-    # приводим новые к сырым и сравниваем напрямую с паком
+    # Пак бывает в двух конвенциях, и их нельзя путать:
+    #   * байт-мапленная (Ð-стиль, GPT-2/llama.cpp): HF-токенайзер и пак уже в одной конвенции,
+    #     конверсия НЕ нужна - строка HF как есть;
+    #   * сырой UTF-8 (gemma4-стиль): валидный UTF-8 пишется как есть, частичный символ - <0xNN>
+    #     с типом 6 (иначе id хвоста сдвигаются на каждом пропущенном токене).
+    # Признак: в байт-мапленном многоязычном паке нет ни одного токена с настоящей кириллицей.
     base_set = set(b_vocab)
+    byte_mapped = not any(any(chr(0x400) <= ch <= chr(0x4FF) for ch in k) for k in b_vocab)
     # как пак помечает пробел: если в его ключах есть Ġ - пишем новые так же (иначе сырой пробел
     # ломает формат мерджей "a b", а словарь разъезжается с мердж-ключами)
     marked = any("Ġ" in k for k in b_vocab)
@@ -101,19 +106,33 @@ def main():
         return raw.replace(" ", "Ġ") if marked else raw
 
     out_vocab = dict(b_vocab)                        # id базовых не двигаются
-    added = bad = 0
+    added = 0
+    added_types = []
     for t, _id in sorted(n_vocab.items(), key=lambda kv: kv[1]):
-        # базовые строки пака уже в его конвенции (их не трогаем); новые - байт-мапленные
-        raw = t if t in base_set else (to_raw(t) if n_conv == "g" else t)
-        if raw is None:
-            bad += 1
-            continue
-        tok = pack_form(raw)
-        if tok in base_set or tok in out_vocab:
-            continue
+        ty = 1
+        if t in base_set:
+            tok = t                                  # базовая строка - как есть
+        elif byte_mapped:
+            tok = t                                  # HF и пак уже в одной байт-мапленной конвенции
+        else:
+            raw = to_raw(t) if n_conv == "g" else t
+            if raw is None:
+                # частичный UTF-8: <0xNN> на каждый байт, тип 6 (llama.cpp-конвенция байтов)
+                raw = "".join("<0x%02X>" % b for b in bytes(_INV[c] for c in t))
+                ty = 6
+            tok = pack_form(raw)
+        if tok in base_set:
+            continue                                 # такой токен уже есть в базе - в хвосте его быть не должно
+        if tok in out_vocab:
+            raise SystemExit(f"дубликат в хвосте: {tok!r} - id разъедутся с сайдкаром")
         out_vocab[tok] = len(out_vocab)
+        added_types.append(ty)
         added += 1
-    print(f"[*] добавлено новых токенов: {added} (итого {len(out_vocab)}; не декодировались {bad})")
+    tail_expected = len(n_vocab) - len(b_vocab)
+    print(f"[*] добавлено новых токенов: {added} из {tail_expected} (итого {len(out_vocab)})")
+    if added != tail_expected:
+        raise SystemExit(f"СДВИГ ID: добавлено {added}, а в хвосте {tail_expected} токенов; "
+                         f"каждый пропуск сдвигает строки сайдкара")
 
     base_merges = {tuple(m) for m in b_merges}
     out_merges = list(b_merges)
@@ -123,6 +142,8 @@ def main():
         def conv_part(x):
             if x in base_set:
                 return x
+            if byte_mapped:
+                return x                             # одна конвенция с паком - не трогаем
             if n_conv != "g":
                 return x
             r = to_raw(x)
@@ -150,7 +171,7 @@ def main():
     if os.path.exists(stale):
         os.remove(stale)
     if b_types:
-        types = list(b_types) + [1] * added         # 1 = обычный токен (как у пака)
+        types = list(b_types) + added_types           # 1 = обычный токен, 6 = <0xNN>-байт
         json.dump(types, open(os.path.join(args.out, "token_type.json"), "w", encoding="utf-8"))
     cfg = dict(b_cfg)
     cfg["vocab_size"] = len(out_vocab)

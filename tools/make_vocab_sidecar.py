@@ -88,6 +88,51 @@ def row_size(ty, n_embd):
     return n_embd // e * b
 
 
+def rows_from_file(path, n, n_embd, ty):
+    """Read [n, n_embd] F32 rows and quantize them to the main table's type."""
+    import numpy as np
+    a = np.fromfile(path, dtype="<f4")
+    if a.size != n * n_embd:
+        raise SystemExit(f"{path}: {a.size} floats, expected {n * n_embd} ({n} x {n_embd})")
+    a = a.reshape(n, n_embd).astype(np.float32)
+    if ty == 8:                                     # Q8_0, ggml reference: d = amax/127
+        return q8_0_bytes(a)
+    if ty == 1:
+        return a.astype("<f2").tobytes()
+    if ty == 0:
+        return a.astype("<f4").tobytes()
+    raise SystemExit(f"ggml type {ty}: --rows-* supports only F32/F16/Q8_0")
+
+
+def q8_0_bytes(a):
+    import numpy as np
+    n, ne = a.shape
+    if ne % 32:
+        raise SystemExit("Q8_0 rows need n_embd % 32 == 0")
+    nb = ne // 32
+    x = a.reshape(n, nb, 32)
+    amax = np.abs(x).max(axis=2)
+    d = (amax / 127.0).astype(np.float16)
+    inv = np.where(amax > 0, 127.0 / np.maximum(amax, 1e-30), 0.0).astype(np.float32)
+    q = np.clip(np.rint(x * inv[:, :, None]), -127, 127).astype(np.int8)
+    out = np.zeros((n, nb, 34), dtype=np.uint8)
+    out[:, :, 0:2] = d.view(np.uint8).reshape(n, nb, 2)
+    out[:, :, 2:34] = q.view(np.uint8).reshape(n, nb, 32)
+    return out.tobytes()
+
+
+def fill_rows(n, n_embd, ty, value):
+    """A constant row: the output side's mask (exp(-30) is zero in the softmax)."""
+    import numpy as np
+    if ty == 8:
+        return q8_0_bytes(np.full((n, n_embd), value, dtype=np.float32))
+    if ty == 1:
+        return np.full((n, n_embd), value, dtype="<f2").tobytes()
+    if ty == 0:
+        return np.full((n, n_embd), value, dtype="<f4").tobytes()
+    raise SystemExit(f"ggml type {ty}: --fill-out supports only F32/F16/Q8_0")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True, help="the main model GGUF (for n_embd and the table types)")
@@ -95,6 +140,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--base-vocab", type=int, default=0,
                     help="the main file's vocab (default: read from token_embd.weight's shape)")
+    ap.add_argument("--rows-emb", help="F32 [n, n_embd] rows for token_embd_ext (default: zeros)")
+    ap.add_argument("--rows-out", help="F32 [n, n_embd] rows for output_ext (default: --fill-out)")
+    ap.add_argument("--fill-out", type=float, default=0.0,
+                    help="constant for output_ext when --rows-out is absent (-30 masks the tokens)")
     ap.add_argument("--name", default="vocab-ext")
     args = ap.parse_args()
 
@@ -126,7 +175,7 @@ def main():
         ("output_ext.weight", [n_embd, args.n], ty_out, rs_out * args.n),
     ]
 
-    # --- the GGUF: kvs, tensor infos, data (zero rows: they dequantize to zero vectors) ---
+    # --- the GGUF: kvs, tensor infos, data (rows per id, row k <-> token base_vocab+k) ---
     align = 32
     head = bytearray()
     head += b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(kvs))
@@ -150,8 +199,21 @@ def main():
         off += sz
     start = (len(head) + len(infos) + align - 1) // align * align
     head += infos + b"\0" * (start - len(head))
-    for name, dims, ty, sz in tensors:
-        head += b"\0" * sz
+
+    data_tok = rows_from_file(args.rows_emb, args.n, n_embd, ty_tok) if args.rows_emb \
+        else b"\0" * (rs_tok * args.n)
+    if args.rows_out:
+        data_out = rows_from_file(args.rows_out, args.n, n_embd, ty_out)
+    elif args.fill_out != 0.0:
+        data_out = fill_rows(args.n, n_embd, ty_out, args.fill_out)
+        print(f"[*] output_ext: постоянные строки {args.fill_out} (маска, вероятность ~0)")
+    else:
+        data_out = b"\0" * (rs_out * args.n)
+    if len(data_tok) != rs_tok * args.n or len(data_out) != rs_out * args.n:
+        raise SystemExit("row payload size mismatch")
+    head += data_tok + data_out
+    if len(head) != start + rs_tok * args.n + rs_out * args.n:
+        raise SystemExit(f"file layout mismatch: {len(head)} vs {start + (rs_tok + rs_out) * args.n}")
     open(args.out, "wb").write(head)
     print(f"[+] sidecar: {args.out} ({len(head)/1e6:.1f} MB, data at {start})")
 
