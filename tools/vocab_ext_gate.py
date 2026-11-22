@@ -58,6 +58,15 @@ def cmd_run(a) -> int:
         env[k] = v
     args = [str(x) for x in (cfg.get("args") or [])]
     args = [x for x in args if x != "--serve"]
+    # args of the OTHER program (strata generate) that a leftover config edit can leave behind:
+    # strata-poly knows none of them and dies with a usage dump (exit 2) before READY.
+    for name in ("--pack", "--short-read", "--tokens", "--tokens-file"):
+        i = 0
+        while i < len(args):
+            if args[i] == name:
+                del args[i:i + 2]
+            else:
+                i += 1
     args.append("--serve")
     err_path = out + ".stderr.txt"
     errf = open(err_path, "w")
