@@ -9,7 +9,10 @@ ASCII tokens the base vocab already covers.  The clean part is 60,431 real Russi
 
 A tail token can be dropped only if no KEPT token needs it as a merge piece; otherwise BPE stops
 assembling that token.  The kept set is therefore the merge closure (restricted to the tail,
-the base alphabet is always available) of the clean Cyrillic tokens the corpus uses.
+the base alphabet is always available) of the clean Cyrillic tokens the corpus uses.  The closure
+admits CYRILLIC intermediates only: an ASCII piece in the tail (" 5" for " 5-й") would open a new
+merge on pure-ASCII text and change English/code tokenization - and those must stay bit-identical,
+so a Russian token that needs such a piece is dropped instead.
 
     python3 tools/prune_vocab_ext.py \
         --ext ~/tokenizer_ru --usage ~/vocab_ext_usage.json \
@@ -111,7 +114,10 @@ def main() -> int:
         if not ab:
             continue
         for p in ab:
-            if p in tail and p not in keep:
+            # Только кириллические токены: ASCII-промежуток (например, " 5" для " 5-й") в хвосте
+            # открыл бы новый мердж на чистом ASCII и изменил бы токенизацию английского и кода.
+            # Русский токен, которому такой промежуток нужен, отбросит fixpoint ниже.
+            if p in tail and p not in keep and cls(p) == "ru":
                 keep.add(p)
                 stack.append(p)
 

@@ -5,6 +5,7 @@
     ids --pack DIR --text FILE --out IDS.json [--max-chars N]
     run --config CFG.json --ids IDS.json --out TSV [--env K=V ...]
     nll --tsv TSV --ids IDS.json | --chars N
+    cmp --pack DIR --ext-pack DIR --text FILE [--max-chars N]
 
 WHY PER CHARACTER.  The two tokenizations split the same text into a different number of tokens, so
 per-token perplexity is not comparable between them; -sum(logp)/chars is.
@@ -134,6 +135,39 @@ def cmd_nll(a) -> int:
     return 0
 
 
+def cmd_cmp(a) -> int:
+    """Pure-ASCII lines must tokenize IDENTICALLY: the tail holds Cyrillic tokens only."""
+    import strata_tokenizer as ST
+    base = ST.Tokenizer.from_dir(a.pack)
+    ext = ST.Tokenizer.from_dir(a.ext_pack)
+    text = open(a.text, encoding="utf-8", errors="replace").read()
+    if a.max_chars:
+        text = text[: a.max_chars]
+    ascii_n = diff_n = nonascii_n = 0
+    saved = 0
+    first = None
+    for no, line in enumerate(text.splitlines(True), 1):
+        ib = base.encode(line)
+        ie = ext.encode(line)
+        saved += len(ib) - len(ie)
+        if all(ord(c) < 128 for c in line):
+            ascii_n += 1
+            if ib != ie:
+                diff_n += 1
+                if first is None:
+                    first = (no, line[:60].rstrip("\n"), len(ib), len(ie))
+        else:
+            nonascii_n += 1
+    print(f"[+] ASCII-строк {ascii_n}: разошлись {diff_n}; не-ASCII строк {nonascii_n}; "
+          f"экономия {saved} токенов на файле")
+    if diff_n:
+        print(f"[!] первая разошедшаяся ASCII-строка {first[0]}: {first[1]!r} "
+              f"({first[2]} -> {first[3]} токенов)")
+        return 1
+    print("[+] английский и код: id совпадают побитово")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -157,6 +191,13 @@ def main() -> int:
     p.add_argument("--ids")
     p.add_argument("--chars", type=int, default=0)
     p.set_defaults(fn=cmd_nll)
+
+    p = sub.add_parser("cmp")
+    p.add_argument("--pack", required=True)
+    p.add_argument("--ext-pack", required=True)
+    p.add_argument("--text", required=True)
+    p.add_argument("--max-chars", type=int, default=0)
+    p.set_defaults(fn=cmd_cmp)
 
     a = ap.parse_args()
     return a.fn(a)
