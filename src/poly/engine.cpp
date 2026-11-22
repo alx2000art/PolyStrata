@@ -3171,9 +3171,11 @@ void Engine::start_spec() {
     spec_m_ = 64;
     if (const char* v = std::getenv("STRATA_POLY_STAGE_SPEC"); v && *v) {
         const int m = std::atoi(v);
-        if (m > 0 && m <= n_expert_) spec_m_ = m;
+        if (m >= 0 && m <= n_expert_) spec_m_ = m;
     }
     spec_on_ = true;
+    if (spec_m_ <= 0) return;   // STRATA_POLY_STAGE_SPEC=0: the guess-reader off - no thread, no scratch, and the
+                               // next staging reads its own experts as without the pool
     spec_scratch_ = std::malloc(ram_pool_->slot_bytes());
     if (!spec_scratch_) return;
     spec_thread_ = std::thread([this] { spec_loop(); });
@@ -3187,7 +3189,7 @@ void Engine::start_spec() {
 // staging had already settled reactively: settled 0 of 220 said it clearly.)  A cap below the layer's expert
 // count keeps only the current routing's most used - the neighbours' experts correlate.
 void Engine::stage_spec(int il) {
-    if (!spec_on_) return;
+    if (!spec_on_ || spec_m_ <= 0) return;   // spec_m_ <= 0: the guess-reader is off (STRATA_POLY_STAGE_SPEC=0)
     int next = il + 1;
     while (next < (int) layers_.size() && !layers_[(size_t) next].moe) ++next;
     if (next >= (int) layers_.size()) return;   // nothing follows

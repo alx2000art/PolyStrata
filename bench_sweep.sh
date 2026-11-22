@@ -203,6 +203,18 @@ VARIANTS+=("64-eta-nodraft|$(all_off_spec) DEL:--draft-model")
 VARIANTS+=("65-on-nodraft|$WORKING_SPEC DEL:--draft-model")
 VARIANTS+=("66-on-lmq8off|$WORKING_SPEC ENV:STRATA_EAGLE_LM_Q8=0")
 VARIANTS+=("99-all-off-c|$(all_off_spec)")   # контроль дрейфа (stage2 гасится самой спекой эталона)
+# --- открытые клетки ревью 2026-11-23: размеры стейджинга, guess-reader, swap-settle.
+# Их не было в свипе 11-11 (там --ram-experts-mib 6144 не менялся, --stage-mib 512 во всех ячейках,
+# --expert-swaps не задавался = дефолт 64, STRATA_POLY_STAGE_SPEC не использовался).
+# Каждая клетка ниже задаёт --stage-mib и --expert-swaps ЯВНО: apply_variant не сбрасывает ключ,
+# которого нет в спеке, поэтому значение предыдущей ячейки протекло бы в следующую (класс «stale args»).
+VARIANTS+=("70-on-stagespec32|$WORKING_SPEC --stage-mib 512 ENV:STRATA_POLY_STAGE_SPEC=32")
+VARIANTS+=("71-on-stagespec16|$WORKING_SPEC --stage-mib 512 ENV:STRATA_POLY_STAGE_SPEC=16")
+VARIANTS+=("72-on-stagespec0|$WORKING_SPEC --stage-mib 512 ENV:STRATA_POLY_STAGE_SPEC=0")
+VARIANTS+=("73-on-stage128|$WORKING_SPEC --stage-mib 128")
+VARIANTS+=("74-on-stage2048|$WORKING_SPEC --stage-mib 2048")
+VARIANTS+=("75-on-swaps0|$WORKING_SPEC --stage-mib 512 --expert-swaps 0")
+VARIANTS+=("76-on-swaps16|$WORKING_SPEC --stage-mib 512 --expert-swaps 16")
 
 # ------------------------- проверки -----------------------------------------
 log()  { printf '%s\n' "$*"; }
@@ -311,7 +323,7 @@ env = cfg.get("env") or {}
 # Every variant starts from a clean env for the keys this sweep manages: keys left in the config
 # (or by a previous variant) must not leak into the baselines - the diag runs' stale TEACH/FREEZE
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
-MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG")
+MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
