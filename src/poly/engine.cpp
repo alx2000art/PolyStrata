@@ -4008,7 +4008,9 @@ void Engine::run(const int32_t* tokens, int n) {
             }
             if (il + 1 >= hi_) { tail(il, n, (size_t) n - 1); continue; }
             Layer& N = layers_[(size_t) (il + 1)];
-            const size_t key = (size_t) head_key(il + 1, n) * recs + (size_t) n - 1;
+            // Свой ключ, не пересекающийся с N.heads (head_key*recs+rec) и N.tail (rec): хвост принадлежит
+            // предыдущему слою, поэтому рекорд хранится у СЛЕДУЮЩЕГО, а ключ расширен номером хвоста.
+            const size_t key = (size_t) head_key(il + 1, n) * recs + (size_t) n - 1 + recs * (size_t) recs;
             if (replay && N.fixed) {
                 auto& made = N.merged;
                 if (made.size() <= key) made.resize(key + 1, nullptr);
