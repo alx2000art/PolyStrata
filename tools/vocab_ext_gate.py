@@ -191,13 +191,18 @@ def cmd_nll(a) -> int:
         limit = len(st["segments"][0]["ids"])
     if not chars:
         raise SystemExit("нужен --ids или --chars")
+    tok = None
+    if a.split_id and a.pack:
+        import strata_tokenizer as ST
+        tok = ST.Tokenizer.from_dir(a.pack)
     tot, n = 0.0, 0
+    groups = {}
     for line in open(a.tsv, encoding="utf-8", errors="replace"):
         f = line.rstrip("\n").split("\t")
         if len(f) < 3:
             continue
         try:
-            pos, lp = int(f[0]), float(f[2])
+            pos, tgt, lp = int(f[0]), int(f[1]), float(f[2])
         except ValueError:
             continue
         if limit is not None and pos >= limit:
@@ -206,11 +211,26 @@ def cmd_nll(a) -> int:
             continue
         tot += lp
         n += 1
+        if a.split_id:
+            grp = "base" if tgt < a.split_id else "ext"
+            nbytes = len(tok.token_bytes(tgt)) if tok else 0
+            g = groups.setdefault(grp, [0, 0.0, 0])
+            g[0] += 1
+            g[1] += lp
+            g[2] += nbytes
     if not n:
         raise SystemExit(f"{a.tsv}: ни одной оценки")
     nll = -tot
     print(f"[+] {a.tsv}: позиций {n}, NLL {nll:.4f}, "
           f"бит/символ {nll / chars / math.log(2):.5f}, ppl/токен {math.exp(nll / n):.4f}")
+    if a.split_id:
+        for grp in ("base", "ext"):
+            if grp not in groups:
+                continue
+            cnt, s, nb = groups[grp]
+            bpc = -s / nb / math.log(2) if nb else float("nan")
+            print(f"    {grp:4s}: позиций {cnt}, NLL {-s:.2f}, байт {nb}, "
+                  f"бит/байт {bpc:.5f}, нат/токен {-s / cnt:.4f}")
     return 0
 
 
@@ -349,6 +369,9 @@ def main() -> int:
     p.add_argument("--tsv", required=True)
     p.add_argument("--ids")
     p.add_argument("--chars", type=int, default=0)
+    p.add_argument("--split-id", type=int, default=0,
+                   help="also report the NLL of targets below and above this id")
+    p.add_argument("--pack", help="the pack of the run (for target byte lengths in --split-id)")
     p.set_defaults(fn=cmd_nll)
 
     p = sub.add_parser("cmp")
