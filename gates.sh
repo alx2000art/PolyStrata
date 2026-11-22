@@ -18,7 +18,7 @@
 # ============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+ROOT="$HERE"                       # gates.sh лежит в корне репо, рядом с tools/ и .venv/
 PY="${PY:-$ROOT/.venv/bin/python}"
 [[ -x "$PY" ]] || PY=python3
 
