@@ -63,6 +63,8 @@ WARM_PASSES="${WARM_PASSES:-1}"     # полных проходов сьюта �
                                     # (греет файловый кэш GGUF; одного хватает — остаточное
                                     # смещение первого варианта гасят контролы 15/99 и пары)
 FORCE="${FORCE:-0}"
+ONLY="${ONLY:-}"                    # ONLY="77,78" - гнать только эти варианты (по номеру или подстроке имени);
+                                    # c NOW=1 поднимает их в начало списка.  Пусто = все.
 WARM_CHECK="${WARM_CHECK:-1}"       # префлайт: файл-режим warm_start — пин читается на старте, запрос с
                                     # совпадающим префиксом переиспользует его (reused >= 2048). 0 = пропустить;
                                     # WARM_CHECK_ONLY=1 — только проверка, без свипа (конфиг восстанавливается).
@@ -218,6 +220,35 @@ VARIANTS+=("76-on-swaps16|$WORKING_SPEC --stage-mib 512 --expert-swaps 16")
 # Без полной синхронизации swap-стрима на старте токена (STRATA_POLY_SWAP_SYNC=0): слоты остаются
 # зарезервированы до прихода события, follow() берёт приземлившиеся - токен не ждёт хост.
 VARIANTS+=("77-on-swapnosync|$WORKING_SPEC ENV:STRATA_POLY_SWAP_SYNC=0")
+
+# ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
+# рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
+if [[ -n "$ONLY" ]]; then
+    keep=()
+    for entry in "${VARIANTS[@]}"; do
+        name="${entry%%|*}"
+        hit=0
+        for want in ${ONLY//,/ }; do
+            if [[ "$name" == "$want" || "$name" == *"$want"* ]]; then hit=1; break; fi
+        done
+        (( hit )) && keep+=("$entry")
+    done
+    if [[ "${NOW:-0}" == "1" ]]; then
+        # поднять only-ячейки вперёд, остальные (контроли, эталоны) - после них
+        rest=()
+        for entry in "${VARIANTS[@]}"; do
+            name="${entry%%|*}"
+            hit=0
+            for want in ${ONLY//,/ }; do
+                [[ "$name" == "$want" || "$name" == *"$want"* ]] && { hit=1; break; }
+            done
+            (( hit )) || rest+=("$entry")
+        done
+        keep=("${keep[@]}" "${rest[@]}")
+    fi
+    VARIANTS=("${keep[@]}")
+    log "ONLY=$ONLY: вариантов ${#VARIANTS[@]}"
+fi
 
 # ------------------------- проверки -----------------------------------------
 log()  { printf '%s\n' "$*"; }
