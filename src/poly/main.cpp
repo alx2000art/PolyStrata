@@ -1284,7 +1284,44 @@ void no_power_throttling() {
 #endif
 }
 
+// Our own debug knobs (the EAGLE-3 port and the poly bring-up) must not reach a production run.
+// Unless STRATA_EAGLE_DEBUG=1, they are cleared here before anything reads them, so a leftover in
+// the config's env block or in the shell cannot change the engine.  Everything that is a real
+// production setting (PIN_EXPERTS, STAGED_TILES, STAGE_SPEC, STREAM_STAGE, ROUTE_TAIL_SKIP,
+// FREEZE_EXPERTS, POLY_CARDS, pool tuning) is not on this list and is left alone.
+static void scrub_debug_envs() {
+    if (std::getenv("STRATA_EAGLE_DEBUG") != nullptr) return;
+    static const char* kNames[] = {
+        "STRATA_EAGLE_STATS", "STRATA_EAGLE_ROUND_AB", "STRATA_EAGLE_DUMP_TAPS", "STRATA_EAGLE_DUMP_ATT",
+        "STRATA_EAGLE_DUMP", "STRATA_EAGLE_CAT", "STRATA_EAGLE_DRAFT_PREV", "STRATA_EAGLE_ONE_DRAFT",
+        "STRATA_EAGLE_FORCE_GUESSES", "STRATA_EAGLE_TAPS_ONLY", "STRATA_EAGLE_TOP5",
+        "STRATA_EAGLE_TEACH_PERM", "STRATA_EAGLE_TEACH", "STRATA_EAGLE_TAPS", "STRATA_EAGLE_STALE_FC",
+        "STRATA_EAGLE_ROUND_REWIND", "STRATA_EAGLE_DUMP_ROUND_N", "STRATA_EAGLE_DUMP_ROUND_I",
+        "STRATA_EAGLE_DUMP_ROUND", "STRATA_EAGLE_DUMP_DECODE", "STRATA_EAGLE_DUMP_CTX_LOGITS",
+        "STRATA_EAGLE_DUMP_CTX_KV", "STRATA_EAGLE_LM_Q8", "STRATA_EAGLE_ROPE_SCALE",
+        "STRATA_EAGLE_ROPE_NEOX", "STRATA_EAGLE_DUMP_WEIGHTS", "STRATA_EAGLE_DUMP_STAGE",
+        "STRATA_EAGLE_DUMP_SCORES", "STRATA_EAGLE_DUMP_ROW0", "STRATA_EAGLE_DUMP_ROW",
+        "STRATA_EAGLE_DUMP_ATT_POS", "STRATA_EAGLE_CHECK_SCORES", "STRATA_EAGLE_DUMP_R",
+        "STRATA_EAGLE_TAP_SHIFT", "STRATA_EAGLE_DUMP_WEIGHTS_POS", "STRATA_EAGLE_DUMP_STAGE_POS",
+        "STRATA_EAGLE_DUMP_SCORES_POS",
+        "STRATA_POLY_LOOP_WATCH", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE2_SERIAL",
+        "STRATA_POLY_MMQ_DEBUG", "STRATA_POLY_MMQ_TYPES", "STRATA_POLY_ROUTE_DUMP",
+        "STRATA_POLY_TOPK_STATS", "STRATA_POLY_POOL_SELFTEST", "STRATA_FATTN", "STRATA_FDEC",
+        "STRATA_NO_MMVQ_ROWS2", "STRATA_POLY_SCORE_CONTEXT", "STRATA_POLY_SCORE_MIB",
+        "STRATA_VMM_RELEASE_WITH_ADDRESSES", "STRATA_LOGP_DEBUG",
+        nullptr};
+    int n = 0;
+    for (int i = 0; kNames[i] != nullptr; ++i)
+        if (std::getenv(kNames[i]) != nullptr) {
+            unsetenv(kNames[i]);
+            ++n;
+        }
+    if (n > 0)
+        std::fprintf(stderr, "strata: %d debug env var(s) ignored for this run (STRATA_EAGLE_DEBUG=1 keeps them)\n", n);
+}
+
 int main(int argc, char** argv) {
+    scrub_debug_envs();
     no_power_throttling();
     Options o;
     CacheFlags cache;
