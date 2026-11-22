@@ -31,11 +31,9 @@ constexpr int kStageRows = 32;
 // outside the cache a layer's are copied to the card once for all of a read's tokens, so more is faster: GLM 5.3
 // Flash reads 7,788 tokens at 606 to 616 tokens/s in one read and at 517 to 531 in reads of 2,048, and on an
 // 8 GB card Qwen3.6 reads 30,836 at 1,386 to 1,399 in one read and at 1,101 to 1,233 in reads of 8,192.  A read
-// of more than two calls keeps those rows in pinned host memory, 64 KiB a token for GLM and DeepSeek V4 Flash
-// (4 hyper-connection streams of 4,096 floats) and 8 for Qwen3.6: this much is 32,768 tokens of GLM's and
-// DeepSeek's.  At 512 MiB DeepSeek's 18,000-token prompt was read in three calls, each copying every expert
-// outside VRAM again (upstream measured 262 GiB host to device and 3.7 s of 15.7 idle on an RTX 5090).
-constexpr size_t kReadBytes = size_t(2048) << 20;
+// of more than two calls keeps those rows in pinned host memory, 64 KiB a token for GLM and 8 for Qwen3.6: this
+// much is 8,192 tokens of GLM's and 65,536 of Qwen3.6's.
+constexpr size_t kReadBytes = size_t(512) << 20;
 constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
 // Zero bytes behind every matrix the batched kernels may multiply (Mmq::fits): they read up to a step of 256
 // columns past a row that ends inside one, which is at most 7 blocks of 34 bytes.
