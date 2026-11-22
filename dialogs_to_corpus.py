@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""dialogs_to_corpus.py - dialogs.jsonl (лог прокси serve_dialog_logger) -> плоский текст
+"""dialogs_to_corpus.py - журнал диалогов (JSONL: ts/messages/answer) -> плоский текст
 для read-дампа.  Делает три вещи:
 
 1. склеивает цепочки: один диалог агентской сессии сохраняется прокси много раз с растущим

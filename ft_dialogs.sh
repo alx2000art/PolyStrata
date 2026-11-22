@@ -24,7 +24,7 @@ set -uo pipefail
 # ------------------------- настройки ----------------------------------------
 STRATA_DIR="${STRATA_DIR:-$HOME/PolyStrata}"
 CONFIG="${CONFIG:-$STRATA_DIR/strata-dsv4-ud-iq2_xxs.json}"
-DIALOGS="${DIALOGS:-$HOME/eagle_gen/dialogs.jsonl}"
+DIALOGS="${DIALOGS:-}"                  # обязателен: журнал диалогов больше не пишется автоматически
 CORPUS_TEXT="${CORPUS_TEXT:-}"          # если пусто — конвертер сделает сам из DIALOGS
 DUMP_DIR="${DUMP_DIR:-$HOME/eagle_taps_gen}"
 CORPUS_DIR="${CORPUS_DIR:-$HOME/eagle_taps}"
@@ -47,6 +47,8 @@ OUT_PID="$STRATA_DIR/ft_dialogs.server.pid"
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
+
+[[ -n "$DIALOGS" && -f "$DIALOGS" ]] || die "нужен DIALOGS=<файл>: журнал диалогов больше не пишется автоматически (прокси-логгер удалён)"
 
 FROM="dump"
 while [[ $# -gt 0 ]]; do

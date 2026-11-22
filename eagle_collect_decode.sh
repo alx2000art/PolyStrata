@@ -170,9 +170,9 @@ _plist = os.environ.get("PROMPT_LIST", "")
 if _plist:   # готовый список (домен-тест): NUL-разделённый файл, корпус и диалоги не нужны
     prompts = [x for x in open(_plist, encoding="utf-8", errors="replace").read().split(chr(0)) if x.strip()]
     print(f"  из списка {_plist}: {len(prompts)}")
-# РЕАЛЬНЫЕ запросы: твои диалоги (user-сообщения, chat-домен) + куски корпуса (doc-домен).
-# Никакой синтетики.
-dialogs = "" if os.environ.get("PROMPT_LIST") else os.path.expanduser("~/eagle_gen/dialogs.jsonl")
+# Диалоги: только явно указанный файл (DIALOGS_JSONL). Автозахвата промптов больше нет:
+# прокси-логгер удалён, и подставлять его файл по умолчанию нельзя.
+dialogs = os.environ.get("DIALOGS_JSONL", "")
 nd = 0
 if os.path.exists(dialogs):
     import json
