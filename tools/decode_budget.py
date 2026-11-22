@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import string
 import sys
 import time
 import urllib.error
@@ -55,6 +57,13 @@ def ask(base: str, key: str, model: str, prompt: str, max_tokens: int) -> tuple[
     return out, took, made, seen
 
 
+def nonce_prompt() -> str:
+    """A unique tail of a fixed width.  The two requests must not share a prompt: with the prompt cache
+    on, the second one would skip the prefill, t(N) - t(1) would lose it, and the budget would read
+    far better than the decode loop is."""
+    return "\n\n(метка запроса: %s)" % "".join(random.choice(string.ascii_lowercase) for _ in range(12))
+
+
 def main() -> int:
     cfg = json.load(open(CONFIG, encoding="utf-8-sig"))
     host = cfg.get("host") or "127.0.0.1"
@@ -69,7 +78,9 @@ def main() -> int:
     rows = []
     for label, want in (("t1", 1), (f"t{N}", N)):
         try:
-            out, took, made, seen = ask(base, key, model, PROMPT, want)
+            # свой nonce на каждый запрос: общий промпт попал бы в prompt-кэш, и второй запрос
+            # обошёлся бы без префилла - разность времён перестала бы измерять декод
+            out, took, made, seen = ask(base, key, model, PROMPT + nonce_prompt(), want)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             print(f"FAIL  {label}: запрос не прошёл ({e})")
             return 1
@@ -77,12 +88,21 @@ def main() -> int:
         if VERBOSE:
             print(f"  {label}: {took:.2f} c, prompt={seen}, сгенерировано {made}")
     (l1, t1, m1, p1), (l2, t2, m2, p2) = rows
-    made = max(m2 - m1, 1)
+    if m2 - m1 < 2:
+        print(f"FAIL  {l2}: сгенерировано {m2} против {m1} у {l1} - разница слишком мала для замера")
+        return 1
+    if m2 < max(2, int(N * 0.7)):
+        print(f"  (внимание) {l2} остановился на {m2} из {N} токенов - замер по {m2 - m1} шагам")
+    made = m2 - m1
+    if t2 <= t1:
+        print(f"FAIL  {l2} ({t2:.2f} c) не дольше {l1} ({t1:.2f} c) - замер невозможен")
+        return 1
     ms = (t2 - t1) / made * 1000.0
     prefill = p1 / t1 if t1 > 0 and p1 else 0.0
     tps = 1000.0 / ms if ms > 0 else 0.0
     print(f"decode: {ms:.1f} мс/токен = {tps:.1f} tok/s (бюджет {MS_TOKEN:.0f} мс, "
-          f"{1000 / MS_TOKEN:.1f} tok/s) | prefill {prefill:.1f} tok/s (пол {FLOOR_PREFILL:.0f})")
+          f"{1000 / MS_TOKEN:.1f} tok/s) | prefill {prefill:.1f} tok/s (пол {FLOOR_PREFILL:.0f}) "
+          f"| окна: {m1} и {m2} токенов")
     bad = []
     if ms > MS_TOKEN:
         bad.append(f"decode {ms:.1f} мс/токен > бюджета {MS_TOKEN:.0f}")

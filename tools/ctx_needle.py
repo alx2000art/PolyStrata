@@ -75,7 +75,7 @@ def build(tok, target: int, code: str) -> str:
         if abs(have - target) <= 8:
             break
         lines = max(0, lines + int((target - have) / per))
-    return head + body + tail
+    return head + body + "\n\n" + tail
 
 
 def ask(base: str, key: str, model: str, prompt: str, max_tokens: int) -> tuple[dict, float]:
@@ -98,7 +98,14 @@ def main() -> int:
     model = cfg.get("model_name") or "my-model"
     max_ctx = 0
     args = [str(a) for a in (cfg.get("args") or [])]
-    if "--max-context" in args:
+    for a in args:                                        # "--max-context 132768" or "--max-context=132768"
+        if a.startswith("--max-context="):
+            try:
+                max_ctx = int(a.split("=", 1)[1])
+            except ValueError:
+                max_ctx = 0
+            break
+    if not max_ctx and "--max-context" in args:
         try:
             max_ctx = int(args[args.index("--max-context") + 1])
         except (IndexError, ValueError):
