@@ -66,6 +66,8 @@ FORCE="${FORCE:-0}"
 WARM_CHECK="${WARM_CHECK:-1}"       # префлайт: файл-режим warm_start — пин читается на старте, запрос с
                                     # совпадающим префиксом переиспользует его (reused >= 2048). 0 = пропустить;
                                     # WARM_CHECK_ONLY=1 — только проверка, без свипа (конфиг восстанавливается).
+BUDGET_CHECK="${BUDGET_CHECK:-1}"   # гейт скорости после свипа: steady-state мс/токен и префилл на прод-конфиге
+                                    # (tools/decode_budget.py; MS_TOKEN / FLOOR_PREFILL_TPS задают пол)
 WARM_CHECK_ONLY="${WARM_CHECK_ONLY:-0}"
 WARM_CHECK_PROMPT="${WARM_CHECK_PROMPT:-}"   # текстовый файл для пина (>= 2048 токенов); иначе синтетический
 
@@ -603,6 +605,21 @@ wait_ready || log "  (!) сервер не поднялся автоматиче
 
 SUMMARY_BASE="${SUMMARY_BASE:-00-all-off}"
 SUMMARY_NOISE="${SUMMARY_NOISE:-01-all-off-b}"
+
+# Гейт скорости: бюджет декода на восстановленном (продовом) конфиге.  Свип сравнивает варианты
+# между собой, поэтому общий регресс («всё стало медленнее на 30%») в его таблице не виден - все
+# дельты остаются около нуля.  Этот гейт ставит жёсткий пол: steady-state мс/токен и префилл.
+if [[ "$BUDGET_CHECK" == "1" ]]; then
+    log ""
+    log "=== гейт скорости: бюджет декода (прод-конфиг) ========================="
+    if CONFIG="$CONFIG" "$STRATA_DIR/.venv/bin/python" "$STRATA_DIR/tools/decode_budget.py"; then
+        log "бюджет декода: PASS"
+    else
+        log "  !!! бюджет декода: FAIL - decode/prefill вне бюджета (MS_TOKEN/FLOOR_PREFILL_TPS)"
+        failed+=("decode-budget")
+    fi
+fi
+
 log ""
 log "=== таблица прироста каждой фичи против эталона ($SUMMARY_BASE) ==="
 python3 - "$OUT_DIR" "$SUMMARY_BASE" "$SUMMARY_NOISE" <<'PY'
