@@ -582,27 +582,48 @@ def main() -> int:
         return 0
 
     if args.eval_ctx:
-        # ЕДИНСТВЕННЫЙ честный офлайн-замер: голова считает блок ЦЕЛИКОМ, с накопленным
-        # K/V от начала блока (как раунд движка), а не по срезам max_rows.  Именно это
-        # число должно предсказывать живой приём - прежние 83% мерили 512-окна.
+        # ЕДИНСТВЕННЫЙ честный офлайн-замер: голова считает БЛОК ЦЕЛИКОМ, с накопленным K/V
+        # от начала блока (как раунд движка), а не по срезам max_rows.  Декодные дампы идут
+        # парами по 2 строки с перекрытием в одну, поэтому блоки сначала СКЛЕИВАЮТСЯ в
+        # последовательности по позициям (как в обычном eval), а не оцениваются поштучно.
+        ne, taps_n = meta["n_embd"], meta["taps_n"]
+        groups, cur, last_pos = [], [], None
+        for path, off, pos0, n, toks in blocks:
+            join = last_pos is not None and pos0 <= last_pos + 1 and pos0 >= last_pos - 1
+            if cur and not join:
+                groups.append(cur); cur = []
+            cur.append((path, off, pos0, n, toks))
+            last_pos = pos0 + n - 1
+        if cur:
+            groups.append(cur)
         hit = tot = 0
-        for path, off, pos0, n, tokens in blocks:
-            if n < 8:
+        for g in groups:
+            pos_list, tok_list, embs_l, taps_l = [], [], [], []
+            for path, off, pos0, n, toks in g:
+                _p, tb, eb, tp = load_block(path, off, n, ne, taps_n)
+                pos_list.append(np.arange(pos0, pos0 + n))
+                tok_list.append(np.asarray(toks))
+                embs_l.append(eb); taps_l.append(tp)
+            pos_g = np.concatenate(pos_list); tok_g = np.concatenate(tok_list)
+            embs_g = np.concatenate(embs_l); taps_g = np.concatenate(taps_l)
+            # перекрытия: по абсолютной позиции оставляем ПЕРВУЮ строку (как в eval-склейке)
+            _, keep = np.unique(pos_g, return_index=True)
+            embs_g, taps_g, tok_g, pos_g = embs_g[keep], taps_g[keep], tok_g[keep], pos_g[keep]
+            if len(pos_g) < 8:
                 continue
-            ne, taps_n = meta["n_embd"], meta["taps_n"]
-            pos_b, tok_b, embs_b, taps_b = load_block(path, off, n, ne, taps_n)
-            lab = map_labels(tok_b[1:].astype(np.int64), tgt2draft)
+            lab = map_labels(tok_g[1:].astype(np.int64), tgt2draft)
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                lg = model.forward_ctx(torch.from_numpy(embs_b[:-1]).to(device),
-                                       torch.from_numpy(taps_b[:-1]).to(device),
-                                       torch.arange(pos_b, pos_b + n - 1, device=device),
+                lg = model.forward_ctx(torch.from_numpy(embs_g[:-1]).to(device),
+                                       torch.from_numpy(taps_g[:-1]).to(device),
+                                       torch.from_numpy(pos_g[:-1]).to(device),
                                        chunk=args.ctx_chunk)
             pred = lg.argmax(-1).cpu().numpy()
             ok = (lab >= 0) & (pred == lab)
             hit += int(ok.sum()); tot += int((lab >= 0).sum())
-            print(f"  {os.path.basename(path)} pos {pos_b}: {int(ok.sum())}/{int((lab >= 0).sum())}",
-                  flush=True)
-        print(f"eval-ctx (весь блок, движковый контекст): {hit} из {tot} ({100 * hit / max(tot, 1):.1f}%)")
+            print(f"  {os.path.basename(g[0][0])} pos {int(pos_g[0])}..{int(pos_g[-1])}: "
+                  f"{int(ok.sum())}/{int((lab >= 0).sum())}", flush=True)
+        print(f"eval-ctx (склейка, весь префикс, движковый контекст): {hit} из {tot} "
+              f"({100 * hit / max(tot, 1):.1f}%)")
         return 0
 
     if args.eval_only:
