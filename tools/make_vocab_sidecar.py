@@ -198,7 +198,10 @@ def main():
         infos += struct.pack("<IQ", ty, off)
         off += sz
     start = (len(head) + len(infos) + align - 1) // align * align
-    head += infos + b"\0" * (start - len(head))
+    head += infos
+    head += b"\0" * (start - len(head))          # pad to the declared data start
+    if len(head) != start:
+        raise SystemExit(f"header padding broken: {len(head)} != {start}")
 
     data_tok = rows_from_file(args.rows_emb, args.n, n_embd, ty_tok) if args.rows_emb \
         else b"\0" * (rs_tok * args.n)

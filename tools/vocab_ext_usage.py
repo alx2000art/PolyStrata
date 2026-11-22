@@ -10,9 +10,11 @@
         --out  ~/vocab_ext_usage.json
 
 --pack is the BASE pack (the oracle tokenizer: tools/strata_tokenizer.py).  The extended side is
-either an HF dir (--ext) or a built pack (--ext-pack); with both, the first --check-chars are
-encoded by each and the id sequences must be IDENTICAL - that is the end-to-end check that the
-pack conversion kept the tail 1:1 with the sidecar's row order.
+either an HF dir (--ext) or a built pack (--ext-pack).  MEASURE WITH --ext-pack: the pack is what
+the engine tokenizes with, and an HF pipeline assembled from a single pre_pattern does not match
+the engine's PRE_SEQUENCES (it differs already on base tokens).  With both given, the tail is
+checked structurally: every id >= base must carry the SAME token string in both - that is the
+alignment the sidecar's row order depends on.
 
 Output json: {new_id: occurrences} for every tail id the text uses - the input of
 prune_vocab_ext.py.
@@ -35,8 +37,6 @@ def main() -> int:
     ap.add_argument("--text", action="append", required=True, help="text file(s), repeatable")
     ap.add_argument("--out", help="where to write {new_id: count} json")
     ap.add_argument("--max-chars", type=int, default=0, help="0 = the whole file")
-    ap.add_argument("--check-chars", type=int, default=200000,
-                    help="how much text to compare id-for-id between --ext and --ext-pack")
     args = ap.parse_args()
     if not args.ext and not args.ext_pack:
         raise SystemExit("give --ext and/or --ext-pack")
@@ -55,27 +55,27 @@ def main() -> int:
         n_ext = len(ext_pk.tokens)
     print(f"[*] база: {n_base} токенов (пак), ext: {n_ext}")
 
+    # структурная сверка: id хвоста <-> строка токена <-> строка сайдкара.
+    # Последовательности id HF и пака сравнивать НЕЛЬЗЯ: HF-пайплайн, собранный по одному
+    # pre_pattern, расходится с PRE_SEQUENCES движка уже на базовых токенах (так и вышло).
+    if args.ext and ext_pk is not None:
+        hv = json.load(open(os.path.join(args.ext, "vocab.json"), encoding="utf-8"))
+        tail_hf = sorted((i, t) for t, i in hv.items() if i >= n_base)
+        tail_pk = [(i, ext_pk.tokens[i]) for i in range(n_base, len(ext_pk.tokens))]
+        if len(tail_hf) != len(tail_pk):
+            raise SystemExit(f"tail sizes differ: HF {len(tail_hf)} vs pack {len(tail_pk)}")
+        for (i, a), (j, b) in zip(tail_hf, tail_pk):
+            if i != j or a != b:
+                raise SystemExit(f"tail misaligned at id {i}: HF {a!r} vs pack {b!r}")
+        print(f"[+] хвост 1:1: {len(tail_hf)} токенов, id и строки совпадают")
+
     used_all = collections.Counter()
     for path in args.text:
         text = open(path, encoding="utf-8", errors="replace").read()
         if args.max_chars:
             text = text[: args.max_chars]
         ib = base.encode(text)
-        if ext_pk is not None:
-            ie = ext_pk.encode(text)
-            if ext_hf is not None and args.check_chars > 0:
-                head = text[: args.check_chars]
-                ih = ext_hf.encode(head).ids
-                ip = ext_pk.encode(head)
-                if ih != ip:
-                    k = next((j for j, (x, y) in enumerate(zip(ih, ip)) if x != y),
-                             min(len(ih), len(ip)))
-                    raise SystemExit(
-                        f"ID MISMATCH at {k}: HF {ih[k:k+5]} vs pack {ip[k:k+5]} "
-                        f"(lengths {len(ih)} vs {len(ip)}) - конвенция пака разъехалась")
-                print(f"[+] id-сверка HF/пак на {len(head):,} символах: совпало")
-        else:
-            ie = ext_hf.encode(text).ids
+        ie = ext_pk.encode(text) if ext_pk is not None else ext_hf.encode(text).ids
         used = collections.Counter(i for i in ie if i >= n_base)
         used_all.update(used)
         tot = sum(used.values())
