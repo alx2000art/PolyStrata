@@ -587,15 +587,32 @@ def main() -> int:
         # парами по 2 строки с перекрытием в одну, поэтому блоки сначала СКЛЕИВАЮТСЯ в
         # последовательности по позициям (как в обычном eval), а не оцениваются поштучно.
         ne, taps_n = meta["n_embd"], meta["taps_n"]
-        groups, cur, last_pos = [], [], None
-        for path, off, pos0, n, toks in blocks:
-            join = last_pos is not None and pos0 <= last_pos + 1 and pos0 >= last_pos - 1
-            if cur and not join:
-                groups.append(cur); cur = []
-            cur.append((path, off, pos0, n, toks))
-            last_pos = pos0 + n - 1
-        if cur:
-            groups.append(cur)
+        reads = [b for b in blocks if "decode" not in os.path.basename(b[0])]
+        decs = [b for b in blocks if "decode" in os.path.basename(b[0])]
+        groups = []
+        if reads and decs:
+            # ПАРНЫЙ дамп: запрос = read-блок (промпт) + декодные пары, чьи позиции лежат до
+            # начала следующего промпта.  Только так контекст = 1088 + 384 строки, как в раунде
+            for k, rb in enumerate(reads):
+                lo = rb[2] + rb[3]                        # промпт кончился здесь
+                hi = reads[k + 1][2] if k + 1 < len(reads) else 1 << 62
+                grp = [rb] + [d for d in decs if lo - 1 <= d[2] < hi]
+                if len(grp) > 1:
+                    groups.append(grp)
+        if groups:
+            print(f"  парных запросов: {len(groups)} (read-блоков {len(reads)}, "
+                  f"декодных {len(decs)})", flush=True)
+        else:
+            # без пар - прежняя склейка по позициям (декодные дампы одни)
+            cur, last_pos = [], None
+            for path, off, pos0, n, toks in blocks:
+                join = last_pos is not None and pos0 <= last_pos + 1 and pos0 >= last_pos - 1
+                if cur and not join:
+                    groups.append(cur); cur = []
+                cur.append((path, off, pos0, n, toks))
+                last_pos = pos0 + n - 1
+            if cur:
+                groups.append(cur)
         hit = tot = 0
         for g in groups:
             pos_list, tok_list, embs_l, taps_l = [], [], [], []

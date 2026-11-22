@@ -88,6 +88,13 @@ for k in list(env):
     if k.startswith("STRATA_EAGLE_"):
         del env[k]
 env["STRATA_EAGLE_DUMP_DECODE"] = d
+# READ_DIR: сюда лягут read-строки промптов (taps-*.bin).  Без них eval-ctx видит
+# только ~220 декодных строк, а движок внимает 1090 (промпт + декод) - контекст
+# не воспроизводится и офлайн-число не предсказывает живой приём
+_rd = os.environ.get("READ_DIR", "")
+if _rd:
+    os.makedirs(_rd, exist_ok=True)
+    env["STRATA_EAGLE_DUMP_TAPS"] = _rd
 args = [str(a) for a in (cfg.get("args") or [])]
 i = 0
 while i < len(args):
