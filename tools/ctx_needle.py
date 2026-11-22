@@ -32,6 +32,7 @@ from pathlib import Path
 CONFIG = Path(os.environ.get("CONFIG") or Path.home() / "PolyStrata/strata-dsv4-ud-iq2_xxs.json")
 ROWS = [int(x) for x in (os.environ.get("ROWS") or "8192 32768").split()]
 MARGIN = int(os.environ.get("NEEDLE_MARGIN") or 64)     # tokens kept for the question and the answer
+ANSWER_TOKENS = int(os.environ.get("NEEDLE_ANSWER_TOKENS") or 256)   # a thinking model spends the first ones
 TIMEOUT = float(os.environ.get("NEEDLE_TIMEOUT") or 3600)
 FILLER = ("Проверка длинного окна: набор предложений о модели, её кэше и декодировании, "
           "чтобы строка была длинной и не повторяла соседнюю. ")
@@ -90,6 +91,17 @@ def ask(base: str, key: str, model: str, prompt: str, max_tokens: int) -> tuple[
     return out, time.perf_counter() - t0
 
 
+def answer_text(out: dict) -> str:
+    """The model's words, thinking included: a thinking model spends the first tokens on reasoning, and a
+    short answer budget can leave `content` empty while the code sits in `reasoning_content`."""
+    parts = []
+    for ch in out.get("choices") or []:
+        msg = ch.get("message") or {}
+        parts.append(msg.get("content") or "")
+        parts.append(msg.get("reasoning_content") or "")
+    return " ".join(p for p in parts if p)
+
+
 def main() -> int:
     cfg = cfg_load(CONFIG)
     host, port = host_port(cfg)
@@ -124,16 +136,14 @@ def main() -> int:
         prompt = build(tok, want - MARGIN, code)
         n_local = len(tok.encode(prompt))
         try:
-            out, took = ask(base, key, model, prompt, 24)
+            out, took = ask(base, key, model, prompt, ANSWER_TOKENS)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             print(f"FAIL  {want:>7}: the request did not complete ({e})")
             bad += 1
             continue
         usage = out.get("usage") or {}
         seen = int(usage.get("prompt_tokens") or 0)
-        answer = ""
-        for ch in out.get("choices") or []:
-            answer += (ch.get("message") or {}).get("content") or ""
+        answer = answer_text(out)
         hit = code.lower() in answer.lower()
         prefill = seen / took if took > 0 and seen else 0.0
         verdict = "PASS" if (hit and seen >= want * 0.9) else "FAIL"

@@ -505,7 +505,7 @@ variant_done() {  # $1 = имя: уже есть валидный захват �
 # печатает сервер после каждого запроса).  Конфиг после проверки восстанавливается
 # из бэкапа (restore_config), сервер поднимается на исходных настройках.
 warm_check() {
-  local pin="$OUT_DIR/warm-check-request.json" text reused verdict=1 okboot=0 reuse_count=0
+  local pin="$OUT_DIR/warm-check-request.json" text reused verdict=0 okboot=0 reuse_count=0
   if [[ -n "$WARM_CHECK_PROMPT" && -f "$WARM_CHECK_PROMPT" ]]; then
     text="$(cat "$WARM_CHECK_PROMPT")"
   else
@@ -558,11 +558,14 @@ PY
   reuse_count=$(grep -oE "prompt [0-9]+ tokens = [0-9]+ reused" "$OUT_DIR/server.log.last" | tail -1 \
                 | grep -oE "[0-9]+ reused" | grep -oE "^[0-9]+")
   reuse_count=${reuse_count:-0}
+  local srv_line
+  srv_line=$(grep -oE "prompt [0-9]+ tokens = [0-9]+ reused.*" "$OUT_DIR/server.log.last" | tail -1)
   if [[ "$okboot" == 1 && "$reused" == "ok" && "$reuse_count" -ge 2048 ]]; then
     log "  warm-check: ПРОЙДЕНА — пин прочитан на старте, запрос переиспользовал $reuse_count токенов"
   else
-    verdict=0
+    verdict=1
     log "  !!! warm-check: ПРОВАЛ (прочитано: $okboot, ответ: $reused, reused: $reuse_count) — лог: $OUT_DIR/server.log.last"
+    log "      сервер сказал: ${srv_line:-<строки reused нет>}"
   fi
   rm -f "$pin"
   log "  warm-check: восстанавливаю конфиг и сервер ..."
