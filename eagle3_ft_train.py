@@ -244,6 +244,38 @@ class Eagle3Head(nn.Module):
         normed = rmsnorm(hidden, self.out_norm.weight, self.eps)
         return self.lm_head(normed), hidden, k, v
 
+    def forward_ctx(self, embs, taps, pos, chunk=128):
+        """Шаг головы С ДВИЖКОВЫМ КОНТЕКСТОМ: K/V копятся от начала блока, а не внутри
+        чанка.  Раньше каждый срез резался по max_rows, и строка в конце среза видела 64-512
+        ключей там, где движок подаёт 1090 (весь префикс) - отсюда 83% офлайн и 0% живьём.
+        Считаем чанками по chunk строк: q/k/v чанка, стек K/V = всё предыдущее + чанк,
+        внимание только по позициям <= своей; память O(chunk * T), не O(T^2)."""
+        T = embs.shape[0]
+        outs = []
+        K = V = None
+        for c0 in range(0, T, chunk):
+            c1 = min(c0 + chunk, T)
+            e_c, t_c, p_c = embs[c0:c1], taps[c0:c1], pos[c0:c1]
+            M = e_c.shape[0]
+            h_in = self.fc(t_c.reshape(M, -1))
+            x = torch.cat((rmsnorm(e_c, self.ln1.weight, self.eps),
+                           rmsnorm(h_in, self.hnorm.weight, self.eps)), dim=-1)
+            q = rope_apply(self.wq(x).view(M, self.n_head, self.hd), p_c, self.rope)
+            k = rope_apply(self.wk(x).view(M, self.n_kv, self.hd), p_c, self.rope)
+            v = self.wv(x).view(M, self.n_kv, self.hd)
+            K = k if K is None else torch.cat((K, k), dim=0)
+            V = v if V is None else torch.cat((V, v), dim=0)
+            per = self.n_head // self.n_kv
+            qg = q.view(M, self.n_kv, per, self.hd)
+            att = torch.einsum("tqph,skh->tqps", qg, K) / math.sqrt(self.hd)
+            # строка t внимает ключам s, чья позиция <= её позиции (как attn_rows в движке)
+            mask = pos[:K.shape[0]].view(1, -1) <= p_c.view(-1, 1)
+            w = torch.softmax(att.masked_fill(~mask[:, None, None, :], float("-inf")), dim=-1)
+            o = torch.einsum("tqps,skh->tqph", w, V).reshape(M, self.n_head * self.hd)
+            hidden = self._head_out(h_in, o)
+            outs.append(self.lm_head(rmsnorm(hidden, self.out_norm.weight, self.eps)))
+        return torch.cat(outs, dim=0)
+
     def step_hidden(self, h_prev, embs, pos):
         """Шаг рекурсии decode-раунда: вход h - СОБСТВЕННОЕ скрытое состояние головы с прошлого шага
         (не fc(taps)): x = [ln1(emb) | hnorm(h_prev)], тот же слой, каузально по срезу."""
@@ -375,6 +407,10 @@ def main() -> int:
                     help="без обучения: top-1/рекурсия головы на дампах - как TEACH движка; "
                          "сверка форварда тренера с движком")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--eval-ctx", action="store_true",
+                    help="офлайн по ЦЕЛОМУ блоку с накопленным K/V (движковый контекст)")
+    ap.add_argument("--ctx-chunk", type=int, default=128, help="строк за шаг внимания")
+
     ap.add_argument("--replay-round", default=None,
                     help="дамп раунда mov'а (STRATA_EAGLE_DUMP_ROUND): прогнать голову на ЕГО состоянии")
     ap.add_argument("--replay-ctx", default=None,
@@ -543,6 +579,30 @@ def main() -> int:
             tot += len(lab)
         print(f"покрытие d2t: {cov} из {tot} позиций ({100 * cov / max(tot, 1):.1f}%) — "
               f"это потолок top-1 головы на этом корпусе")
+        return 0
+
+    if args.eval_ctx:
+        # ЕДИНСТВЕННЫЙ честный офлайн-замер: голова считает блок ЦЕЛИКОМ, с накопленным
+        # K/V от начала блока (как раунд движка), а не по срезам max_rows.  Именно это
+        # число должно предсказывать живой приём - прежние 83% мерили 512-окна.
+        hit = tot = 0
+        for path, off, pos0, n, tokens in blocks:
+            if n < 8:
+                continue
+            ne, taps_n = meta["n_embd"], meta["taps_n"]
+            pos_b, tok_b, embs_b, taps_b = load_block(path, off, n, ne, taps_n)
+            lab = map_labels(tok_b[1:].astype(np.int64), tgt2draft)
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+                lg = model.forward_ctx(torch.from_numpy(embs_b[:-1]).to(device),
+                                       torch.from_numpy(taps_b[:-1]).to(device),
+                                       torch.arange(pos_b, pos_b + n - 1, device=device),
+                                       chunk=args.ctx_chunk)
+            pred = lg.argmax(-1).cpu().numpy()
+            ok = (lab >= 0) & (pred == lab)
+            hit += int(ok.sum()); tot += int((lab >= 0).sum())
+            print(f"  {os.path.basename(path)} pos {pos_b}: {int(ok.sum())}/{int((lab >= 0).sum())}",
+                  flush=True)
+        print(f"eval-ctx (весь блок, движковый контекст): {hit} из {tot} ({100 * hit / max(tot, 1):.1f}%)")
         return 0
 
     if args.eval_only:
