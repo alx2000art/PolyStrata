@@ -237,6 +237,8 @@ public:
     void load(const Options& o);
 
     int n_vocab() const { return n_vocab_; }
+    /// The main file's vocab: ids from here up live in the --vocab-ext sidecar.
+    int main_vocab() const { return main_vocab_ ? main_vocab_ : n_vocab_; }
     /// The rows of the output a guess is picked from.  A guess that is never right costs a window's place and no
     /// token, so the rare tokens may be left out, where the vocabulary has the common ones first.
     int draft_rows() const {

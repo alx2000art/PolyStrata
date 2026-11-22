@@ -871,6 +871,7 @@ int serve(Session& ss) {
                 continue;
             }
             const int nv = engine.n_vocab();
+            static const bool logp_dbg = std::getenv("STRATA_LOGP_DEBUG") != nullptr;
             bool outside = false;
             for (int32_t t : score_ids)
                 outside = outside || t < 0 || t >= nv;
@@ -885,6 +886,17 @@ int serve(Session& ss) {
                 for (size_t i = 0; i + 1 < score_ids.size(); ++i) {
                     engine.eval(&score_ids[i], 1, true);
                     const float* lg = engine.logits();
+                    if (logp_dbg && i == 0) {
+                        const int mb = engine.main_vocab();
+                        float mxb = lg[0], mxe = -1e30f;
+                        for (int v = 1; v < mb; ++v) mxb = std::max(mxb, lg[v]);
+                        for (int v = mb; v < nv; ++v) mxe = std::max(mxe, lg[v]);
+                        std::fprintf(stderr, "[logp] nv=%d main=%d base_max=%.3f ext_max=%.3f ext:",
+                                     nv, mb, mxb, mxe);
+                        for (int v = mb; v < mb + 8 && v < nv; ++v) std::fprintf(stderr, " %.2f", lg[v]);
+                        std::fprintf(stderr, "\n");
+                        std::fflush(stderr);
+                    }
                     float mx = lg[0];
                     for (int v = 1; v < nv; ++v) mx = std::max(mx, lg[v]);
                     double sum = 0.0;
