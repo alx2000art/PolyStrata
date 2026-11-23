@@ -720,7 +720,7 @@ fi
 
 for entry in "${VARIANTS[@]}"; do
   name="${entry%%|*}"
-  spec="${entry#|}"
+  spec="${entry#*|}"
   [[ "$spec" == "$entry" ]] && spec=""     # строки без "|" вообще
   if [[ -z "$spec" ]]; then
     log "  !!! у ячейки '$name' пустая спека — таблица VARIANTS собрана неверно."
