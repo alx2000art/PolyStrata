@@ -8,6 +8,7 @@
 
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/iq_avx2.hpp"
+#include "strata/kernels/cpu/iq_avx512.hpp"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,8 @@ namespace {
 struct Iq256 {
     bool on = false;
     bool down = true;   ///< the down projections too (STRATA_POLY_IQ256_DOWN=0 keeps them on ggml: for the A/B)
+    bool i512 = false;  ///< the AVX-512 rows for a group of 2+ tokens (STRATA_POLY_IQ512=1; ignored without AVX-512)
+    int i512_min = 2;   ///< from how many tokens the AVX-512 rows run (STRATA_POLY_IQ512_MIN; the core engine's #152 rule)
     Iq256() {
         const char* v = std::getenv("STRATA_POLY_IQ256");
         const bool want = v != nullptr && std::atoi(v) == 1;
@@ -37,10 +40,17 @@ struct Iq256 {
         on = want && isa;
         const char* d = std::getenv("STRATA_POLY_IQ256_DOWN");
         down = d == nullptr || std::atoi(d) != 0;
+        const bool isa512 = strata::kernels::cpu::cpu_avx512_ok();
+        const char* w = std::getenv("STRATA_POLY_IQ512");
+        i512 = on && isa512 && w != nullptr && std::atoi(w) != 0;
+        if (const char* m = std::getenv("STRATA_POLY_IQ512_MIN")) i512_min = std::max(1, std::atoi(m));
         if (v != nullptr)
-            std::fprintf(stderr, "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s, down %s)\n",
+            std::fprintf(stderr,
+                         "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s, down %s; iq512 %s, AVX-512 %s, "
+                         "min %d tokens)\n",
                          on ? "on" : "off", isa ? "yes" : "no",
-                         strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no", down ? "on" : "off");
+                         strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no", down ? "on" : "off",
+                         i512 ? "on" : "off", isa512 ? "yes" : "no", i512_min);
     }
     bool use(int gu_type, int d_type, int vec_gu, int vec_d) const {
         return on && (gu_type == GGML_TYPE_IQ2_XS || gu_type == GGML_TYPE_IQ3_XXS) &&
@@ -48,6 +58,9 @@ struct Iq256 {
                vec_d == GGML_TYPE_Q8_K;
     }
     bool use_down() const { return on && down; }
+    /// The 512-bit rows decode 64 weight values per iteration for a whole group, where iq256 decodes 32: on an
+    /// AVX-512 CPU they are the measured-fastest form from two tokens on (the core engine's #152 rule).
+    bool use512(int type, int g) const { return i512 && g >= i512_min && strata::kernels::cpu::iq512_supported(type); }
 };
 
 namespace cpu = strata::kernels::cpu;
@@ -311,8 +324,16 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                         gbuf[k] = gp + (size_t) k * n_ff;
                         ubuf[k] = hp + (size_t) j * n_ff;
                     }
-                    cpu::iq256_rows(gu_type, e.gate, gu_row, n_embd, acts, g, gbuf, tk.r0, tk.r1);
-                    cpu::iq256_rows(gu_type, e.up, gu_row, n_embd, acts, g, ubuf, tk.r0, tk.r1);
+                    // The 512-bit rows decode 64 weight values per iteration when AVX-512 is there and the group is
+                    // two tokens or more; below that the AVX-2 rows (the core engine's measured rule).
+                    const bool w512 = kIq.use512(gu_type, g);
+                    if (w512) {
+                        cpu::iq512_rows(gu_type, e.gate, gu_row, n_embd, acts, g, gbuf, tk.r0, tk.r1);
+                        cpu::iq512_rows(gu_type, e.up, gu_row, n_embd, acts, g, ubuf, tk.r0, tk.r1);
+                    } else {
+                        cpu::iq256_rows(gu_type, e.gate, gu_row, n_embd, acts, g, gbuf, tk.r0, tk.r1);
+                        cpu::iq256_rows(gu_type, e.up, gu_row, n_embd, acts, g, ubuf, tk.r0, tk.r1);
+                    }
                     if (check && checked.fetch_add(1) == 0) {
                         const int j = byp[i];
                         const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
@@ -326,8 +347,8 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                             exact = exact && !std::memcmp(&gr, &gv, 4) && !std::memcmp(&ur, &uv, 4);
                             maxd = std::max({maxd, std::fabs(gr - gv), std::fabs(ur - uv)});
                         }
-                        std::fprintf(stderr, "strata-poly: iq256 vs ggml (first rows): %s, max |diff| %.3g\n",
-                                     exact ? "bit-identical" : "DIFFERS", (double) maxd);
+                        std::fprintf(stderr, "strata-poly: %s vs ggml (first rows): %s, max |diff| %.3g\n",
+                                     w512 ? "iq512" : "iq256", exact ? "bit-identical" : "DIFFERS", (double) maxd);
                     }
                     for (int k = 0; k < g; ++k) {
                         const int j = byp[i + k];
@@ -458,7 +479,11 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                         acts[k] = hqp + (size_t) experts[j].row * h_bytes;
                         dbuf[k] = dp + (size_t) k * r1;
                     }
-                    cpu::iq256_rows(d_type, e.down, d_row, n_ff, acts, g, dbuf, r0, r1);
+                    const bool w512 = kIq.use512(d_type, g);
+                    if (w512)
+                        cpu::iq512_rows(d_type, e.down, d_row, n_ff, acts, g, dbuf, r0, r1);
+                    else
+                        cpu::iq256_rows(d_type, e.down, d_row, n_ff, acts, g, dbuf, r0, r1);
                     if (std::getenv("STRATA_POLY_IQ256_CHECK") != nullptr) {
                         static std::atomic<int> checked{0};
                         if (checked.fetch_add(1) == 0) {
@@ -472,8 +497,8 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                                 exact = exact && !std::memcmp(&ref, &dp[r], 4);
                                 maxd = std::max(maxd, std::fabs(ref - dp[r]));
                             }
-                            std::fprintf(stderr, "strata-poly: iq256 down vs ggml (first rows): %s, max |diff| %.3g\n",
-                                         exact ? "bit-identical" : "DIFFERS", (double) maxd);
+                            std::fprintf(stderr, "strata-poly: %s down vs ggml (first rows): %s, max |diff| %.3g\n",
+                                         w512 ? "iq512" : "iq256", exact ? "bit-identical" : "DIFFERS", (double) maxd);
                         }
                     }
                     for (int k = 0; k < g; ++k) {

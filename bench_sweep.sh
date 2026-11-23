@@ -227,9 +227,12 @@ VARIANTS+=("78-on-merge|$WORKING_SPEC ENV:STRATA_POLY_MERGE=1")
 # --- CPU lane: родные iq256-ядра (iq_avx2.cpp) в poly.  Пара 80/81 меряет эффект, 82 отделяет down-проекции
 # (STRATA_POLY_IQ256_DOWN=0 оставляет их на ggml).  80 — та же рабочая спека, что 10-all-on: контроль дрейфа
 # рядом с 81, иначе разница между 10-all-on и 81 была бы разницей во времени, а не в лейне.
+# 83/84: AVX-512-ядра (iq_avx512.cpp) от двух токенов (83, правило ядра) и на одиночном токене (84).
 VARIANTS+=("80-eta-iq256off|$WORKING_SPEC")
 VARIANTS+=("81-on-iq256|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1")
 VARIANTS+=("82-on-iq256-gu|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY_IQ256_DOWN=0")
+VARIANTS+=("83-on-iq256-512|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY_IQ512=1")
+VARIANTS+=("84-on-iq512-min1|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY_IQ512=1 ENV:STRATA_POLY_IQ512_MIN=1")
 
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
@@ -383,7 +386,8 @@ env = cfg.get("env") or {}
 # (or by a previous variant) must not leak into the baselines - the diag runs' stale TEACH/FREEZE
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
-           "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK")
+           "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
+           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -974,7 +978,8 @@ if noise_d is not None:
 if "80-eta-iq256off" in names:
     lines.append("")
     lines.append("## CPU lane iq256 (пара к `80-eta-iq256off`)")
-    for nm, lbl in (("81-on-iq256", "оба (gate/up + down)"), ("82-on-iq256-gu", "только gate/up")):
+    for nm, lbl in (("81-on-iq256", "оба (gate/up + down)"), ("82-on-iq256-gu", "только gate/up"),
+                    ("83-on-iq256-512", "iq512 на группах 2+ токена"), ("84-on-iq512-min1", "iq512 и на 1 токене")):
         if nm in names:
             try:
                 nn, dd, pp, ta, tb = delta(os.path.join(out_dir, "80-eta-iq256off.json"),
