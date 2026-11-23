@@ -188,7 +188,9 @@ if not rows:
     out.append("# [moe]-строк нет")
     out.append("")
     out.append("Движок не печатал [moe]. Проверь: (1) сборка из ветки с этим отчётом, "
-               "(2) в логе нет строки `debug env var(s) ignored` (нужен STRATA_EAGLE_DEBUG=1).")
+               "(2) в логе нет строки `debug env var(s) ignored` (нужен STRATA_EAGLE_DEBUG=1). "
+               "Если оба в порядке: все эксперты слоёв лежали в VRAM и работал быстрый путь moe_card - "
+               "он [moe]-строку не печатает, и стенсинга в этом запросе не было.")
     print("\n".join(out))
     open(report_path, "w", encoding="utf-8").write("\n".join(out) + "\n")
     raise SystemExit(1)
@@ -206,7 +208,8 @@ if stats:
 else:
     out.append("- строки статистики движка не нашёл; wall %.2f s, completion %d -> %.2f ms/токен"
                % (wall, gen, wall * 1000.0 / max(gen, 1)))
-out.append("- [moe]-строк: %d всего, %d взято как декод в %d слоях" % (len(rows), len(dec), n_il))
+out.append("- [moe]-строк: %d всего, %d взято как декод в %d слоях (только слои со стенсингом: слой, "
+           "все эксперты которого в VRAM, идёт путём moe_card и не печатается)" % (len(rows), len(dec), n_il))
 if len(dec) != want:
     out.append("- (!) декод-строк меньше ожидаемого (%d < %d) - суммы на токен занижены" % (len(dec), want))
 
@@ -229,7 +232,9 @@ out.append("| copies (внутри card) | %.1f |" % copies)
 if stats:
     total = 1000.0 / stats["tg"]
     out.append("")
-    out.append("**Остаток вне MoE**: %.1f мс/токен из %.1f (dense, attention, выход, хост вне moe)." % (total - route - card, total))
+    out.append("**Остаток вне staged-MoE**: %.1f мс/токен из %.1f (dense, attention, выход, хост вне moe, "
+               "и слои, где все эксперты в VRAM - они идут путём moe_card без [moe]-строки)."
+               % (total - route - card, total))
 
 def layer_means(key):
     g = {}
