@@ -443,6 +443,14 @@ Engine::~Engine() {
 
 void* Engine::dmalloc(size_t bytes, const char* what) {
     void* p = nullptr;
+    // A capture that allocates dies on the card ("operation not permitted when stream is capturing"), and an
+    // engine restarted after that dies the same way on its next request - the head-mix weights were such a case,
+    // loaded eagerly now.  Say it in words before the driver's message can be taken for anything else: the
+    // buffer belongs before the first decode, not in the middle of a recorded layer.
+    if (recording_)
+        throw std::runtime_error("strata-poly: " + std::string(what) +
+                                 " is allocated while a CUDA graph is being captured: it must be made before the "
+                                 "first decode (a captured launch cannot allocate)");
     const cudaError_t e = cudaMalloc(&p, std::max<size_t>(bytes, 256));
     if (e != cudaSuccess) {
         cudaGetLastError();   // as ck() does
