@@ -9,7 +9,7 @@
 #   (3) наш русский тюн хуже оригинала -> на en/zh/code приём высокий, на ru низкий.
 #
 # Домены: en (английская проза из доков), code (исходники движка), ru (книги),
-#         zh (файл ~/eagle_domains/zh.txt - если нет, домен пропускается).
+#         zh — только по запросу (DOMAINS="en code ru zh"; файл ~/eagle_domains/zh.txt).
 # Каждый домен = N разных промптов по ~3000 символов, MAX_TOKENS на ответ.
 #
 # Запуск:  N=12 MAX_TOKENS=256 ./eagle_domain_test.sh
@@ -22,6 +22,9 @@ CORPUS="${CORPUS:-$HOME/corpus/corpus_clean.txt}"
 OUT="${OUT:-$HOME/eagle_domains}"
 N="${N:-12}"
 MAX_TOKENS="${MAX_TOKENS:-256}"
+# Домены прогона.  zh по умолчанию выключен: один промпт, шум и время, а для быстрых A/B он ничего не решает.
+# Вернуть: DOMAINS="en code ru zh" ./eagle_domain_test.sh
+DOMAINS="${DOMAINS:-en code ru}"
 SRC="${SRC:-$STRATA_DIR/src/poly}"
 GPU_PY="${GPU_PY:-$HOME/.gpu-bench/bin/python}"
 
@@ -86,10 +89,10 @@ PY
 
 # ------------------------- 2. прогоны по доменам -------------------------------
 log ""
-log "[2/3] прогоны: домены en/code/ru/zh, по $N промптов, MAX_TOKENS=$MAX_TOKENS ..."
+log "[2/3] прогоны: домены $DOMAINS, по $N промптов, MAX_TOKENS=$MAX_TOKENS ..."
 SLOG="$STRATA_DIR/eagle_collect/server.log"
 printf '%-6s %10s %10s %10s %8s\n' домен принято догадок tok/s раундов
-for dom in en code ru zh; do
+for dom in $DOMAINS; do
   list="$OUT/$dom.list"
   [[ -s "$list" ]] || { printf '%-6s %10s\n' "$dom" "(нет списка)"; continue; }
   PROMPT_LIST="$list" N="$N" MAX_TOKENS="$MAX_TOKENS" DEC_DIR="/tmp/dom-$dom" \
@@ -105,6 +108,8 @@ done
 
 log ""
 log "[3/3] готово. Логи: $OUT/<домен>.server.log, прогоны: $OUT/<домен>.run.log"
-log "если zh не было: получить китайский текст можно тем же сервером -"
-log '  python3 - <<PY  (одним запросом, затем положить ответ в ~/eagle_domains/zh.txt)'
-log '  см. LOOKUP ниже: PROMPT_LIST=~/eagle_domains/zh.list'
+if [[ " $DOMAINS " == *" zh "* ]]; then
+  log "если zh не было: получить китайский текст можно тем же сервером -"
+  log '  python3 - <<PY  (одним запросом, затем положить ответ в ~/eagle_domains/zh.txt)'
+  log '  см. LOOKUP ниже: PROMPT_LIST=~/eagle_domains/zh.list'
+fi
