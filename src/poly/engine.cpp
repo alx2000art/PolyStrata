@@ -2868,9 +2868,17 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
     // the width itself.
     route_used_ = opt_.resident_topk > 0 && n <= 16 ? std::min(opt_.resident_topk, n_used_) : n_used_;
     const size_t e_row = (size_t) n_embd_;
+    // The profile ([moe] with STRATA_POLY_STAGE2_DEBUG): this is the answer's path, one line per layer per
+    // token.  moe_rows (a prompt batch) prints its own with card/copies; the fields here are wait (the router's
+    // copy), host (the routing and the lists), cpu (the experts the CPU took), total (this call's wall time).
+    static const bool dbg_ = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
+    const Clock::time_point t_enter = Clock::now();
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+    const Clock::time_point t_wait_end = Clock::now();
     stats_.route_wait_ms += ms_since(t0);
+    double route_host_ms = 0, cpu_ms = 0;
+    int cached_all = 0, host_all = 0;
 
     const float limit = clamp_exp_[(size_t) il];
     const size_t xq_row = kernels::native_q8_1_bytes(n_embd_);
@@ -2888,6 +2896,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         int32_t host_e[kCpuRows * kMaxUsed], host_k[kCpuRows * kMaxUsed];   // a host entry's expert and its place
         float host_rel[kCpuRows * kMaxUsed];   // and its weight's share of its token's experts' weight
         int n_host = 0, n_cached = 0;
+        const Clock::time_point t_rt = Clock::now();
         for (int t = 0; t < m; ++t) {
             int ids[kMaxUsed];
             float w[kMaxUsed];
@@ -2911,6 +2920,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                                   L.exp_down + e * L.d_bytes, w[k], t};
             }
         }
+        route_host_ms += ms_since(t_rt);
         // Strata's STRATA_ROUTE_TAIL_SKIP: an expert outside VRAM that every token here ranks at tail_skip or later
         // adds little to any of them, so it is not computed.  The others keep the weights the router gave them.
         // Options::skip_weight in place of the places: one whose weight is under that share of its token's experts'
@@ -2986,6 +2996,8 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
 
         // The next layer's router wait is what makes h_cpu_ free to write again.
         float* cpu = h_cpu_ + (size_t) at * e_row;
+        cached_all += n_cached;
+        host_all += n_host;
         if (n_host == 0) {
             launch();
             std::fill(cpu, cpu + (size_t) m * e_row, 0.f);
@@ -2996,7 +3008,17 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
                     h_x_ + (size_t) at * e_row, limit, gelu_, cpu, opt_.cpu_tiled != 0,
                     n_cached > 0 || (first && at == 0) ? &launch : nullptr);
-        stats_.cpu_ms += ms_since(t0);
+        const double cm = ms_since(t0);
+        cpu_ms += cm;
+        stats_.cpu_ms += cm;
+    }
+    if (dbg_) {
+        const double wait = std::chrono::duration<double, std::milli>(t_wait_end - t_enter).count();
+        std::fprintf(stderr,
+                     "[moe] il=%d n=%d route %.0f ms (wait %.0f, host %.0f), cpu %.0f ms, total %.0f ms, "
+                     "cached %d, host_experts %d\n",
+                     il, n, wait + route_host_ms, wait, route_host_ms, cpu_ms, ms_since(t_enter), cached_all,
+                     host_all);
     }
     return any_host;
 }
@@ -3742,8 +3764,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             const double card_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_card).count();
             const double route_ms = std::chrono::duration<double, std::milli>(t_route_end - t0).count();
             const double wait_ms = std::chrono::duration<double, std::milli>(t_after_wait - t0).count();
-            std::fprintf(stderr, "[moe] il=%d route %.0f ms (wait %.0f, host %.0f), card %.0f ms, copies %.0f ms, "
-                                 "rounds %d, cpu_rows %d\n", il, route_ms, wait_ms, route_ms - wait_ms, card_ms, copies,
+            std::fprintf(stderr, "[moe] il=%d n=%d route %.0f ms (wait %.0f, host %.0f), card %.0f ms, copies %.0f ms, "
+                                 "rounds %d, cpu_rows %d\n", il, n, route_ms, wait_ms, route_ms - wait_ms, card_ms, copies,
                          n_round, n_cpu);
         }
     };

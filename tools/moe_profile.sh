@@ -45,10 +45,23 @@ ELOG="${ELOG:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding=
 [[ -n "$ELOG" ]] || ELOG="${CONFIG%.*}.log"
 
 PROMPT_FILE="${1:-}"
-MAX_TOKENS="${2:-${MAX_TOKENS:-64}}"
+MAX_TOKENS="${2:-${MAX_TOKENS:-96}}"
+WARM="${WARM:-3}"                 # warm-up requests with the same prompt before the measured one
+PROMPT_CHARS="${PROMPT_CHARS:-0}" # > 0: repeat the prompt's text up to this many characters (~3 per Russian token)
 PROMPT="${PROMPT:-}"
 if [[ -n "$PROMPT_FILE" && -f "$PROMPT_FILE" ]]; then PROMPT="$(cat "$PROMPT_FILE")"; fi
 [[ -n "$PROMPT" ]] || PROMPT="Lighthouses along the Baltic were first lit under Peter the Great: a tower fire in Kronstadt in 1704 began a tradition whose core has never changed - a light source, a Fresnel lens, and a published table of characteristics that lets a captain tell one light from another. Many of those towers still run on nineteenth-century optics, with a solar panel where the keeper used to sleep. Tell me what a lighthouse keeper's day looked like in 1900, in two short paragraphs."
+if (( PROMPT_CHARS > 0 )); then
+  PROMPT=$("$PY" - "$PROMPT_CHARS" "$PROMPT" <<'PYPAD'
+import sys
+target, text = int(sys.argv[1]), sys.argv[2].rstrip()
+if text and len(text) < target:
+    n = (target - len(text)) // (len(text) + 2) + 1
+    text = ("\n\n".join([text] * n) + "\n\n" + text)
+print(text)
+PYPAD
+)
+fi
 
 OUT_DIR="${OUT_DIR:-$STRATA_DIR/moe_profile-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT_DIR" || exit 1
@@ -117,28 +130,13 @@ if ! wait_ready; then
 fi
 echo "  модель загружена"
 
-# A warm-up request: the first one after a start pays the cold page cache and the expert cache's first fill
-# (measured ~15 tok/s against ~30), and its lines would sit in front of the profile's tail anyway.
-echo "  прогрев (16 токенов) ..."
-"$PY" - "$HOST" "$PORT" "$API_KEY" "$MODEL" <<'PYWARM'
-import json, sys, urllib.request
-host, port, key, model = sys.argv[1:5]
-body = {"model": model, "messages": [{"role": "user", "content": "Скажи одно короткое слово по-русски."}],
-        "max_tokens": 16, "temperature": 0.0, "stream": False,
-        "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none",
-        "thinking": {"type": "disabled"}}
-req = urllib.request.Request("http://%s:%s/v1/chat/completions" % (host, port),
-                             data=json.dumps(body).encode(),
-                             headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-with urllib.request.urlopen(req, timeout=1800) as r:
-    json.load(r)
-PYWARM
-sleep 2
-
-echo "  запрос: $MAX_TOKENS токенов ..."
-"$PY" - "$HOST" "$PORT" "$API_KEY" "$MODEL" "$MAX_TOKENS" "$BODY" "$RESP" "$PROMPT" <<'PYREQ'
+# A request, saved only when a path is given.  The measured one goes last; the warm-ups use the SAME prompt,
+# because the first request after a start pays the cold page cache and the expert cache's first fill, and a
+# different prompt would warm another set of experts (the first profile ran at ~15 tok/s for that reason).
+ask() {  # $1 = max_tokens, $2 = save path ("" = discard), $3 = prompt
+  "$PY" - "$HOST" "$PORT" "$API_KEY" "$MODEL" "$1" "$2" "$3" "$BODY" <<'PYREQ'
 import json, sys, time, urllib.request
-host, port, key, model, max_tokens, body_path, resp_path, prompt = sys.argv[1:9]
+host, port, key, model, max_tokens, save_path, prompt, body_path = sys.argv[1:9]
 body = {
     "model": model,
     "messages": [{"role": "user", "content": prompt}],
@@ -158,11 +156,23 @@ t0 = time.perf_counter()
 with urllib.request.urlopen(req, timeout=1800) as r:
     resp = json.load(r)
 resp["_wall_s"] = time.perf_counter() - t0
-with open(resp_path, "w", encoding="utf-8") as f:
-    json.dump(resp, f, ensure_ascii=False, indent=1)
+if save_path:
+    with open(save_path, "w", encoding="utf-8") as f:
+        json.dump(resp, f, ensure_ascii=False, indent=1)
 u = resp.get("usage") or {}
-print("  ответ: completion %s, prompt %s, wall %.2f s" % (u.get("completion_tokens"), u.get("prompt_tokens"), resp["_wall_s"]))
+print("  ответ: completion %s, prompt %s, wall %.2f s"
+      % (u.get("completion_tokens"), u.get("prompt_tokens"), resp["_wall_s"]))
 PYREQ
+}
+
+for w in $(seq 1 "$WARM"); do
+  echo "  прогрев $w/$WARM (32 токена, тот же промпт) ..."
+  ask 32 "" "$PROMPT"
+  sleep 2
+done
+
+echo "  запрос: $MAX_TOKENS токенов ..."
+ask "$MAX_TOKENS" "$RESP" "$PROMPT"
 
 sleep 3   # строка статистики движка печатается после ответа
 # The engine's log is append-only across restarts: keep only this run's segment, from the size taken before
@@ -182,123 +192,4 @@ start_server
 wait_ready || echo "  (!) сервер не поднялся после профиля - смотри $LOG"
 trap - INT TERM
 
-"$PY" - "$OUT_DIR/engine.log.profile" "$RESP" "$REPORT" <<'PYAN'
-import json, re, sys
-log_path, resp_path, report_path = sys.argv[1:4]
-text = open(log_path, encoding="utf-8", errors="replace").read()
-resp = json.load(open(resp_path, encoding="utf-8"))
-u = resp.get("usage") or {}
-gen = int(u.get("completion_tokens") or 0)
-wall = float(resp.get("_wall_s") or 0.0)
-
-stats = None
-m = re.findall(r"prompt (\d+) tokens = (\d+) reused \+ \d+(?: of \d+)? read in ([\d.]+) ms \(([\d.]+) tok/s\), "
-               r"(\d+) generated in ([\d.]+) ms \(([\d.]+) tok/s\)", text)
-if m:
-    p, reused, read_ms, pp, g, gen_ms, tg = m[-1]
-    stats = dict(prompt=int(p), reused=int(reused), read_ms=float(read_ms), pp=float(pp),
-                 gen=int(g), gen_ms=float(gen_ms), tg=float(tg))
-
-rx = re.compile(r"\[moe\] il=(\d+) route (\d+) ms(?: \(wait (\d+), host (\d+)\))?, card (\d+) ms, copies (\d+) ms, "
-                r"rounds (\d+), cpu_rows (\d+)")
-rx2 = re.compile(r"\[moe\] il=(\d+) cpu (\d+) ms / gpu (\d+) ms")
-rows, pairs = [], {}
-for line in text.splitlines():
-    mm = rx.search(line)
-    if mm:
-        rows.append(dict(il=int(mm.group(1)), route=float(mm.group(2)),
-                         wait=float(mm.group(3)) if mm.group(3) else None,
-                         host=float(mm.group(4)) if mm.group(4) else None,
-                         card=float(mm.group(5)), copies=float(mm.group(6)),
-                         rounds=int(mm.group(7)), cpu_rows=int(mm.group(8))))
-        continue
-    mm = rx2.search(line)
-    if mm:
-        pairs.setdefault(int(mm.group(1)), []).append((float(mm.group(2)), float(mm.group(3))))
-
-out = []
-if not rows:
-    out.append("# [moe]-строк нет")
-    out.append("")
-    out.append("В сегменте лога движка [moe] нет (%d строк). Проверь: (1) сборка из ветки с этим отчётом; "
-               "(2) в сегменте нет строки `debug env var(s) ignored` (нужен STRATA_EAGLE_DEBUG=1); "
-               "(3) если оба в порядке - все эксперты слоёв лежали в VRAM и работал быстрый путь moe_card: "
-               "он [moe]-строку не печатает, и стенсинга в этом запросе не было." % len(text.splitlines()))
-    print("\n".join(out))
-    open(report_path, "w", encoding="utf-8").write("\n".join(out) + "\n")
-    raise SystemExit(1)
-
-tokens = stats["gen"] if stats and stats["gen"] > 0 else gen
-n_il = len({r["il"] for r in rows[-400:]})
-want = n_il * max(tokens, 1)
-dec = rows[-want:] if want > 0 and len(rows) >= want else rows
-
-out.append("# Профиль [moe]: %.0f токенов декода" % tokens)
-if stats:
-    out.append("- сервер: prompt %d (reused %d), чтение %.0f ms (%.1f tok/s), декод %d за %.0f ms = %.2f tok/s"
-               " -> **%.2f ms/токен**" % (stats["prompt"], stats["reused"], stats["read_ms"], stats["pp"], stats["gen"],
-                                          stats["gen_ms"], stats["tg"], 1000.0 / stats["tg"]))
-else:
-    out.append("- строки статистики движка не нашёл; wall %.2f s, completion %d -> %.2f ms/токен"
-               % (wall, gen, wall * 1000.0 / max(gen, 1)))
-out.append("- [moe]-строк: %d всего, %d взято как декод в %d слоях (только слои со стенсингом: слой, "
-           "все эксперты которого в VRAM, идёт путём moe_card и не печатается)" % (len(rows), len(dec), n_il))
-if len(dec) != want:
-    out.append("- (!) декод-строк меньше ожидаемого (%d < %d) - суммы на токен занижены" % (len(dec), want))
-
-denom = max(tokens, 1)
-def per(name):
-    return sum(r[name] for r in dec) / denom
-
-have_split = any(r["wait"] is not None for r in dec)
-route, card, copies = per("route"), per("card"), per("copies")
-out.append("")
-out.append("## На токен (сумма по слоям)")
-out.append("| фаза | мс/токен |")
-out.append("|---|---:|")
-out.append("| route, всего | %.1f |" % route)
-if have_split:
-    out.append("| — ожидание роутера (wait) | %.1f |" % per("wait"))
-    out.append("| — хост-цикл moe() (host) | %.1f |" % per("host"))
-out.append("| card (GPU MoE, включает copies) | %.1f |" % card)
-out.append("| copies (внутри card) | %.1f |" % copies)
-if stats:
-    total = 1000.0 / stats["tg"]
-    out.append("")
-    out.append("**Остаток вне staged-MoE**: %.1f мс/токен из %.1f (dense, attention, выход, хост вне moe, "
-               "и слои, где все эксперты в VRAM - они идут путём moe_card без [moe]-строки)."
-               % (total - route - card, total))
-
-def layer_means(key):
-    g = {}
-    for r in dec:
-        g.setdefault(r["il"], []).append(r[key])
-    return sorted(((sum(v) / len(v), il) for il, v in g.items()), reverse=True)
-
-out.append("")
-out.append("## Самые дорогие слои (среднее за токен)")
-for title, key in (("card", "card"), ("copies", "copies")):
-    top = layer_means(key)[:5]
-    out.append("* %s: %s" % (title, ", ".join("il %d %.1f ms" % (il, v) for v, il in top)))
-
-allp = [p for v in pairs.values() for p in v]
-if allp:
-    mean_cpu = sum(p[0] for p in allp) / len(allp)
-    mean_gpu = sum(p[1] for p in allp) / len(allp)
-    slower = sum(1 for p in allp if p[0] > p[1])
-    out.append("")
-    out.append("## CPU-лейн: %d слоёв, среднее cpu %.1f / gpu %.1f мс; cpu>gpu в %d из %d"
-               % (len(pairs), mean_cpu, mean_gpu, slower, len(allp)))
-
-out.append("")
-out.append("## Что смотреть")
-out.append("* большой `wait` — синки/роутер на критическом пути; `host` — хост-цикл moe() (списки/границы).")
-out.append("* большой `card` при малых `copies` — GPU-ядра mmq; большой `copies` — IO и кэш экспертов.")
-out.append("* большой остаток — dense/attention: следующий профиль уже вне [moe].")
-
-rep = "\n".join(out) + "\n"
-print("")
-print(rep)
-open(report_path, "w", encoding="utf-8").write(rep)
-print("отчёт: %s" % report_path)
-PYAN
+"$PY" "$STRATA_DIR/tools/moe_profile_report.py" "$OUT_DIR/engine.log.profile" "$RESP" "$REPORT"
