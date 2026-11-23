@@ -234,6 +234,15 @@ VARIANTS+=("82-on-iq256-gu|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY
 VARIANTS+=("83-on-iq256-512|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY_IQ512=1")
 VARIANTS+=("84-on-iq512-min1|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY_IQ512=1 ENV:STRATA_POLY_IQ512_MIN=1")
 
+# --- lossless-батарея 2026-11-24: ручки, которые ещё не мерили. Ячейки стоят ПОСЛЕДНИМИ в списке,
+# потому что apply_variant не сбрасывает аргумент, которого нет в спеке: каждая задаёт все три ручки
+# явно (-1/0 = дефолты движка), чтобы значение предыдущей ячейки не протекло в следующую.
+PHYS_CORES=$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
+if ! [[ "${PHYS_CORES:-0}" =~ ^[1-9][0-9]*$ ]]; then PHYS_CORES=$(nproc); fi
+VARIANTS+=("85-no-cpu|$WORKING_SPEC --cpu-share 0 --threads 0 --vram-reserve-mib -1")   # CPU-лейн не делит DDR-полосу со стейджингом
+VARIANTS+=("86-threads-phys|$WORKING_SPEC --cpu-share -1 --threads $PHYS_CORES --vram-reserve-mib -1")   # без SMT-соседей у gather-ядер
+VARIANTS+=("87-reserve256|$WORKING_SPEC --cpu-share -1 --threads 0 --vram-reserve-mib 256")   # свободные МиБ карты — кэшу экспертов
+
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
 if [[ -n "$ONLY" ]]; then
@@ -734,11 +743,12 @@ for entry in "${VARIANTS[@]}"; do
     log "  уже есть $OUT_DIR/$name.json — пропускаю (FORCE=1, чтобы переделать)"
     continue
   fi
-  if ! apply_variant "$spec"; then
-    rc=$?
+  apply_variant "$spec"
+  rc=$?   # не `if ! apply_variant`: ! обнуляет $? и код 3 «спека разошлась» никогда не срабатывал
+  if (( rc != 0 )); then
     log "  !!! вариант $name не применён (код $rc) — пропускаю"
     failed+=("$name")
-    if [[ "$rc" == "3" ]]; then
+    if (( rc == 3 )); then
       log "  !!! спека и конфиг разошлись — дальше мерить нельзя, останавливаюсь"
       exit 1
     fi
@@ -991,6 +1001,23 @@ if "80-eta-iq256off" in names:
                 lines.append(f"* {lbl}: decode {dd:+.1f}%, prefill {pp:+.1f}% ({nn} пар, TTFT {ta:.2f} → {tb:.2f}s)")
             except Exception as e:
                 lines.append(f"* {lbl}: не удалось сравнить ({e})")
+
+# lossless-ручки 2026-11-24 (85-87) — тоже пара к 80-eta-iq256off: каждая меняет ровно одну ручку.
+los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
+       ("86-threads-phys", "threads = физические ядра (без SMT)"),
+       ("87-reserve256", "vram-reserve 256 МиБ (кэшу больше)"))
+if "80-eta-iq256off" in names and any(nm in names for nm, _ in los):
+    lines.append("")
+    lines.append("## lossless-ручки (пара к `80-eta-iq256off`)")
+    for nm, lbl in los:
+        if nm not in names:
+            continue
+        try:
+            nn, dd, pp, ta, tb = delta(os.path.join(out_dir, "80-eta-iq256off.json"),
+                                       os.path.join(out_dir, nm + ".json"))
+            lines.append(f"* {lbl}: decode {dd:+.1f}%, prefill {pp:+.1f}% ({nn} пар, TTFT {ta:.2f} → {tb:.2f}s)")
+        except Exception as e:
+            lines.append(f"* {lbl}: не удалось сравнить ({e})")
 
 # детально по промптам: decode Δ каждого варианта против эталона
 aggs = {nm: agg(os.path.join(out_dir, nm + ".json")) for nm in names}
