@@ -251,6 +251,12 @@ VARIANTS+=("88-no-freeze|$WORKING_SPEC ENV:STRATA_FREEZE_EXPERTS=")
 VARIANTS+=("89-attend-batch1|$WORKING_SPEC --attend-batch 1")
 VARIANTS+=("90-idx-mma2|$WORKING_SPEC --idx-mma 2")
 VARIANTS+=("91-idx-fused|$WORKING_SPEC --idx-fused 1")
+# 92/93 — VRAM для кэша экспертов без потери префилла и цена компромисса.  prompt-batch 2048 держит под
+# префилл ~2.9 ГБ VRAM (rows_ = min(prompt_batch, max_context) x ~1.4 МиБ) и в декоде тоже; ctx-cap режет
+# KV-бюджет (132768 -> 871 МиБ, 32768 -> 215 МиБ), префилл не трогая.  93 — НЕ рекомендация: сколько
+# теряет префилл и сколько выигрывает декод, если отдать эти 1.4 ГБ кэшу.
+VARIANTS+=("92-ctx32k|$WORKING_SPEC --ctx-cap 32768")
+VARIANTS+=("93-pb1024|$WORKING_SPEC --prompt-batch 1024")
 
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
@@ -1085,7 +1091,13 @@ if "80-eta-iq256off" in names:
 # lossless-ручки 2026-11-24 (85-87) — тоже пара к 80-eta-iq256off: каждая меняет ровно одну ручку.
 los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("86-threads-phys", "threads = физические ядра (без SMT)"),
-       ("87-reserve256", "vram-reserve 256 МиБ (кэшу больше)"))
+       ("87-reserve256", "vram-reserve 256 МиБ (кэшу больше)"),
+       ("88-no-freeze", "без FREEZE (адаптивный кэш; ответы дрейфуют)"),
+       ("89-attend-batch1", "attend-batch 1"),
+       ("90-idx-mma2", "idx-mma 2"),
+       ("91-idx-fused", "idx-fused 1"),
+       ("92-ctx32k", "ctx-cap 32768 (KV-бюджет -650 МиБ)"),
+       ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"))
 if "80-eta-iq256off" in names and any(nm in names for nm, _ in los):
     lines.append("")
     lines.append("## lossless-ручки (пара к `80-eta-iq256off`)")
