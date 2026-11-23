@@ -243,6 +243,15 @@ VARIANTS+=("85-no-cpu|$WORKING_SPEC --cpu-share 0 --threads 0 --vram-reserve-mib
 VARIANTS+=("86-threads-phys|$WORKING_SPEC --cpu-share -1 --threads $PHYS_CORES --vram-reserve-mib -1")   # без SMT-соседей у gather-ядер
 VARIANTS+=("87-reserve256|$WORKING_SPEC --cpu-share -1 --threads 0 --vram-reserve-mib 256")   # свободные МиБ карты — кэшу экспертов
 
+# --- 2026-11-24, по профилю [moe]: половина вычисляемых экспертов идёт на CPU (18 мс/токен), потому что
+# STRATA_FREEZE_EXPERTS отключает всю адаптацию кэша (follow/start_swaps/mind_vram/grow_cache). 88 снимает
+# фриз (ENV:NAME= без значения; apply_variant не даёт свипу вернуть его обратно), 89-91 — вторая половина
+# бюджета, GPU: attention/batch и индексер (в проде --attend-batch 0, --idx-mma 1; --idx-fused не включён).
+VARIANTS+=("88-no-freeze|$WORKING_SPEC ENV:STRATA_FREEZE_EXPERTS=")
+VARIANTS+=("89-attend-batch1|$WORKING_SPEC --attend-batch 1")
+VARIANTS+=("90-idx-mma2|$WORKING_SPEC --idx-mma 2")
+VARIANTS+=("91-idx-fused|$WORKING_SPEC --idx-fused 1")
+
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
 if [[ -n "$ONLY" ]]; then
@@ -402,11 +411,13 @@ for k in list(env):
         del env[k]
 toks = spec.split()
 bad = []
+explicit = set()   # the env keys this cell names itself (ENV:NAME=... or ENV:NAME=), so a default cannot undo it
 i = 0
 while i < len(toks):
     k = toks[i]
     if k.startswith("ENV:"):                 # ENV:NAME=value sets it; ENV:NAME= removes it
         name, _, value = k[4:].partition("=")
+        explicit.add(name)
         if value:
             env[name] = value
             if env.get(name) != value:
@@ -459,8 +470,11 @@ cfg["env"] = env
 # Свип по умолчанию меряет бит-стабильный greedy: без STRATA_FREEZE_EXPERTS сплит
 # экспертов VRAM/RAM пересобирается, и два одинаковых запроса дают разные ответы
 # (sweep 2026-11-23: completion_tokens 48..2048 на одном и том же промпте).
-# Ячейка может задать своё значение в спеке; SWEEP_FREEZE=0 выключает.
-if os.environ.get("SWEEP_FREEZE", "1") == "1" and "STRATA_FREEZE_EXPERTS" not in env:
+# Ячейка может задать своё значение в спеке; SWEEP_FREEZE=0 выключает.  A cell that names the key itself -
+# including ENV:STRATA_FREEZE_EXPERTS= (remove) - keeps its own decision: the default must not re-add the
+# freeze a "no-freeze" cell just took away.
+if (os.environ.get("SWEEP_FREEZE", "1") == "1" and "STRATA_FREEZE_EXPERTS" not in env
+        and "STRATA_FREEZE_EXPERTS" not in explicit):
     env["STRATA_FREEZE_EXPERTS"] = "1"
 # Ячейки, которые мерят отладочные ключи (EAGLE_*, SCORE_CONTEXT, ...), обязаны снять
 # мастер-гейт скраба движка (c8be1792): без STRATA_EAGLE_DEBUG=1 движок вычищает эти
@@ -940,12 +954,12 @@ def texts_of(nm):
             out[r.get("id")] = t
     return out
 ref_txt = texts_of(qref)
-broken = {}
+broken, odd = {}, {}
 for nm in names:
     if nm == qref:
         continue
     cur = texts_of(nm)
-    empty, far = [], []
+    empty, short, far = [], [], []
     for pid, bt in ref_txt.items():
         if len(bt) < 200:
             continue
@@ -953,18 +967,25 @@ for nm in names:
         if not ct.strip():
             empty.append(pid)
             continue
+        if len(ct) < len(bt) // 4:
+            short.append("%s (%d из %d симв.)" % (pid, len(ct), len(bt)))
+            continue
         k = 0
         while k < min(len(bt), len(ct)) and bt[k] == ct[k]:
             k += 1
         if k < 8:
             far.append("%s (%d симв.)" % (pid, k))
-    if empty or len(far) >= 2:
-        why = []
-        if empty:
-            why.append("пусто: " + ", ".join(empty))
-        if far:
-            why.append("не совпало: " + ", ".join(far))
+    why = []
+    if empty:
+        why.append("пусто: " + ", ".join(empty))
+    if short:
+        why.append("вчетверо короче базы: " + ", ".join(short))
+    if why:
         broken[nm] = why
+    if len(far) >= 2:
+        # Not a verdict: a cell that changes the expert placement (--no-freeze, the iq lane) legitimately
+        # answers differently from the first tokens.  Only an empty or collapsed answer is a breakage.
+        odd[nm] = far
 for name in names:
     if name == base_name:
         continue
@@ -1024,12 +1045,16 @@ lines.append("|---|---:|---:|---:|---|---|---|")
 for name, n, d, p, ta, tb, v, rec, note in rows:
     lines.append(f"| {label(name)}{note} | {n} | {d:+.1f}% | {p:+.1f}% | {ta:.2f}s → {tb:.2f}s | {v} | {rec} |")
 lines.append("")
-if broken:
+if broken or odd:
     lines.append("## Проверка целостности ответов (к `%s`)" % qref)
     for nm in sorted(broken):
-        lines.append("* `%s`: %s" % (nm, "; ".join(broken[nm][:4])))
-    lines.append("* пустой ответ или совпадение меньше 8 символов на двух и более промптах — это не дрейф "
-                 "округлений, а сломанная модель: скорость такой ячейки не считается.")
+        lines.append("* СЛОМАН `%s`: %s" % (nm, "; ".join(broken[nm][:4])))
+    for nm in sorted(odd):
+        lines.append("* расходится с базой с первых символов `%s`: %s (нормально для ячеек, меняющих "
+                     "раскладку экспертов: --no-freeze, iq-лейн)" % (nm, ", ".join(odd[nm][:4])))
+    if broken:
+        lines.append("* пустой или вчетверо более короткий ответ — это не дрейф округлений, а сломанная "
+                     "модель: скорость такой ячейки не считается.")
     lines.append("")
 lines.append("## Контроль decode (decode не должен падать после патчей)")
 if noise_d is not None:
