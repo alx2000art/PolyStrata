@@ -581,10 +581,16 @@ per = {}
 for r in d["runs"]:
     per.setdefault(r["id"], set()).add(
         (r.get("completion_tokens"), hashlib.sha256((r.get("text") or "").encode("utf-8")).hexdigest()))
-det = all(len(v) == 1 for v in per.values() if len(v) > 1)
+# chat-512 is the client's own known drift (ab_patches prints "known engine drift - judge by speed only"
+# and agg() takes the best repeat): counting it in the gate made EVERY capture, the baseline included,
+# non-deterministic, so no delta was ever counted.  The other prompts stay strict; SWEEP_DET_IGNORE=""
+# restores the old all-prompts rule.
+ignore = {x for x in os.environ.get("SWEEP_DET_IGNORE", "chat-512").split(",") if x}
+det = all(len(v) == 1 for k, v in per.items() if len(v) > 1 and k not in ignore)
 d["meta"]["deterministic"] = det
 json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-print(f"  детерминизм повторов: {'да' if det else 'НЕТ — ответы расходятся, дельта не считается'}")
+print(f"  детерминизм повторов: {'да' if det else 'НЕТ — ответы расходятся, дельта не считается'}"
+      + (f" (не считаем: {', '.join(sorted(ignore))})" if ignore else ""))
 PY
 }
 
