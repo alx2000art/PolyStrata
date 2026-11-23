@@ -33,6 +33,7 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-3600}"
 [[ -f "$STRATA_DIR/serve/server.py" ]] || { echo "нет $STRATA_DIR/serve/server.py" >&2; exit 1; }
 
 PORT="${PORT:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding="utf-8-sig"));print(int(c.get("port") or 1524))' "$CONFIG" 2>/dev/null || echo 1524)}"
+HOST="${HOST:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding="utf-8-sig"));print(c.get("host") or "127.0.0.1")' "$CONFIG" 2>/dev/null || echo 127.0.0.1)}"
 CFG_KEY="$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding="utf-8-sig"));print(c.get("api_key") or "")' "$CONFIG" 2>/dev/null)"
 API_KEY="${API_KEY:-$CFG_KEY}"
 MODEL="${MODEL:-my-model}"
@@ -67,7 +68,7 @@ start_server() {
 wait_ready() {
   local deadline=$((SECONDS + BOOT_TIMEOUT)) body
   while (( SECONDS < deadline )); do
-    body=$(curl -s -m 5 -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:$PORT/health" 2>/dev/null || true)
+    body=$(curl -s -m 5 -H "Authorization: Bearer $API_KEY" "http://$HOST:$PORT/health" 2>/dev/null || true)
     printf '%s' "$body" | grep -q '"loaded"[[:space:]]*:[[:space:]]*true' && return 0
     sleep 5
   done
@@ -110,9 +111,9 @@ fi
 echo "  модель загружена"
 
 echo "  запрос: $MAX_TOKENS токенов ..."
-"$PY" - "$PORT" "$API_KEY" "$MODEL" "$MAX_TOKENS" "$BODY" "$RESP" "$PROMPT" <<'PYREQ'
+"$PY" - "$HOST" "$PORT" "$API_KEY" "$MODEL" "$MAX_TOKENS" "$BODY" "$RESP" "$PROMPT" <<'PYREQ'
 import json, sys, time, urllib.request
-port, key, model, max_tokens, body_path, resp_path, prompt = sys.argv[1:8]
+host, port, key, model, max_tokens, body_path, resp_path, prompt = sys.argv[1:9]
 body = {
     "model": model,
     "messages": [{"role": "user", "content": prompt}],
@@ -125,7 +126,7 @@ body = {
 }
 with open(body_path, "w", encoding="utf-8") as f:
     json.dump(body, f, ensure_ascii=False, indent=1)
-req = urllib.request.Request("http://127.0.0.1:%s/v1/chat/completions" % port,
+req = urllib.request.Request("http://%s:%s/v1/chat/completions" % (host, port),
                              data=json.dumps(body).encode(),
                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
 t0 = time.perf_counter()
@@ -139,6 +140,7 @@ print("  ответ: completion %s, prompt %s, wall %.2f s" % (u.get("completion
 PYREQ
 
 sleep 3   # строка статистики движка печатается после ответа
+cp "$LOG" "$OUT_DIR/server.log.profile"   # final restart truncates $LOG - keep this run's [moe] lines
 
 echo "  возвращаю конфиг и перезапускаю сервер ..."
 cp "$OUT_DIR/config.bak" "$CONFIG"
@@ -147,7 +149,7 @@ start_server
 wait_ready || echo "  (!) сервер не поднялся после профиля - смотри $LOG"
 trap - INT TERM
 
-"$PY" - "$LOG" "$RESP" "$REPORT" <<'PYAN'
+"$PY" - "$OUT_DIR/server.log.profile" "$RESP" "$REPORT" <<'PYAN'
 import json, re, sys
 log_path, resp_path, report_path = sys.argv[1:4]
 text = open(log_path, encoding="utf-8", errors="replace").read()
