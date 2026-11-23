@@ -29,20 +29,25 @@ namespace {
 // STRATA_POLY_IQ256=1 turns them on, STRATA_POLY_IQ256_CHECK=1 also compares the first rows against ggml.
 struct Iq256 {
     bool on = false;
+    bool down = true;   ///< the down projections too (STRATA_POLY_IQ256_DOWN=0 keeps them on ggml: for the A/B)
     Iq256() {
         const char* v = std::getenv("STRATA_POLY_IQ256");
         const bool want = v != nullptr && std::atoi(v) == 1;
         const bool isa = strata::kernels::cpu::cpu_avx2_ok();
         on = want && isa;
+        const char* d = std::getenv("STRATA_POLY_IQ256_DOWN");
+        down = d == nullptr || std::atoi(d) != 0;
         if (v != nullptr)
-            std::fprintf(stderr, "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s)\n", on ? "on" : "off",
-                         isa ? "yes" : "no", strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no");
+            std::fprintf(stderr, "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s, down %s)\n",
+                         on ? "on" : "off", isa ? "yes" : "no",
+                         strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no", down ? "on" : "off");
     }
     bool use(int gu_type, int d_type, int vec_gu, int vec_d) const {
         return on && (gu_type == GGML_TYPE_IQ2_XS || gu_type == GGML_TYPE_IQ3_XXS) &&
                (d_type == GGML_TYPE_IQ2_XS || d_type == GGML_TYPE_IQ3_XXS) && vec_gu == GGML_TYPE_Q8_K &&
                vec_d == GGML_TYPE_Q8_K;
     }
+    bool use_down() const { return on && down; }
 };
 
 namespace cpu = strata::kernels::cpu;
@@ -431,7 +436,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         one.resize((size_t) n);
         float* s = one.data();
         const int r0 = t * kRowsPerDownTask, r1 = std::min(n_embd, r0 + kRowsPerDownTask);
-        if (iq) {
+        if (iq && kIq.use_down()) {
             // The native rows: a group of a run's uses per weight decode, the products of the chunk's rows into a
             // panel, then the same weighted sum in the same order (srow keeps every use's value so the order the
             // caller gave the experts is kept bit for bit).

@@ -224,6 +224,13 @@ VARIANTS+=("77-on-swapnosync|$WORKING_SPEC ENV:STRATA_POLY_SWAP_SYNC=0")
 # cudaGraphLaunch на токен вместо 86.  Проверять вместе с 78-79 (контроль) - ломание захвата видно сразу.
 VARIANTS+=("78-on-merge|$WORKING_SPEC ENV:STRATA_POLY_MERGE=1")
 
+# --- CPU lane: родные iq256-ядра (iq_avx2.cpp) в poly.  Пара 80/81 меряет эффект, 82 отделяет down-проекции
+# (STRATA_POLY_IQ256_DOWN=0 оставляет их на ggml).  80 — та же рабочая спека, что 10-all-on: контроль дрейфа
+# рядом с 81, иначе разница между 10-all-on и 81 была бы разницей во времени, а не в лейне.
+VARIANTS+=("80-eta-iq256off|$WORKING_SPEC")
+VARIANTS+=("81-on-iq256|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1")
+VARIANTS+=("82-on-iq256-gu|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_POLY_IQ256_DOWN=0")
+
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
 if [[ -n "$ONLY" ]]; then
@@ -376,7 +383,7 @@ env = cfg.get("env") or {}
 # (or by a previous variant) must not leak into the baselines - the diag runs' stale TEACH/FREEZE
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
-           "STRATA_POLY_SWAP_SYNC")
+           "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -961,6 +968,20 @@ if noise_d is not None:
                      + ("decode-безопасен" if d_all >= -thr else f"РЕГРЕССИЯ decode на {abs(d_all):.1f}%"))
     bad = [label(r[0]) for r in rows if "-only-" in r[0] and r[2] < -thr]
     lines.append("* фичи с реальным падением decode: " + (", ".join(bad) if bad else "нет"))
+
+# CPU lane: 80 — та же рабочая спека без iq256; 81/82 — с ним.  Здесь считается ПАРА, а не против эталона:
+# иначе эффект лейна тонет в сумме всех фич и в дрейфе между временами прогонов.
+if "80-eta-iq256off" in names:
+    lines.append("")
+    lines.append("## CPU lane iq256 (пара к `80-eta-iq256off`)")
+    for nm, lbl in (("81-on-iq256", "оба (gate/up + down)"), ("82-on-iq256-gu", "только gate/up")):
+        if nm in names:
+            try:
+                nn, dd, pp, ta, tb = delta(os.path.join(out_dir, "80-eta-iq256off.json"),
+                                           os.path.join(out_dir, nm + ".json"))
+                lines.append(f"* {lbl}: decode {dd:+.1f}%, prefill {pp:+.1f}% ({nn} пар, TTFT {ta:.2f} → {tb:.2f}s)")
+            except Exception as e:
+                lines.append(f"* {lbl}: не удалось сравнить ({e})")
 
 # детально по промптам: decode Δ каждого варианта против эталона
 aggs = {nm: agg(os.path.join(out_dir, nm + ".json")) for nm in names}
