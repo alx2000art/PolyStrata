@@ -374,6 +374,7 @@ for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
 toks = spec.split()
+bad = []
 i = 0
 while i < len(toks):
     k = toks[i]
@@ -381,8 +382,12 @@ while i < len(toks):
         name, _, value = k[4:].partition("=")
         if value:
             env[name] = value
+            if env.get(name) != value:
+                bad.append(k)
         else:
             env.pop(name, None)
+            if name in env:
+                bad.append(k)
         i += 1
         continue
     if k.startswith("DEL:"):                 # DEL:--flag removes the flag and its value from args
@@ -391,6 +396,8 @@ while i < len(toks):
         if idx >= 0:
             has_val = idx + 1 < len(args) and not args[idx + 1].startswith("--")
             del args[idx:(idx + 2 if has_val else idx + 1)]
+        if name in args:
+            bad.append(k)
         i += 1
         continue
     v = (toks[i + 1] if i + 1 < len(toks) else "")
@@ -399,6 +406,9 @@ while i < len(toks):
         args[idx + 1] = v
     else:
         args += [k, v]
+    j = args.index(k) if k in args else -1
+    if j < 0 or j + 1 >= len(args) or args[j + 1] != v:
+        bad.append(f"{k} {v}")
     i += 2
 # свип меряет скорость движка, а не поведение кэша: чекпоинты промптов дают
 # только разброс (и отравляют ячейку при частичном попадании) — гасим во всех
@@ -419,12 +429,34 @@ for k, v in force.items():
         args += [k, v]
 cfg["args"] = args
 cfg["env"] = env
+# Свип по умолчанию меряет бит-стабильный greedy: без STRATA_FREEZE_EXPERTS сплит
+# экспертов VRAM/RAM пересобирается, и два одинаковых запроса дают разные ответы
+# (sweep 2026-11-23: completion_tokens 48..2048 на одном и том же промпте).
+# Ячейка может задать своё значение в спеке; SWEEP_FREEZE=0 выключает.
+if os.environ.get("SWEEP_FREEZE", "1") == "1" and "STRATA_FREEZE_EXPERTS" not in env:
+    env["STRATA_FREEZE_EXPERTS"] = "1"
+# Ячейки, которые мерят отладочные ключи (EAGLE_*, SCORE_CONTEXT, ...), обязаны снять
+# мастер-гейт скраба движка (c8be1792): без STRATA_EAGLE_DEBUG=1 движок вычищает эти
+# переменные, и ячейка тихо меряет базу.  Прод скрабится как раньше.
+SCRUBBED = {"STRATA_POLY_LOOP_WATCH", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE2_SERIAL",
+            "STRATA_POLY_MMQ_DEBUG", "STRATA_POLY_MMQ_TYPES", "STRATA_POLY_ROUTE_DUMP",
+            "STRATA_POLY_TOPK_STATS", "STRATA_POLY_POOL_SELFTEST", "STRATA_FATTN", "STRATA_FDEC",
+            "STRATA_NO_MMVQ_ROWS2", "STRATA_POLY_SCORE_CONTEXT", "STRATA_POLY_SCORE_MIB",
+            "STRATA_VMM_RELEASE_WITH_ADDRESSES", "STRATA_LOGP_DEBUG"}
+if any(k.startswith("STRATA_EAGLE_") or k in SCRUBBED for k in env) and "STRATA_EAGLE_DEBUG" not in env:
+    env["STRATA_EAGLE_DEBUG"] = "1"
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
 os.replace(tmp, path)
 print("  args: " + " ".join(args))
 print("  env:  " + (" ".join(f"{k}={v}" for k, v in sorted(env.items())) or "(пусто)"))
+# Проверка, что спека действительно применилась (копится в bad по ходу разбора).
+# Пустая спека, потерянный ключ или неверное значение раньше давали «16 ячеек
+# с одним конфигом» (sweep 2026-11-23) — теперь это падение, а не тихий базовый прогон.
+if bad:
+    print("  !!! спека не применилась: " + " ".join(bad), file=sys.stderr)
+    sys.exit(3)
 PY
 }
 
@@ -500,13 +532,59 @@ run_capture() {  # $1 = имя варианта, $2 = сьют (не задан:
     --model "$MODEL" \
     --suite "$suite" --repeat "$REPEAT" --warmup "$WARMUP" \
     --temperature "$TEMPERATURE" --seed "$SEED" \
-    --timeout "$TIMEOUT_S" ${extra[@]+"${extra[@]}"}
+    --timeout "$TIMEOUT_S" ${extra[@]+"${extra[@]}"} || return 1
+  # Отпечаток кванта/модели и проверка детерминизма: старые файлы другого кванта
+  # больше не попадут в сводку, а нестабильный greedy виден сразу.
+  python3 - "$OUT_DIR/$name.json" "$CONFIG" <<'PY'
+import hashlib, json, os, sys
+p, cfgp = sys.argv[1], sys.argv[2]
+d = json.load(open(p, encoding="utf-8"))
+c = json.load(open(cfgp, encoding="utf-8-sig"))
+args = [str(x) for x in (c.get("args") or [])]
+model = None
+for i, a in enumerate(args):
+    if a == "--model" and i + 1 < len(args):
+        model = args[i + 1]
+fp = {"model": model}
+if model and os.path.exists(model):
+    st = os.stat(model)
+    fp.update(size=st.st_size, mtime=int(st.st_mtime))
+d.setdefault("meta", {})["fingerprint"] = fp
+per = {}
+for r in d["runs"]:
+    per.setdefault(r["id"], set()).add(
+        (r.get("completion_tokens"), hashlib.sha256((r.get("text") or "").encode("utf-8")).hexdigest()))
+det = all(len(v) == 1 for v in per.values() if len(v) > 1)
+d["meta"]["deterministic"] = det
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+print(f"  детерминизм повторов: {'да' if det else 'НЕТ — ответы расходятся, дельта не считается'}")
+PY
 }
 
-variant_done() {  # $1 = имя: уже есть валидный захват СВОЕГО сьюта?
+variant_done() {  # $1 = имя: уже есть валидный захват СВОЕГО сьюта И ЭТОГО кванта?
   local f="$OUT_DIR/$1.json"
   [[ -f "$f" ]] || return 1
-  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("runs") and d.get("meta",{}).get("suite")==sys.argv[2] else 1)' "$f" "$SUITE" 2>/dev/null
+  python3 - "$f" "$SUITE" "$CONFIG" <<'PY'
+import json, os, sys
+f, suite, cfgp = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(f, encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+if not d.get("runs") or d.get("meta", {}).get("suite") != suite:
+    sys.exit(1)
+c = json.load(open(cfgp, encoding="utf-8-sig"))
+args = [str(x) for x in (c.get("args") or [])]
+model = None
+for i, a in enumerate(args):
+    if a == "--model" and i + 1 < len(args):
+        model = args[i + 1]
+cur = {"model": model}
+if model and os.path.exists(model):
+    st = os.stat(model)
+    cur.update(size=st.st_size, mtime=int(st.st_mtime))
+sys.exit(0 if d.get("meta", {}).get("fingerprint") == cur else 1)
+PY
 }
 
 # ------------------------- префлайт: warm_start файл-режим -------------------
@@ -622,19 +700,39 @@ for entry in "${VARIANTS[@]}"; do
   name="${entry%%|*}"
   spec="${entry#|}"
   [[ "$spec" == "$entry" ]] && spec=""     # строки без "|" вообще
+  if [[ -z "$spec" ]]; then
+    log "  !!! у ячейки '$name' пустая спека — таблица VARIANTS собрана неверно."
+    log "  !!! Останавливаюсь: иначе разные имена меряют один и тот же конфиг (так было 2026-11-23)."
+    failed+=("$name")
+    exit 1
+  fi
   log ""
   log "=== $name ${spec:+($spec)} ====================================================="
   if variant_done "$name" && [[ "$FORCE" != "1" ]]; then
     log "  уже есть $OUT_DIR/$name.json — пропускаю (FORCE=1, чтобы переделать)"
     continue
   fi
-  apply_variant "$spec" || { log "  !!! не удалось записать вариант $name — пропускаю"; failed+=("$name"); continue; }
+  if ! apply_variant "$spec"; then
+    rc=$?
+    log "  !!! вариант $name не применён (код $rc) — пропускаю"
+    failed+=("$name")
+    if [[ "$rc" == "3" ]]; then
+      log "  !!! спека и конфиг разошлись — дальше мерить нельзя, останавливаюсь"
+      exit 1
+    fi
+    continue
+  fi
   stop_server
   start_server
   if ! wait_ready; then
     log "  !!! сервер не поднялся на варианте $name — пропускаю (лог: $OUT_DIR/server.log.last)"
     failed+=("$name")
     continue
+  fi
+  # что движок получил на самом деле: env из /proc, а не из конфига
+  EPID=$(pgrep -f "strata-poly.*--serve" | head -1)
+  if [[ -n "$EPID" && -r "/proc/$EPID/environ" ]]; then
+    tr '\0' '\n' < "/proc/$EPID/environ" | grep -E "^STRATA_" | sort | sed 's/^/  engine env: /'
   fi
   if (( WARM_PASSES > 0 )) && [[ ! -f "$OUT_DIR/.warmed" ]]; then
     for w in $(seq 1 "$WARM_PASSES"); do
@@ -683,10 +781,10 @@ fi
 
 log ""
 log "=== таблица прироста каждой фичи против эталона ($SUMMARY_BASE) ==="
-python3 - "$OUT_DIR" "$SUMMARY_BASE" "$SUMMARY_NOISE" <<'PY'
+python3 - "$OUT_DIR" "$SUMMARY_BASE" "$SUMMARY_NOISE" "$CONFIG" <<'PY'
 import json, math, os, sys, datetime
 
-out_dir, base_name, noise_name = sys.argv[1], sys.argv[2], sys.argv[3]
+out_dir, base_name, noise_name, cfg_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 def load(name):
     p = os.path.join(out_dir, name + ".json")
@@ -763,10 +861,32 @@ if noise_name and noise_name != base_name and load(noise_name) is not None:
 floor = max(noise_d or 0.0, noise_p or 0.0, 1.0)
 guard = float(os.environ.get("DECODE_GUARD_PCT") or 0.0)  # жёсткий порог decode-регрессии, %
 
-names = sorted(
+# Только ячейки ЭТОГО кванта: старые файлы (до отпечатка) в сравнение не идут.
+cfg = json.load(open(cfg_path, encoding="utf-8-sig"))
+args0 = [str(x) for x in (cfg.get("args") or [])]
+model = None
+for i, a in enumerate(args0):
+    if a == "--model" and i + 1 < len(args0):
+        model = args0[i + 1]
+cur = {"model": model}
+if model and os.path.exists(model):
+    st = os.stat(model)
+    cur.update(size=st.st_size, mtime=int(st.st_mtime))
+
+def fp_of(name):
+    d = load(name)
+    return (d or {}).get("meta", {}).get("fingerprint")
+
+all_names = sorted(
     f[:-5] for f in os.listdir(out_dir)
     if f.endswith(".json") and f[:-5] != "summary" and load(f[:-5]) is not None
 )
+skipped = [n for n in all_names if fp_of(n) != cur]
+names = [n for n in all_names if fp_of(n) == cur]
+if base_name not in names:
+    print(f"эталон {base_name}.json — другого кванта или нет отпечатка: сводка невозможна.")
+    print("Запусти свип заново: variant_done теперь требует совпадения отпечатка и переснимет старые ячейки.")
+    sys.exit(0)
 rows = []
 for name in names:
     if name == base_name:
@@ -798,6 +918,10 @@ for name in names:
                 rec = "— нейтрально"
     else:
         verdict = "в пределах шума (полоса шума не измерена)"
+    det = (load(name) or {}).get("meta", {}).get("deterministic")
+    if det is False:
+        verdict = "НЕДЕТЕРМИНИРОВАН (повторы расходятся) — дельта не считается"
+        rec = "—"
     rows.append((name, n, d, p, ta, tb, verdict, rec, note))
 
 rows.sort(key=lambda r: -(r[2]))  # по приросту decode, сверху самые полезные
@@ -808,6 +932,8 @@ lines.append(f"* эталон: `{base_name}.json` — все фичи форка
 if noise_d is not None:
     lines.append(f"* пол шума: decode ±{noise_d:.1f}%, prefill ±{noise_p:.1f}% "
                  f"(эталон, два прогона: `{base_name}` против `{noise_name}`)")
+if skipped:
+    lines.append("* НЕ сравнивались (другой квант или нет отпечатка): " + ", ".join(skipped))
 lines.append("* прирост = насколько вариант быстрее эталона; реален, только когда больше шума")
 lines.append("* сумма приростов отдельных фич может не сходиться с «ВСЕ ФИЧИ ВМЕСТЕ» — фичи взаимодействуют")
 if guard > 0:
