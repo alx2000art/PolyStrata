@@ -184,6 +184,9 @@ else
   : > "$OUT_DIR/engine.log.profile"
 fi
 echo "  лог движка этого прогона: $OUT_DIR/engine.log.profile ($(wc -l < "$OUT_DIR/engine.log.profile" 2>/dev/null || echo 0) строк)"
+# The server's own log is truncated at every start: copy it before the final restart, it holds the per-request
+# "done: N tokens in X s (Y tok/s)" line - the decode-only figure the engine's log does not print.
+cp "$LOG" "$OUT_DIR/server.log.profile" 2>/dev/null || : > "$OUT_DIR/server.log.profile"
 
 echo "  возвращаю конфиг и перезапускаю сервер ..."
 cp "$OUT_DIR/config.bak" "$CONFIG"
@@ -192,4 +195,5 @@ start_server
 wait_ready || echo "  (!) сервер не поднялся после профиля - смотри $LOG"
 trap - INT TERM
 
-"$PY" "$STRATA_DIR/tools/moe_profile_report.py" "$OUT_DIR/engine.log.profile" "$RESP" "$REPORT"
+"$PY" "$STRATA_DIR/tools/moe_profile_report.py" "$OUT_DIR/engine.log.profile" "$RESP" "$REPORT" \
+  "$OUT_DIR/server.log.profile"

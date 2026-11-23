@@ -14,6 +14,7 @@ import re
 import sys
 
 log_path, resp_path, report_path = sys.argv[1:4]
+srv_path = sys.argv[4] if len(sys.argv) > 4 else ""
 text = open(log_path, encoding="utf-8", errors="replace").read()
 resp = json.load(open(resp_path, encoding="utf-8"))
 u = resp.get("usage") or {}
@@ -27,7 +28,24 @@ if m:
     p, reused, read_ms, pp, g, gen_ms, tg = m[-1]
     stats = dict(prompt=int(p), reused=int(reused), read_ms=float(read_ms), pp=float(pp), gen=int(g),
                  gen_ms=float(gen_ms), tg=float(tg))
-tokens = stats["gen"] if stats and stats["gen"] > 0 else gen
+# The server's per-request line is the decode-only figure (the engine's log does not print one): the last one
+# is the measured request, the warm-ups come before it.
+done = None
+if srv_path:
+    try:
+        srv = open(srv_path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        srv = ""
+    d = re.findall(r"done: (\d+) tokens in ([\d.]+) s \(([\d.]+) tok/s\)", srv)
+    if d:
+        n2, el, tps = d[-1]
+        done = dict(tokens=int(n2), el=float(el), tps=float(tps))
+if done:
+    tokens = done["tokens"]
+elif stats and stats["gen"] > 0:
+    tokens = stats["gen"]
+else:
+    tokens = gen
 
 RXD = re.compile(r"\[moe\] il=(\d+) n=(\d+) route (\d+) ms \(wait (\d+), host (\d+)\), cpu (\d+) ms, total (\d+) ms, "
                  r"cached (\d+), host_experts (\d+)")
@@ -61,14 +79,17 @@ if not dec and not pre:
     sys.exit(1)
 
 out.append("# Профиль [moe]: %d токенов декода" % tokens)
-if stats:
-    out.append("- сервер: prompt %d (reused %d), чтение %.0f ms (%.1f tok/s), декод %d за %.0f ms = "
+if done:
+    out.append("- декод: %d токенов за %.0f s = **%.2f мс/токен** (%.1f tok/s); prompt %d токенов"
+               % (done["tokens"], done["el"], 1000.0 / done["tps"], done["tps"], u.get("prompt_tokens") or 0))
+elif stats:
+    out.append("- движок: prompt %d (reused %d), чтение %.0f ms (%.1f tok/s), декод %d за %.0f ms = "
                "**%.2f ms/токен** (%.2f tok/s)"
                % (stats["prompt"], stats["reused"], stats["read_ms"], stats["pp"], stats["gen"], stats["gen_ms"],
                   1000.0 / stats["tg"], stats["tg"]))
 else:
-    out.append("- строки статистики движка не нашёл; wall %.2f s, completion %d -> %.2f ms/токен"
-               % (wall, gen, wall * 1000.0 / max(gen, 1)))
+    out.append("- ни серверной строки `done:`, ни статистики движка нет; wall %.2f s, completion %d -> "
+               "%.2f ms/токен (с префиллом!)" % (wall, gen, wall * 1000.0 / max(gen, 1)))
 out.append("")
 
 den = max(tokens, 1)
@@ -91,8 +112,8 @@ if dec:
     out.append("| — хост: маршрутизация и списки (host) | %.1f |" % per("host"))
     out.append("| CPU-эксперты (cpu, внутри total) | %.1f |" % per("cpu"))
     out.append("| **слои MoE, всего (total)** | %.1f |" % per("total"))
-    if stats:
-        tt = 1000.0 / stats["tg"]
+    if done or stats:
+        tt = 1000.0 / (done["tps"] if done else stats["tg"])
         out.append("")
         out.append("**Остаток вне MoE**: %.1f мс/токен из %.1f (attention, dense, выход, хост вне moe)."
                    % (tt - per("total"), tt))
