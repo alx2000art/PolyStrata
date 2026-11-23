@@ -431,6 +431,64 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         one.resize((size_t) n);
         float* s = one.data();
         const int r0 = t * kRowsPerDownTask, r1 = std::min(n_embd, r0 + kRowsPerDownTask);
+        if (iq) {
+            // The native rows: a group of a run's uses per weight decode, the products of the chunk's rows into a
+            // panel, then the same weighted sum in the same order (srow keeps every use's value so the order the
+            // caller gave the experts is kept bit for bit).
+            constexpr int G = 32;
+            static thread_local AlignedBuf dpanel;
+            dpanel.resize_bytes((size_t) G * (size_t) r1 * 4);
+            float* dp = (float*) dpanel.p;
+            static thread_local std::vector<float> srow;
+            srow.assign((size_t) (r1 - r0) * n, 0.f);
+            const void* acts[G];
+            float* dbuf[G];
+            for (int u = 0; u < n_run; ++u) {
+                const int i0 = runp[u], i1 = runp[u + 1];
+                const CpuExpert& e = experts[byp[i0]];
+                for (int i = i0; i < i1; i += G) {
+                    const int g = std::min(G, i1 - i);
+                    for (int k = 0; k < g; ++k) {
+                        const int j = byp[i + k];
+                        acts[k] = hqp + (size_t) experts[j].row * h_bytes;
+                        dbuf[k] = dp + (size_t) k * r1;
+                    }
+                    cpu::iq256_rows(d_type, e.down, d_row, n_ff, acts, g, dbuf, r0, r1);
+                    if (std::getenv("STRATA_POLY_IQ256_CHECK") != nullptr) {
+                        static std::atomic<int> checked{0};
+                        if (checked.fetch_add(1) == 0) {
+                            const int j = byp[i];
+                            const uint8_t* a = hqp + (size_t) experts[j].row * h_bytes;
+                            float maxd = 0.f;
+                            bool exact = true;
+                            for (int r = r0; r < std::min(r1, r0 + 8); ++r) {
+                                float ref = 0.f;
+                                td->vec_dot(n_ff, &ref, 0, e.down + (size_t) r * d_row, 0, a, 0, 1);
+                                exact = exact && !std::memcmp(&ref, &dp[r], 4);
+                                maxd = std::max(maxd, std::fabs(ref - dp[r]));
+                            }
+                            std::fprintf(stderr, "strata-poly: iq256 down vs ggml (first rows): %s, max |diff| %.3g\n",
+                                         exact ? "bit-identical" : "DIFFERS", (double) maxd);
+                        }
+                    }
+                    for (int k = 0; k < g; ++k) {
+                        const int j = byp[i + k];
+                        const float* src = dp + (size_t) k * r1;
+                        for (int r = r0; r < r1; ++r) srow[(size_t) (r - r0) * n + j] = src[r];
+                    }
+                }
+            }
+            for (int r = r0; r < r1; ++r) {
+                const float* sr = srow.data() + (size_t) (r - r0) * n;
+                int j = 0;
+                for (int row = 0; row < rows; ++row) {
+                    float acc = 0.f;
+                    for (; j < n && experts[j].row == row; ++j) acc += experts[j].weight * sr[j];
+                    out[(size_t) row * n_embd + r] = acc;
+                }
+            }
+            return;
+        }
         for (int r = r0; r < r1; ++r) {
             for (int u = 0; u < n_run; ++u) {
                 const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
