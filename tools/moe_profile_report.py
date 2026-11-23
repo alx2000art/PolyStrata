@@ -47,10 +47,10 @@ elif stats and stats["gen"] > 0:
 else:
     tokens = gen
 
-RXD = re.compile(r"\[moe\] il=(\d+) n=(\d+) route (\d+) ms \(wait (\d+), host (\d+)\), cpu (\d+) ms, total (\d+) ms, "
+RXD = re.compile(r"\[moe\] il=(\d+) n=(\d+) route ([\d.]+) ms \(wait ([\d.]+), host ([\d.]+)\), cpu ([\d.]+) ms, total ([\d.]+) ms, "
                  r"cached (\d+), host_experts (\d+)")
-RXP = re.compile(r"\[moe\] il=(\d+) (?:n=(\d+) )?route (\d+) ms(?: \(wait (\d+), host (\d+)\))?, card (\d+) ms, "
-                 r"copies (\d+) ms, rounds (\d+), cpu_rows (\d+)")
+RXP = re.compile(r"\[moe\] il=(\d+) (?:n=(\d+) )?route ([\d.]+) ms(?: \(wait ([\d.]+), host ([\d.]+)\))?, card ([\d.]+) ms, "
+                 r"copies ([\d.]+) ms, rounds (\d+), cpu_rows (\d+)")
 dec, pre = [], []
 for line in text.splitlines():
     mm = RXD.search(line)

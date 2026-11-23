@@ -3014,8 +3014,10 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
     }
     if (dbg_) {
         const double wait = std::chrono::duration<double, std::milli>(t_wait_end - t_enter).count();
+        // Two decimals: a layer's numbers are often under a millisecond, and %.0f quantized every line to 0 or 1,
+        // which made a 43-line sum meaningless (the first profile's 36.9 ms/token was such an artefact).
         std::fprintf(stderr,
-                     "[moe] il=%d n=%d route %.0f ms (wait %.0f, host %.0f), cpu %.0f ms, total %.0f ms, "
+                     "[moe] il=%d n=%d route %.2f ms (wait %.2f, host %.2f), cpu %.2f ms, total %.2f ms, "
                      "cached %d, host_experts %d\n",
                      il, n, wait + route_host_ms, wait, route_host_ms, cpu_ms, ms_since(t_enter), cached_all,
                      host_all);
