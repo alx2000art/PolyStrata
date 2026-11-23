@@ -476,7 +476,11 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                     const int g = std::min(G, i1 - i);
                     for (int k = 0; k < g; ++k) {
                         const int j = byp[i + k];
-                        acts[k] = hqp + (size_t) experts[j].row * h_bytes;
+                        // hq is one row per USE (index j, as the fill above writes it), not per token: the token's
+                        // row can pass the use count (a call's rows are all its tokens, the uses only the experts
+                        // the CPU got), which made the dot read past the buffer and the SIGSEGV; inside it, the
+                        // token row gave the expert another use's hidden, so the down products were wrong.
+                        acts[k] = hqp + (size_t) j * h_bytes;
                         dbuf[k] = dp + (size_t) k * r1;
                     }
                     const bool w512 = kIq.use512(d_type, g);
@@ -488,7 +492,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                         static std::atomic<int> checked{0};
                         if (checked.fetch_add(1) == 0) {
                             const int j = byp[i];
-                            const uint8_t* a = hqp + (size_t) experts[j].row * h_bytes;
+                            const uint8_t* a = hqp + (size_t) j * h_bytes;   // the same use the first dot took
                             float maxd = 0.f;
                             bool exact = true;
                             for (int r = r0; r < std::min(r1, r0 + 8); ++r) {
