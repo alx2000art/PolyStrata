@@ -3403,6 +3403,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
 
     const Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+    // The audit ([moe] with STRATA_POLY_STAGE2_DEBUG): how much of `route` a call spends waiting for the
+    // router's copy and how much is the host's own bookkeeping (counts, the spare and slot lists, the bounds).
+    const Clock::time_point t_after_wait = Clock::now();
     if (ahead && !early && !freeze_experts_) route_ms_ = ms_since(t0);
     stats_.route_wait_ms += ms_since(t0);
 
@@ -3738,8 +3741,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         if (s2_debug_) {
             const double card_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_card).count();
             const double route_ms = std::chrono::duration<double, std::milli>(t_route_end - t0).count();
-            std::fprintf(stderr, "[moe] il=%d route %.0f ms, card %.0f ms, copies %.0f ms, rounds %d, "
-                                 "cpu_rows %d\n", il, route_ms, card_ms, copies, n_round, n_cpu);
+            const double wait_ms = std::chrono::duration<double, std::milli>(t_after_wait - t0).count();
+            std::fprintf(stderr, "[moe] il=%d route %.0f ms (wait %.0f, host %.0f), card %.0f ms, copies %.0f ms, "
+                                 "rounds %d, cpu_rows %d\n", il, route_ms, wait_ms, route_ms - wait_ms, card_ms, copies,
+                         n_round, n_cpu);
         }
     };
     if (n_cpu == 0) {
