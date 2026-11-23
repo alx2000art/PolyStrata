@@ -1145,7 +1145,11 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
 void usage() {
     std::fprintf(stderr,
                  "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
-                 "  --max-context N        tokens the attention caches hold (default 8192)\n"
+                 "  --max-context N|auto   tokens the attention caches hold (default 8192); auto: the largest\n"
+                 "                         that fits the free VRAM, ctx-kv-share of it budgeted for K/V (needs\n"
+                 "                         --vram-pool)\n"
+                 "  --ctx-cap N            the advertised ceiling auto will not pass (default 132768)\n"
+                 "  --ctx-kv-share F       the share of the free VRAM the K/V budget may take (default 0.5)\n"
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache, 256 at least (default: a\n"
                  "                         thirty-second of the card, 256 to 768, or a sixteenth, 512 to 1024,\n"
@@ -1342,7 +1346,17 @@ int main(int argc, char** argv) {
         };
         if (a == "--model") o.model = val();
         else if (a == "--serve") want_serve = true;
-        else if (a == "--max-context") o.max_context = std::atoi(val());
+        else if (a == "--max-context") {
+            const std::string v = val();
+            if (v == "auto") {
+                o.ctx_auto = true;
+                o.max_context = 0;   // resolved by Engine::plan_context() from the KV geometry and free VRAM
+            } else {
+                o.max_context = std::atoi(v.c_str());
+            }
+        }
+        else if (a == "--ctx-cap") o.ctx_cap = std::atoi(val());
+        else if (a == "--ctx-kv-share") o.ctx_kv_share = (float) std::atof(val());
         else if (a == "--threads") o.threads = std::atoi(val());
         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
         else if (a == "--vram-pool") o.vram_pool = true;

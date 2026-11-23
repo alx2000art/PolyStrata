@@ -46,6 +46,12 @@ enum class KvFmt { kFp16 = 0, kQ8_0 = 1 };
 struct Options {
     std::string model;
     int max_context = 8192;
+    /// --max-context auto: the window is the largest that fits the memory after the weights, the reserve and
+    /// the staging buffers, with ctx_kv_share of the free VRAM budgeted for the K/V (needs --vram-pool: without
+    /// VMM the attention caches are allocated whole, before the fit is known).
+    bool ctx_auto = false;
+    int ctx_cap = 0;              ///< --ctx-cap N: the model's advertised ceiling for auto (0: 132768)
+    float ctx_kv_share = 0.5f;    ///< --ctx-kv-share F: the share of the free VRAM the K/V budget may take
     int threads = 0;              ///< 0: the CPUs this process may use
     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
     bool vram_pool = false;       ///< one pool of VRAM claimed at load, kept for the whole run: the expert cache and the
@@ -549,6 +555,7 @@ protected:
     bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void fill_expert_cache();
+    void plan_context();
     void start_swaps();
     void pin_experts();
     void plan_ahead(Layer& L, int il);

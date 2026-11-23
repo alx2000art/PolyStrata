@@ -1397,6 +1397,46 @@ int64_t Engine::vram_free_mib() const {
 // free near half of it later), or a sixteenth when the machine's RAM is within 4 GiB of the model's files
 // (default_reserve_mib()).  Under Windows a card that is asked for more than it has does not refuse: memory
 // moves to the system's, and an answer came at 13 tokens/s where it comes at 30.
+// The context the memory can actually hold (Options::ctx_auto), and the numbers either way.  The architecture's
+// buffers are made by now; the context-linear ones are the kv_alloc() rows (bytes per `per` tokens), while the
+// fixed seq_alloc() ones (the raw window, the compressors' rings) are sized by prompt_batch and stay out of it.
+// The expert cache has not claimed the pool yet, so free VRAM is the whole budget; Options::ctx_kv_share of it
+// may go to the rows, the rest is the experts'.
+void Engine::plan_context() {
+    size_t per_tok = 0;
+    for (const Buf& b : bufs_)
+        if (b.per > 0) per_tok += b.bytes / (size_t) b.per;
+    if (per_tok == 0) return;
+    size_t free_b = 0, total_b = 0;
+    ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    const size_t reserve = size_t(std::max(opt_.vram_reserve_mib >= 0 ? opt_.vram_reserve_mib : 512, 256)) << 20;
+    const size_t stage = size_t(std::max(opt_.stage_mib, 0) + std::max(opt_.stage2_mib, 0)) << 20;
+    const size_t overhead = reserve + stage + (size_t(256) << 20);
+    const size_t avail = free_b > overhead ? free_b - overhead : 0;
+    if (opt_.ctx_auto) {
+        const double share = (opt_.ctx_kv_share > 0.f && opt_.ctx_kv_share <= 1.f) ? opt_.ctx_kv_share : 0.5;
+        int64_t fit = (int64_t) ((double) avail * share / (double) per_tok);
+        fit = fit / 128 * 128;
+        if (fit < 2048) fit = 2048;
+        if (fit > opt_.max_context) fit = opt_.max_context;
+        opt_.max_context = (int) fit;
+    }
+    const double mib = 1048576.0;
+    const size_t full = per_tok * (size_t) opt_.max_context;
+    std::fprintf(stderr,
+                 "strata-poly: context %d tokens%s: KV %.2f KiB/token = %.0f MiB full, step %lld rows = %.0f MiB; "
+                 "free VRAM %.0f MiB (reserve %.0f, stage %.0f) -> the expert cache gets the rest\n",
+                 opt_.max_context, opt_.ctx_auto ? " (auto)" : "", (double) per_tok / 1024.0,
+                 (double) full / mib, (long long) kKvGrow, (double) per_tok * (double) kKvGrow / mib,
+                 (double) free_b / mib, (double) reserve / mib, (double) stage / mib);
+    if (full > avail)
+        std::fprintf(stderr,
+                     "strata-poly: warning: the full window needs %.0f MiB of KV, %.0f MiB is free after the "
+                     "reserve and the staging - the expert cache will be emptied first, and a prompt past what "
+                     "then fits is refused\n",
+                     (double) full / mib, (double) avail / mib);
+}
+
 void Engine::fill_expert_cache() {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
     size_t free_b = 0, total_b = 0;
@@ -2037,6 +2077,15 @@ void Engine::trade_experts() {
 void Engine::load(const Options& o) {
     opt_ = o;
     asked_reserve_mib_ = o.vram_reserve_mib;
+    if (opt_.ctx_auto) {
+        // The fit needs the architecture's KV geometry, which is made during this load; the address space is
+        // reserved for the cap and plan_context() lowers the window before alloc().  Without VMM the attention
+        // caches would be allocated whole for the cap first, so auto is not offered there.
+        if (!opt_.vram_pool)
+            throw std::runtime_error("--max-context auto needs --vram-pool: without VMM the attention caches are "
+                                     "allocated whole before the fit is known");
+        opt_.max_context = opt_.ctx_cap > 0 ? opt_.ctx_cap : 132768;
+    }
     if (opt_.max_context < 16) throw std::runtime_error("the context must be at least 16 tokens");
     if (opt_.prompt_batch < 1 || opt_.prompt_batch > 4096)
         throw std::runtime_error("a prompt batch is 1 to 4096 tokens");
@@ -2385,6 +2434,10 @@ void Engine::alloc() {
         park_bound();
         take_bound(0);
     }
+    // The KV buffers exist now (alloc_caches() above, for every sequence), the weights and the scratch are
+    // charged against the card: fit the window (Options::ctx_auto) and report the split before
+    // fill_expert_cache() sizes the experts out of what is left.
+    plan_context();
 
     // A prompt batch runs a layer's routed experts through MMQ when the card has a tile for each of their types
     // (batched()).  The model's layers: the draft block's experts never run a batch at a time.
