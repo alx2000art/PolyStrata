@@ -6,9 +6,15 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
+#include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/cpu/iq_avx2.hpp"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
 #include <mutex>
@@ -16,6 +22,30 @@
 
 namespace strata::poly {
 namespace {
+
+// The fork's own AVX-2/AVX-VNNI i-quant expert rows (src/kernels/cpu/iq_avx2.cpp) for the types DeepSeek V4's
+// experts use.  They are bit-identical to ggml-cpu's dots (iq_avx2_parity) and decode a 32-value weight chunk once
+// for a whole group of tokens, where ggml's vec_dot repeats the decode for every token.  Off by default:
+// STRATA_POLY_IQ256=1 turns them on, STRATA_POLY_IQ256_CHECK=1 also compares the first rows against ggml.
+struct Iq256 {
+    bool on = false;
+    Iq256() {
+        const char* v = std::getenv("STRATA_POLY_IQ256");
+        const bool want = v != nullptr && std::atoi(v) == 1;
+        const bool isa = strata::kernels::cpu::cpu_avx2_ok();
+        on = want && isa;
+        if (v != nullptr)
+            std::fprintf(stderr, "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s)\n", on ? "on" : "off",
+                         isa ? "yes" : "no", strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no");
+    }
+    bool use(int gu_type, int d_type, int vec_gu, int vec_d) const {
+        return on && (gu_type == GGML_TYPE_IQ2_XS || gu_type == GGML_TYPE_IQ3_XXS) &&
+               (d_type == GGML_TYPE_IQ2_XS || d_type == GGML_TYPE_IQ3_XXS) && vec_gu == GGML_TYPE_Q8_K &&
+               vec_d == GGML_TYPE_Q8_K;
+    }
+};
+
+namespace cpu = strata::kernels::cpu;
 
 // Rows of gate and up, and of down, a task.  With fewer tasks than several a thread, the last round left threads
 // idle at the end of every layer: 64 rows gave Tiel's 512-row experts 8 tasks each, and its down products 32 tasks.
@@ -174,6 +204,8 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const size_t d_row = ggml_row_size((ggml_type) d_type, n_ff);
     const size_t a_bytes = ggml_row_size(tg->vec_dot_type, n_embd);
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
+    static const Iq256 kIq;
+    const bool iq = kIq.use(gu_type, d_type, (int) tg->vec_dot_type, (int) td->vec_dot_type);
 
     // The workers get these through the pointers below: a thread_local named in their code would be their own.
     // 64B-aligned storage: the tiled kernels do ALIGNED 32-byte accesses on the
@@ -198,10 +230,14 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     hq.resize_bytes((size_t) n * h_bytes);
     h.resize_bytes((size_t) n * n_ff * 4);
     // ggml's quantizers for the activations are scalar: microseconds a row, which on one thread kept the others
-    // waiting, here and before the down products
+    // waiting, here and before the down products.  The iq256 lane runs the AVX-2 Q8_K quantizer instead
+    // (q8k_quant_avx2, byte-identical to ggml's: q8k_quant_parity).
     uint8_t* actp = (uint8_t*) act.p;
     const auto act_from = traits(tg->vec_dot_type)->from_float;
-    workers.run(rows, [&](int t) { act_from(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
+    if (iq)
+        workers.run(rows, [&](int t) { cpu::q8k_quant_avx2(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
+    else
+        workers.run(rows, [&](int t) { act_from(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
 
     // The uses of one expert next to each other (by), and where each expert's run of them starts (run).
     by.resize((size_t) n);
@@ -248,6 +284,64 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             const GuTask& tk = vtasks[(size_t) t];
             const int i0 = runp[tk.run], i1 = runp[tk.run + 1];
             const CpuExpert& e = experts[byp[i0]];
+            if (iq) {
+                // The native rows: a group of the run's tokens per weight decode (iq256_rows decodes a 32-value
+                // chunk once and applies it to every token of the group, where vec_dot repeats the decode for
+                // every token).  The gate lands in a panel; the up product goes straight into hp and the silu/gelu
+                // fold happens in place.
+                constexpr int G = 32;
+                static thread_local AlignedBuf gpanel;
+                gpanel.resize_bytes((size_t) G * n_ff * 4);
+                float* gp = (float*) gpanel.p;
+                const void* acts[G];
+                float* gbuf[G];
+                float* ubuf[G];
+                static std::atomic<int> checked{0};
+                const bool check = std::getenv("STRATA_POLY_IQ256_CHECK") != nullptr;
+                for (int i = i0; i < i1; i += G) {
+                    const int g = std::min(G, i1 - i);
+                    for (int k = 0; k < g; ++k) {
+                        const int j = byp[i + k];
+                        acts[k] = actp + (size_t) experts[j].row * a_bytes;
+                        gbuf[k] = gp + (size_t) k * n_ff;
+                        ubuf[k] = hp + (size_t) j * n_ff;
+                    }
+                    cpu::iq256_rows(gu_type, e.gate, gu_row, n_embd, acts, g, gbuf, tk.r0, tk.r1);
+                    cpu::iq256_rows(gu_type, e.up, gu_row, n_embd, acts, g, ubuf, tk.r0, tk.r1);
+                    if (check && checked.fetch_add(1) == 0) {
+                        const int j = byp[i];
+                        const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
+                        float maxd = 0.f;
+                        bool exact = true;
+                        for (int r = tk.r0; r < std::min(tk.r1, tk.r0 + 8); ++r) {
+                            float gr = 0.f, ur = 0.f;
+                            tg->vec_dot(n_embd, &gr, 0, e.gate + (size_t) r * gu_row, 0, a, 0, 1);
+                            tg->vec_dot(n_embd, &ur, 0, e.up + (size_t) r * gu_row, 0, a, 0, 1);
+                            const float gv = gp[r], uv = hp[(size_t) j * n_ff + r];
+                            exact = exact && !std::memcmp(&gr, &gv, 4) && !std::memcmp(&ur, &uv, 4);
+                            maxd = std::max({maxd, std::fabs(gr - gv), std::fabs(ur - uv)});
+                        }
+                        std::fprintf(stderr, "strata-poly: iq256 vs ggml (first rows): %s, max |diff| %.3g\n",
+                                     exact ? "bit-identical" : "DIFFERS", (double) maxd);
+                    }
+                    for (int k = 0; k < g; ++k) {
+                        const int j = byp[i + k];
+                        float* hrow = hp + (size_t) j * n_ff;
+                        const float* grow = gp + (size_t) k * n_ff;
+                        for (int r = tk.r0; r < tk.r1; ++r) {
+                            const float gv = grow[r], uv = hrow[r];
+                            if (gelu) {
+                                hrow[r] = 0.5f * gv *
+                                          (1.f + std::tanh(0.7978845608f * gv * (1.f + 0.044715f * gv * gv))) * uv;
+                                continue;
+                            }
+                            const float gc = std::min(gv, limit);
+                            hrow[r] = gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
+                        }
+                    }
+                }
+                return;
+            }
             for (int r = tk.r0; r < tk.r1; ++r) {
                 const uint8_t* gate = e.gate + (size_t) r * gu_row;
                 const uint8_t* up = e.up + (size_t) r * gu_row;
@@ -326,7 +420,10 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
 
     uint8_t* hqp = (uint8_t*) hq.p;
     const auto hq_from = traits(td->vec_dot_type)->from_float;
-    workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
+    if (iq)
+        workers.run(n, [&](int j) { cpu::q8k_quant_avx2(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
+    else
+        workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
 
     const int d_tasks = (n_embd + kRowsPerDownTask - 1) / kRowsPerDownTask;
     workers.run(d_tasks, [&](int t) {

@@ -2076,7 +2076,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   else()
     set(_strata_poly_driver CUDA::cuda_driver)
   endif()
-  target_link_libraries(strata-poly PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
+  target_link_libraries(strata-poly PRIVATE strata_poly_mmq strata_kernels strata_spec strata_kernels_cpu ggml-cpu ggml-base
                                            ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
                                            ${_strata_poly_driver}
                                            Threads::Threads)
