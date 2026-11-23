@@ -38,9 +38,12 @@ struct Iq256 {
         const char* d = std::getenv("STRATA_POLY_IQ256_DOWN");
         down = d == nullptr || std::atoi(d) != 0;
         if (v != nullptr)
-            std::fprintf(stderr, "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s, down %s)\n",
+            std::fprintf(stderr,
+                         "strata-poly: CPU expert lane: iq256 %s (AVX2 %s, VNNI %s, down %s; build variants "
+                         "0x%X, this thread 0x%X)\n",
                          on ? "on" : "off", isa ? "yes" : "no",
-                         strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no", down ? "on" : "off");
+                         strata::kernels::cpu::cpu_avxvnni_ok() ? "yes" : "no", down ? "on" : "off",
+                         strata::kernels::cpu::iq256_variants(), strata::kernels::cpu::iq256_variant());
     }
     bool use(int gu_type, int d_type, int vec_gu, int vec_d) const {
         return on && (gu_type == GGML_TYPE_IQ2_XS || gu_type == GGML_TYPE_IQ3_XXS) &&

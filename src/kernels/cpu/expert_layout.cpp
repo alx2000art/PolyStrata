@@ -264,8 +264,9 @@ bool cpu_avxvnni_ok() {
         unsigned r[4];
         cpuid_regs(0, 0, r);
         if (r[0] < 7) return false;
-        cpuid_regs(7, 0, r);
-        if (r[0] < 1) return false;            // no sub-leaf 1
+        // Ask sub-leaf 1 directly: the max-subleaf field (EAX of CPUID.7.0) reads 0 on CPUs that still define
+        // sub-leaf 1 (the 12th-14th gen cores report 0 and do have AVX-VNNI), so gating on it hides the feature.
+        // CPUID with an unsupported sub-leaf returns zeros rather than faulting.
         cpuid_regs(7, 1, r);
         return ((r[0] >> 4) & 1u) != 0;        // AVX-VNNI; VEX-encoded, so the OS state is AVX's (cpu_avx2_ok)
     }();
