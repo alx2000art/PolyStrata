@@ -615,11 +615,18 @@ for r in d["runs"]:
 # non-deterministic, so no delta was ever counted.  The other prompts stay strict; SWEEP_DET_IGNORE=""
 # restores the old all-prompts rule.
 ignore = {x for x in os.environ.get("SWEEP_DET_IGNORE", "chat-512").split(",") if x}
-det = all(len(v) == 1 for k, v in per.items() if len(v) > 1 and k not in ignore)
-d["meta"]["deterministic"] = det
-json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-print(f"  детерминизм повторов: {'да' if det else 'НЕТ — ответы расходятся, дельта не считается'}"
-      + (f" (не считаем: {', '.join(sorted(ignore))})" if ignore else ""))
+if os.environ.get("SWEEP_DET_SKIP"):
+    # A cell that removes STRATA_FREEZE_EXPERTS answers differently between repeats by design (the cache's
+    # placement drifts): the gate would throw its delta away.  None, not False - the summary counts it.
+    d["meta"]["deterministic"] = None
+    json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print("  детерминизм: не проверяется (ячейка снимает FREEZE - дрейф раскладки ожидаем)")
+else:
+    det = all(len(v) == 1 for k, v in per.items() if len(v) > 1 and k not in ignore)
+    d["meta"]["deterministic"] = det
+    json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(f"  детерминизм повторов: {'да' if det else 'НЕТ — ответы расходятся, дельта не считается'}"
+          + (f" (не считаем: {', '.join(sorted(ignore))})" if ignore else ""))
 PY
 }
 
@@ -774,6 +781,9 @@ for entry in "${VARIANTS[@]}"; do
   fi
   log ""
   log "=== $name ${spec:+($spec)} ====================================================="
+  # A cell that removes STRATA_FREEZE_EXPERTS drifts between repeats by design (the cache's placement moves
+  # while the answer is written): run_capture then records it as "not checked" instead of failing the cell.
+  if [[ "$spec" == *"ENV:STRATA_FREEZE_EXPERTS="* ]]; then export SWEEP_DET_SKIP=1; else unset SWEEP_DET_SKIP; fi
   if variant_done "$name" && [[ "$FORCE" != "1" ]]; then
     log "  уже есть $OUT_DIR/$name.json — пропускаю (FORCE=1, чтобы переделать)"
     continue
