@@ -86,7 +86,7 @@ PY
 
 # ------------------------- 2. прогоны по доменам -------------------------------
 log ""
-log "[2/3] прогоны (домен = N промптов, --window 4, текущая голова в конфиге) ..."
+log "[2/3] прогоны: домены en/code/ru/zh, по $N промптов, MAX_TOKENS=$MAX_TOKENS ..."
 SLOG="$STRATA_DIR/eagle_collect/server.log"
 printf '%-6s %10s %10s %10s %8s\n' домен принято догадок tok/s раундов
 for dom in en code ru zh; do
