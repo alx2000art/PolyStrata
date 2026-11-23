@@ -11,7 +11,8 @@
 # Что делает: бэкапит конфиг, вписывает в его env STRATA_POLY_STAGE2_DEBUG=1 и
 # STRATA_EAGLE_DEBUG=1 (движок вычищает первый без второго), перезапускает сервер,
 # шлёт один запрос, ждёт, возвращает конфиг и перезапускает сервер на нём.
-# Лог этого прогона: $OUT_DIR/server.log, отчёт: $OUT_DIR/report.md.
+# Лог движка этого прогона: $OUT_DIR/engine.log.profile (stderr движка идёт в файл из
+# поля "log" конфига, не в лог сервера), отчёт: $OUT_DIR/report.md.
 #
 # Формат [moe] (ветка feat/moe-ms; старый бинарник печатает route без скобок - скрипт понимает оба):
 #   [moe] il=3 route 2 ms (wait 1, host 1), card 14 ms, copies 0 ms, rounds 1, cpu_rows 8
@@ -37,6 +38,11 @@ HOST="${HOST:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding=
 CFG_KEY="$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding="utf-8-sig"));print(c.get("api_key") or "")' "$CONFIG" 2>/dev/null)"
 API_KEY="${API_KEY:-$CFG_KEY}"
 MODEL="${MODEL:-my-model}"
+# The [moe] lines and the per-request stats are the ENGINE's stderr, and the server sends it to the config's
+# own log file (server.py: stderr=self.log, cfg["log"]), not to the server's stdout log.  Read that file, and
+# cut this run's segment by its size taken before the restart (it is opened in append mode across restarts).
+ELOG="${ELOG:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1],encoding="utf-8-sig"));print(c.get("log") or "")' "$CONFIG" 2>/dev/null)}"
+[[ -n "$ELOG" ]] || ELOG="${CONFIG%.*}.log"
 
 PROMPT_FILE="${1:-}"
 MAX_TOKENS="${2:-${MAX_TOKENS:-64}}"
@@ -98,6 +104,7 @@ with open(tmp, "w", encoding="utf-8") as f:
 os.replace(tmp, p)
 PYCFG
 echo "  конфиг: env STRATA_POLY_STAGE2_DEBUG=1, STRATA_EAGLE_DEBUG=1"
+LOG_OFF=$(stat -c%s "$ELOG" 2>/dev/null || echo 0)   # our engine's lines start here
 
 echo "  останавливаю сервер ..."
 stop_server
@@ -109,6 +116,24 @@ if ! wait_ready; then
   exit 1
 fi
 echo "  модель загружена"
+
+# A warm-up request: the first one after a start pays the cold page cache and the expert cache's first fill
+# (measured ~15 tok/s against ~30), and its lines would sit in front of the profile's tail anyway.
+echo "  прогрев (16 токенов) ..."
+"$PY" - "$HOST" "$PORT" "$API_KEY" "$MODEL" <<'PYWARM'
+import json, sys, urllib.request
+host, port, key, model = sys.argv[1:5]
+body = {"model": model, "messages": [{"role": "user", "content": "Скажи одно короткое слово по-русски."}],
+        "max_tokens": 16, "temperature": 0.0, "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none",
+        "thinking": {"type": "disabled"}}
+req = urllib.request.Request("http://%s:%s/v1/chat/completions" % (host, port),
+                             data=json.dumps(body).encode(),
+                             headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=1800) as r:
+    json.load(r)
+PYWARM
+sleep 2
 
 echo "  запрос: $MAX_TOKENS токенов ..."
 "$PY" - "$HOST" "$PORT" "$API_KEY" "$MODEL" "$MAX_TOKENS" "$BODY" "$RESP" "$PROMPT" <<'PYREQ'
@@ -140,7 +165,15 @@ print("  ответ: completion %s, prompt %s, wall %.2f s" % (u.get("completion
 PYREQ
 
 sleep 3   # строка статистики движка печатается после ответа
-cp "$LOG" "$OUT_DIR/server.log.profile"   # final restart truncates $LOG - keep this run's [moe] lines
+# The engine's log is append-only across restarts: keep only this run's segment, from the size taken before
+# our start.  The final restart truncates the server's own log, so it cannot hold the [moe] lines at all.
+if [[ -f "$ELOG" ]]; then
+  tail -c +$((LOG_OFF + 1)) "$ELOG" > "$OUT_DIR/engine.log.profile" 2>/dev/null \
+    || cp "$ELOG" "$OUT_DIR/engine.log.profile"
+else
+  : > "$OUT_DIR/engine.log.profile"
+fi
+echo "  лог движка этого прогона: $OUT_DIR/engine.log.profile ($(wc -l < "$OUT_DIR/engine.log.profile" 2>/dev/null || echo 0) строк)"
 
 echo "  возвращаю конфиг и перезапускаю сервер ..."
 cp "$OUT_DIR/config.bak" "$CONFIG"
@@ -149,7 +182,7 @@ start_server
 wait_ready || echo "  (!) сервер не поднялся после профиля - смотри $LOG"
 trap - INT TERM
 
-"$PY" - "$OUT_DIR/server.log.profile" "$RESP" "$REPORT" <<'PYAN'
+"$PY" - "$OUT_DIR/engine.log.profile" "$RESP" "$REPORT" <<'PYAN'
 import json, re, sys
 log_path, resp_path, report_path = sys.argv[1:4]
 text = open(log_path, encoding="utf-8", errors="replace").read()
@@ -187,10 +220,10 @@ out = []
 if not rows:
     out.append("# [moe]-строк нет")
     out.append("")
-    out.append("Движок не печатал [moe]. Проверь: (1) сборка из ветки с этим отчётом, "
-               "(2) в логе нет строки `debug env var(s) ignored` (нужен STRATA_EAGLE_DEBUG=1). "
-               "Если оба в порядке: все эксперты слоёв лежали в VRAM и работал быстрый путь moe_card - "
-               "он [moe]-строку не печатает, и стенсинга в этом запросе не было.")
+    out.append("В сегменте лога движка [moe] нет (%d строк). Проверь: (1) сборка из ветки с этим отчётом; "
+               "(2) в сегменте нет строки `debug env var(s) ignored` (нужен STRATA_EAGLE_DEBUG=1); "
+               "(3) если оба в порядке - все эксперты слоёв лежали в VRAM и работал быстрый путь moe_card: "
+               "он [moe]-строку не печатает, и стенсинга в этом запросе не было." % len(text.splitlines()))
     print("\n".join(out))
     open(report_path, "w", encoding="utf-8").write("\n".join(out) + "\n")
     raise SystemExit(1)
