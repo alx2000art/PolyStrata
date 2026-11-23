@@ -260,7 +260,7 @@ if [[ -n "$ONLY" ]]; then
         keep=("${keep[@]}" "${rest[@]}")
     fi
     VARIANTS=("${keep[@]}")
-    log "ONLY=$ONLY: вариантов ${#VARIANTS[@]}"
+    printf '%s\n' "ONLY=$ONLY: вариантов ${#VARIANTS[@]}"   # log() is defined below this point
 fi
 
 # SKIP_CONTROLS=1: без дублей эталона и контролей дрейфа (01-all-off-b, 15-all-off-m, 99-all-off-c).
@@ -607,10 +607,13 @@ PY
 
 # ------------------------- префлайт: warm_start файл-режим -------------------
 # Пин-файл {"prompt": <текст>} кладётся в конфиг, сервер рестартует: в логе должна
-# появиться строка завершённого тёплого чтения, а запрос, начинающийся с того же
-# текста, должен переиспользовать >= 2048 токенов (строка «... tokens = N reused»
-# печатает сервер после каждого запроса).  Конфиг после проверки восстанавливается
-# из бэкапа (restore_config), сервер поднимается на исходных настройках.
+# появиться строка завершённого тёплого чтения, а запрос, ПРОДОЛЖАЮЩИЙ пин новым ходом
+# (первый ход повторён дословно: тот же user-текст, ответ ассистента, новый вопрос),
+# должен переиспользовать >= 2048 токенов (строка «... tokens = N reused» печатает
+# сервер после каждого запроса).  Дописывать вопрос в ТОТ ЖЕ user-текст нельзя: промпт
+# расходится до единственного чекпойнта (конца хода), и переиспользовать нечего.
+# Конфиг после проверки восстанавливается из бэкапа (restore_config), сервер
+# поднимается на исходных настройках.
 warm_check() {
   local pin="$OUT_DIR/warm-check-request.json" text reused verdict=0 okboot=0 reuse_count=0
   if [[ -n "$WARM_CHECK_PROMPT" && -f "$WARM_CHECK_PROMPT" ]]; then
@@ -652,8 +655,9 @@ import json, sys, urllib.request
 base, key, model, pin = sys.argv[1:5]
 text = json.load(open(pin, encoding="utf-8"))["prompt"]
 body = json.dumps({"model": model,
-                   "messages": [{"role": "user",
-                                 "content": text + "\n\nОтветь ровно одним словом: готово"}],
+                   "messages": [{"role": "user", "content": text},
+                                {"role": "assistant", "content": "Готово."},
+                                {"role": "user", "content": "Ответь ровно одним словом: готово"}],
                    "max_tokens": 8, "temperature": 0, "stream": False}).encode()
 req = urllib.request.Request(base + "/chat/completions", data=body,
                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
