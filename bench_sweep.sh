@@ -245,18 +245,27 @@ VARIANTS+=("87-reserve256|$WORKING_SPEC --cpu-share -1 --threads 0 --vram-reserv
 
 # --- 2026-11-24, по профилю [moe]: половина вычисляемых экспертов идёт на CPU (18 мс/токен), потому что
 # STRATA_FREEZE_EXPERTS отключает всю адаптацию кэша (follow/start_swaps/mind_vram/grow_cache). 88 снимает
-# фриз (ENV:NAME= без значения; apply_variant не даёт свипу вернуть его обратно), 89-91 — вторая половина
-# бюджета, GPU: attention/batch и индексер (в проде --attend-batch 0, --idx-mma 1; --idx-fused не включён).
-VARIANTS+=("88-no-freeze|$WORKING_SPEC ENV:STRATA_FREEZE_EXPERTS=")
-VARIANTS+=("89-attend-batch1|$WORKING_SPEC --attend-batch 1")
-VARIANTS+=("90-idx-mma2|$WORKING_SPEC --idx-mma 2")
-VARIANTS+=("91-idx-fused|$WORKING_SPEC --idx-fused 1")
+# фриз (ENV:NAME= без значения; apply_variant не даёт свипу вернуть его обратно). 89-95 — по одной ручке
+# каждая, и каждая ячейка САМА выставляет остальные в прод-значения: apply_variant не сбрасывает аргумент,
+# которого нет в спеке, и иначе 90 мерил бы idx-mma2 вместе с attend-batch из 89 (класс «stale args»).
+# --no-graphs в базу не входит: разбор спеки идёт парами «ключ значение», а голый флаг его рассинхронизирует;
+# он и так стоит в конфиге, а 94 снимает его DEL: — поэтому 94 стоит последней, чтобы не протечь дальше.
+LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 0 --prompt-batch 2048 --expert-swaps 64"
+VARIANTS+=("88-no-freeze|$LOSSLESS_BASE ENV:STRATA_FREEZE_EXPERTS=")
+VARIANTS+=("89-attend-batch1|$LOSSLESS_BASE --attend-batch 1")
+VARIANTS+=("90-idx-mma2|$LOSSLESS_BASE --idx-mma 2")
+VARIANTS+=("91-idx-fused|$LOSSLESS_BASE --idx-fused 1")
 # 92/93 — VRAM для кэша экспертов без потери префилла и цена компромисса.  prompt-batch 2048 держит под
 # префилл ~2.9 ГБ VRAM (rows_ = min(prompt_batch, max_context) x ~1.4 МиБ) и в декоде тоже; ctx-cap режет
 # KV-бюджет (132768 -> 871 МиБ, 32768 -> 215 МиБ), префилл не трогая.  93 — НЕ рекомендация: сколько
 # теряет префилл и сколько выигрывает декод, если отдать эти 1.4 ГБ кэшу.
-VARIANTS+=("92-ctx32k|$WORKING_SPEC --ctx-cap 32768")
-VARIANTS+=("93-pb1024|$WORKING_SPEC --prompt-batch 1024")
+VARIANTS+=("92-ctx32k|$LOSSLESS_BASE --ctx-cap 32768")
+VARIANTS+=("93-pb1024|$LOSSLESS_BASE --prompt-batch 1024")
+# 95 — вдвое агрессивнее свапы: кэш тянет горячий набор во время ответа (~8 ГБ VRAM, ~580 слотов).
+VARIANTS+=("95-swaps128|$LOSSLESS_BASE --expert-swaps 128")
+# 94 — последняя: по профилю без фриза ждать GPU стало ~15.7 мс/токен при десятках запусков на слой, а в
+# конфиге стоит --no-graphs; 94 возвращает графы (DEL снимает флаг).  Последняя — чтобы графы не протекли.
+VARIANTS+=("94-graphs|$LOSSLESS_BASE DEL:--no-graphs")
 
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
@@ -1097,7 +1106,9 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("90-idx-mma2", "idx-mma 2"),
        ("91-idx-fused", "idx-fused 1"),
        ("92-ctx32k", "ctx-cap 32768 (KV-бюджет -650 МиБ)"),
-       ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"))
+       ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"),
+       ("94-graphs", "графы включены (DEL --no-graphs)"),
+       ("95-swaps128", "expert-swaps 128 (кэш тянет hot set)"))
 if "80-eta-iq256off" in names and any(nm in names for nm, _ in los):
     lines.append("")
     lines.append("## lossless-ручки (пара к `80-eta-iq256off`)")
