@@ -926,6 +926,45 @@ if base_name not in names:
     print("Запусти свип заново: variant_done теперь требует совпадения отпечатка и переснимет старые ячейки.")
     sys.exit(0)
 rows = []
+# Integrity of the answers: a corrupted model answers nothing like the working spec on a prompt it
+# answered at length (the iq lane's down bug did: an empty answer and token salad).  Speed from such a
+# cell means nothing, so it is marked and its delta skipped, like a non-deterministic capture.
+qref = ("80-eta-iq256off" if "80-eta-iq256off" in names
+        else "10-all-on" if "10-all-on" in names else base_name)   # the working spec, not the all-off
+def texts_of(nm):
+    d = load(nm) or {}
+    out = {}
+    for r in d.get("runs", []):
+        t = r.get("text") or ""
+        if len(t) > len(out.get(r.get("id"), "")):
+            out[r.get("id")] = t
+    return out
+ref_txt = texts_of(qref)
+broken = {}
+for nm in names:
+    if nm == qref:
+        continue
+    cur = texts_of(nm)
+    empty, far = [], []
+    for pid, bt in ref_txt.items():
+        if len(bt) < 200:
+            continue
+        ct = cur.get(pid, "")
+        if not ct.strip():
+            empty.append(pid)
+            continue
+        k = 0
+        while k < min(len(bt), len(ct)) and bt[k] == ct[k]:
+            k += 1
+        if k < 8:
+            far.append("%s (%d симв.)" % (pid, k))
+    if empty or len(far) >= 2:
+        why = []
+        if empty:
+            why.append("пусто: " + ", ".join(empty))
+        if far:
+            why.append("не совпало: " + ", ".join(far))
+        broken[nm] = why
 for name in names:
     if name == base_name:
         continue
@@ -960,6 +999,9 @@ for name in names:
     if det is False:
         verdict = "НЕДЕТЕРМИНИРОВАН (повторы расходятся) — дельта не считается"
         rec = "—"
+    if name in broken:
+        verdict = "ОТВЕТ СЛОМАН (" + "; ".join(broken[name][:2]) + ") — дельта не считается"
+        rec = "—"
     rows.append((name, n, d, p, ta, tb, verdict, rec, note))
 
 rows.sort(key=lambda r: -(r[2]))  # по приросту decode, сверху самые полезные
@@ -982,6 +1024,13 @@ lines.append("|---|---:|---:|---:|---|---|---|")
 for name, n, d, p, ta, tb, v, rec, note in rows:
     lines.append(f"| {label(name)}{note} | {n} | {d:+.1f}% | {p:+.1f}% | {ta:.2f}s → {tb:.2f}s | {v} | {rec} |")
 lines.append("")
+if broken:
+    lines.append("## Проверка целостности ответов (к `%s`)" % qref)
+    for nm in sorted(broken):
+        lines.append("* `%s`: %s" % (nm, "; ".join(broken[nm][:4])))
+    lines.append("* пустой ответ или совпадение меньше 8 символов на двух и более промптах — это не дрейф "
+                 "округлений, а сломанная модель: скорость такой ячейки не считается.")
+    lines.append("")
 lines.append("## Контроль decode (decode не должен падать после патчей)")
 if noise_d is not None:
     thr = max(noise_d, guard)
