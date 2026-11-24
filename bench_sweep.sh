@@ -294,6 +294,12 @@ VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graph
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
 VARIANTS+=("94-graphs|$LOSSLESS_BASE DEL:--no-graphs")
+# 89 — графы на ПРОД-аргументах: 94 против 80 был нечестной парой (LOSSLESS_BASE пинит --ctx-cap 32768,
+# а конфиг держит 131072), а cap меняет размер KV -> ёмкость кэша экспертов -> набор резидентных
+# экспертов, и --tail-skip 4 (отбрасывает "вне VRAM") даёт другие суммы: 0.5-3 логита при том же top-1.
+# 89 = WORKING_SPEC без пинов + графы: пара 80↔89 меряет только графы.  Зонд логитов прямым запуском
+# (tools/graph_parts_bisect.sh) показал: при одинаковых аргументах графы и прямые запуски побитово равны.
+VARIANTS+=("89-eta-graphs|$WORKING_SPEC DEL:--no-graphs")
 # 95 — графы только на маршрутизаторе карты (c): единственная часть, для которой не было ячейки.  Бисект
 # расхождения ответов 94 против 80 идёт по частям: 98 голова+внимание, 96 хвост слоя, 97 shared-эксперт,
 # 79 логиты, 95 card_moe.  Часть, которая одна меняет ответ, и есть подозреваемая.
@@ -1156,6 +1162,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("92-ctxfull", "ctx-cap 132k (KV-бюджет 871 МиБ)"),
        ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
+       ("89-eta-graphs", "графы на прод-аргументах (пара к 80)"),
        ("44-readheat", "read-heat 1 (тепло в recent_, follow двигает)"),
        ("45-readfill", "дозаливка кэша по роутингу чтения (hold)"),
        ("46-pcie35", "35% CPU-экспертов на карту по PCIe (pcie_frac)"),
