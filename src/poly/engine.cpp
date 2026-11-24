@@ -789,10 +789,27 @@ void Engine::park_bound() {
     q.kv = std::exchange(kv_, {});
     q.bufs = std::exchange(bufs_, {});
     q.images = std::exchange(images_, {});
-    q.heads.resize(layers_.size());
-    for (size_t il = 0; il < layers_.size(); ++il) q.heads[il] = std::exchange(layers_[il].heads, {});
+    // every map of recorded launches a layer holds: each bakes the pointers of this sequence's buffers
+    const size_t nl = layers_.size();
+    q.heads.resize(nl);
+    q.shared.resize(nl);
+    q.shared_run.resize(nl);
+    q.tail.resize(nl);
+    q.merged.resize(nl);
+    q.card_moe.resize(nl);
+    q.rows_heads.resize(nl);
+    for (size_t il = 0; il < nl; ++il) {
+        Layer& L = layers_[il];
+        q.heads[il] = std::exchange(L.heads, {});
+        q.shared[il] = std::exchange(L.shared, {});
+        q.shared_run[il] = std::exchange(L.shared_run, {});
+        q.tail[il] = std::exchange(L.tail, {});
+        q.merged[il] = std::exchange(L.merged, {});
+        q.card_moe[il] = std::exchange(L.card_moe, {});
+        q.rows_heads[il] = std::exchange(L.rows_heads, {});
+    }
     q.passes = std::exchange(passes_, {});
-    q.tail = std::exchange(tail_, nullptr);
+    q.tail_launches = std::exchange(tail_, nullptr);
 }
 
 // Sequence s's members in place of the ones park_bound() put away, and the architecture's pointers into its
@@ -810,9 +827,18 @@ void Engine::take_bound(int s) {
     bufs_ = std::exchange(q.bufs, {});
     images_ = std::exchange(q.images, {});
     ++images_set_;
-    for (size_t il = 0; il < layers_.size() && il < q.heads.size(); ++il) layers_[il].heads = std::exchange(q.heads[il], {});
+    for (size_t il = 0; il < layers_.size() && il < q.heads.size(); ++il) {
+        Layer& L = layers_[il];
+        L.heads = std::exchange(q.heads[il], {});
+        L.shared = std::exchange(q.shared[il], {});
+        L.shared_run = std::exchange(q.shared_run[il], {});
+        L.tail = std::exchange(q.tail[il], {});
+        L.merged = std::exchange(q.merged[il], {});
+        L.card_moe = std::exchange(q.card_moe[il], {});
+        L.rows_heads = std::exchange(q.rows_heads[il], {});
+    }
     passes_ = std::exchange(q.passes, {});
-    tail_ = std::exchange(q.tail, nullptr);
+    tail_ = std::exchange(q.tail_launches, nullptr);
     bound_ = s;
     again_ = 0;
     alloc_caches();

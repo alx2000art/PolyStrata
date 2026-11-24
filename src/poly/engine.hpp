@@ -776,9 +776,18 @@ protected:
         std::vector<Kv> kv;
         std::vector<Buf> bufs;
         std::vector<Image> images;
+        // A recorded launch bakes the pointers it was handed, and a layer's pointers are its sequence's residual
+        // and expert buffers: every map of each layer travels with the sequence, or a restored conversation
+        // replays another's launches into another's memory (a tab that answered about another tab's prompt).
         std::vector<std::vector<void*>> heads;   ///< Layer::heads, by layer
+        std::vector<std::vector<void*>> shared;  ///< Layer::shared
+        std::vector<std::vector<void*>> shared_run;   ///< Layer::shared_run
+        std::vector<std::vector<void*>> tail;    ///< Layer::tail
+        std::vector<std::vector<void*>> merged;  ///< Layer::merged
+        std::vector<std::vector<void*>> card_moe;     ///< Layer::card_moe
+        std::vector<std::map<std::vector<int>, void*>> rows_heads;   ///< Layer::rows_heads
         std::map<std::vector<int>, void*> passes;
-        void* tail = nullptr;
+        void* tail_launches = nullptr;   ///< Engine::tail_, the last layer's launches to the logits
     };
     std::vector<Seq> seqs_;      ///< the bound one's place holds nothing while it is bound
     int bound_ = 0;
