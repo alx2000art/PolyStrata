@@ -2892,7 +2892,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
     static const bool dbg_ = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
     const Clock::time_point t_enter = Clock::now();
     Clock::time_point t0 = Clock::now();
-    ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+    ck(cudaEventSynchronize((cudaEvent_t) ev_), "router sync");
     const Clock::time_point t_wait_end = Clock::now();
     stats_.route_wait_ms += ms_since(t0);
     double route_host_ms = 0, cpu_ms = 0;
@@ -3444,7 +3444,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     }
 
     const Clock::time_point t0 = Clock::now();
-    ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+    ck(cudaEventSynchronize((cudaEvent_t) ev_), "router sync");
     // The audit ([moe] with STRATA_POLY_STAGE2_DEBUG): how much of `route` a call spends waiting for the
     // router's copy and how much is the host's own bookkeeping (counts, the spare and slot lists, the bounds).
     const Clock::time_point t_after_wait = Clock::now();
@@ -3960,20 +3960,34 @@ void Engine::run(const int32_t* tokens, int n) {
     // call's tokens together are [0, window) by their number, and a half of a window comes after those, by the
     // window's tokens and which half it is.  Which tokens leave their state is the window's, so its halves' too.
     const size_t wn = (size_t) opt_.window, recs = 3 * wn + (size_t) opt_.batch + 1;   // step()'s rows after
-    // up() without a recording of its own: layer_head, the router's event, the shared expert.  The recorded form
-    // wraps it, and STRATA_POLY_MERGE=1 records it together with the previous layer's tail.
-    const auto up_body = [&](int il, int m) {
+    // up(): layer_head, the router's event, the shared expert.  Recorded, the head and the shared expert are
+    // two graphs with the event recorded on the stream between them; STRATA_POLY_MERGE=1 records the pair
+    // with the previous layer's tail (and keeps the event inside, which is why it stays opt-in).
+    // Up to the router alone: the head's launches, whose last one is the router's copy to the host.
+    const auto head_body = [&](int il, int m) { layer_head(layers_[(size_t) il], il, m); };
+    const auto up_body = [&](int il, int m) {   // the unrecorded form: head, the router's event, the shared
         Layer& L = layers_[(size_t) il];
         layer_head(L, il, m);
         if (!L.moe || batched(L, m)) return;
-        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router record");
         moe_shared(L, il, m);
     };
     const auto up = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
-        if (replay && L.fixed && graph_part('h')) replayed(L.heads, head, [&] { up_body(il, m); });
-        else up_body(il, m);
+        if (!(replay && L.fixed && graph_part('h'))) {
+            up_body(il, m);
+            return;
+        }
+        // The head's graph, then the router's event recorded ON THE STREAM, then the shared expert's graph.
+        // An event node inside the recording is not what cudaEventSynchronize waits on - with graphs on, the
+        // decode failed at the router's event with "invalid argument" - and this is Basalt's split at the
+        // router in effect: the CPU's experts start while the shared expert runs on the card.
+        replayed(L.heads, head, [&] { head_body(il, m); });
+        if (!L.moe || batched(L, m)) return;
+        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router record");
+        if (graph_part('s')) replayed(L.shared_run, head, [&] { moe_shared(L, il, m); });
+        else moe_shared(L, il, m);
     };
     const auto tail = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];

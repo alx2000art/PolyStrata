@@ -200,6 +200,8 @@ struct Layer {
     // also by Engine::head_key()
     std::vector<void*> heads;          ///< up to the router
     std::vector<void*> shared;         ///< the shared expert
+    std::vector<void*> shared_run;     ///< the shared expert's recording per (head_key, rec), run()'s split at
+                                       ///< the router: the head's graph, the router's event on the stream, this
     std::vector<void*> tail;           ///< after the experts
     std::vector<void*> merged;         ///< STRATA_POLY_MERGE=1: the previous layer's tail and this layer's
                                        ///< head + shared expert as ONE recording, keyed like heads
