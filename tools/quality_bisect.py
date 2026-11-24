@@ -68,6 +68,14 @@ def v_graphs(cfg):
     del_arg(cfg, "--no-graphs")
 
 
+def v_nographs(cfg):
+    """Эталон: графы выключены (когда в конфиге они включены)."""
+    args = [str(a) for a in cfg.get("args") or []]
+    if "--no-graphs" not in args:
+        args.append("--no-graphs")
+    cfg["args"] = args
+
+
 def graph_part(letter):
     """Графы включены, записывается только эта часть (h голова, t хвост, s shared, l логиты, c маршрутизатор)."""
     def apply(cfg):
@@ -105,6 +113,7 @@ def v_tail0(cfg):
 VARIANTS = {
     "base": v_base,
     "graphs": v_graphs,
+    "nographs": v_nographs,
     "g_h": graph_part("h"),   # голова слоя со вниманием
     "g_t": graph_part("t"),   # хвост слоя
     "g_s": graph_part("s"),   # shared-эксперт
@@ -209,7 +218,7 @@ def run_probes():
 
 def main():
     names = [n.strip() for n in
-             os.environ.get("VARIANTS", "base,graphs,g_h,g_t,g_s,g_l,lookup3").split(",") if n.strip()]
+             os.environ.get("VARIANTS", "nographs,graphs,g_h,g_t,g_s,g_l").split(",") if n.strip()]
     unknown = [n for n in names if n not in VARIANTS]
     if unknown:
         print(f"неизвестные варианты: {unknown}; есть: {list(VARIANTS)}")
