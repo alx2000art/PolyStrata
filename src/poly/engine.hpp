@@ -581,7 +581,8 @@ protected:
     void mind_memory();
     void follow(int written);
     void follow_loop();
-    void trade_experts();
+    /// follow()'s trades, one pass: the number of uploads it asked for (0: nothing was worth a slot).
+    int trade_experts();
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
@@ -658,6 +659,9 @@ protected:
     std::vector<void*> host_registered_;  ///< what cudaHostRegister took, given back by ~Engine
     std::atomic<bool> map_quit_{false};
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
+    bool read_fill_ = false;                 ///< STRATA_POLY_READ_FILL: the cache is filled from the prompt's
+                                             ///< own routing at the read's end, and holds while the answer is written
+    bool read_fill_hold_ = false;            ///< the fill is done: no trade, no decay, no shrink until the next read
     bool freeze_experts_ = false;            ///< STRATA_FREEZE_EXPERTS: the experts' split is frozen
                                              ///< for the engine's whole run (see Engine::load())
     bool freeze_experts_asked_ = false;      ///< the env was set: refreeze_experts() puts it back after the

@@ -264,12 +264,17 @@ VARIANTS+=("91-idx-fused|$LOSSLESS_BASE --idx-fused 1")
 VARIANTS+=("92-ctxfull|$LOSSLESS_BASE --ctx-cap 0")
 VARIANTS+=("93-pb1024|$LOSSLESS_BASE --prompt-batch 1024")
 # 95 — вдвое агрессивнее свапы: кэш тянет горячий набор во время ответа (~8 ГБ VRAM, ~580 слотов).
-VARIANTS+=("95-swaps128|$LOSSLESS_BASE --expert-swaps 128")
 # 94 — последняя: по профилю без фриза ждать GPU стало ~15.7 мс/токен при десятках запусков на слой, а в
 # конфиге стоит --no-graphs; 94 возвращает графы (DEL снимает флаг).  Последняя — чтобы графы не протекли.
 # 96-98: клетки для поиска той записи, которая ломает ответы (94 с графами отвечала пустым токеном на
 # каждый промпт).  Заграфена ровно одна часть: t - хвост слоя, s - shared-эксперт, h - голова.
 VARIANTS+=("79-graph-logits|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=l DEL:--no-graphs")
+# 44/45: кэш экспертов из роутинга самого запроса.  45 — новая дозаливка (STRATA_POLY_READ_FILL):
+# после чтения промпта кэш переставляется по его собственной маршрутизации и замирает на ответ —
+# детерминированно на запрос.  44 — старый read-heat (тепло в recent_, но follow() двигает кэш во
+# время ответа, по темпу машины): это потолок, с которым сверяем дозаливку.
+VARIANTS+=("44-readheat|$LOSSLESS_BASE --read-heat 1")
+VARIANTS+=("45-readfill|$LOSSLESS_BASE ENV:STRATA_POLY_READ_FILL=1")
 VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graphs")
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
@@ -428,7 +433,7 @@ env = cfg.get("env") or {}
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
-           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS")
+           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -567,6 +572,10 @@ wait_ready() {
   local deadline=$((SECONDS + BOOT_TIMEOUT)) code body
   log "  жду готовности сервера ($HEALTH_URL), до ${BOOT_TIMEOUT}s ..."
   while (( SECONDS < deadline )); do
+    if [[ -f "$OUT_DIR/server.pid" ]] && ! kill -0 "$(cat "$OUT_DIR/server.pid" 2>/dev/null)" 2>/dev/null; then
+      log "  !!! сервер умер при старте (pid $(cat "$OUT_DIR/server.pid" 2>/dev/null)) — не ждём ${BOOT_TIMEOUT}s"
+      return 1
+    fi
     port_open || { sleep 5; continue; }
     body=$(curl -s -m 5 -H "Authorization: Bearer $API_KEY" "$HEALTH_URL" 2>/dev/null || true)
     if printf '%s' "$body" | grep -q '"loaded"[[:space:]]*:[[:space:]]*true'; then
@@ -1126,7 +1135,8 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("92-ctxfull", "ctx-cap 132k (KV-бюджет 871 МиБ)"),
        ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
-       ("95-swaps128", "expert-swaps 128 (кэш тянет hot set)"),
+       ("44-readheat", "read-heat 1 (тепло в recent_, follow двигает)"),
+       ("45-readfill", "дозаливка кэша по роутингу чтения (hold)"),
        ("79-graph-logits", "графы: только logits"),
        ("96-graph-tail", "графы: только tail"),
        ("97-graph-shared", "графы: только shared"),

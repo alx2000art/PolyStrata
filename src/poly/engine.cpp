@@ -926,7 +926,7 @@ void Engine::shrink_cache(size_t bytes) {
     // experts between slots mid-answer (cover() calls it when the attention caches grow, and mind_vram() when
     // another program takes VRAM), which is exactly the change the freeze is there to keep out.  A frozen
     // answer's cache is the one its first token saw; the request after it may size it again.
-    if (freeze_experts_) return;
+    if (freeze_experts_ || read_fill_hold_) return;
     size_t cut = arena_.mapped;
     for (size_t i = arena_.pieces.size(); i > 0 && arena_.mapped - cut < bytes; --i) cut -= arena_.pieces[i - 1].second;
     settle_swaps();
@@ -1641,7 +1641,7 @@ void Engine::resize_card_cache(int mib) {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
     // As shrink_cache(): a frozen answer's cache does not change under it (the vram API resizes between
     // requests; unfreeze_experts() ends the freeze before one begins).
-    if (freeze_experts_) return;
+    if (freeze_experts_ || read_fill_hold_) return;
     OnCard here(device_, split_);
     ck(cudaStreamSynchronize(cs(st_)), "resize");
     const auto failed = [&] {
@@ -1980,7 +1980,7 @@ void Engine::follow(int written) {
     // frozen answer sees a cache that never changes, which makes it a function of the request alone.  The
     // uploads themselves go on: the followers fill their slots, and unfreeze_experts() lets the next request's
     // first token claim them.
-    if (freeze_experts_) return;
+    if (freeze_experts_ || read_fill_hold_) return;
     const size_t ne = (size_t) n_expert_;
     for (int j = 0; j < n_swap_; ++j) {
         Swap& s = swap_[(size_t) j];
@@ -1995,6 +1995,7 @@ void Engine::follow(int written) {
             staged_il_ = -1;   // the staging buffer holds what was not cached
         }
     }
+    if (read_fill_hold_) return;   // the read's fill set this answer's cache: it does not move under it
     if (written <= 0) return;
     const float keep = std::exp2(-(float) written / (float) kSwapHalf);
     for (float& r : recent_) r *= keep;
@@ -2006,11 +2007,11 @@ void Engine::follow(int written) {
 // uploads are free, which is all the pairs below can take.  A pass for every upload was 0.6 ms of a window of
 // GLM 5.3 Flash's.  The warm fold at a read's end calls it too, before the answer's first window waits on its
 // experts (the uploads run on the swap stream while the first windows compute).
-void Engine::trade_experts() {
+int Engine::trade_experts() {
     const size_t ne = (size_t) n_expert_;
     int n_free = 0;
     for (int j = 0; j < n_swap_; ++j) n_free += swap_[(size_t) j].at.load() == Swap::kFree;
-    if (n_free == 0) return;
+    if (n_free == 0) return 0;
 
     const size_t most = (size_t) n_free;
     in_.assign((size_t) n_trade_ * most, Pick{});
@@ -2045,7 +2046,7 @@ void Engine::trade_experts() {
     // An upload goes to the size whose next pair gains most.  A cached expert that has given its slot is no
     // candidate to come in: it was used no more than the cached ones left.
     trade_at_.assign((size_t) n_trade_, 0);
-    bool asked = false;
+    int asked_n = 0;
     for (; n_free > 0; --n_free) {
         int best = -1;
         float gain = 0.f;
@@ -2074,12 +2075,13 @@ void Engine::trade_experts() {
         staged_il_ = -1;
         coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
         s->at.store(Swap::kAsked);
-        asked = true;
+        ++asked_n;
     }
-    if (asked) {
+    if (asked_n) {
         { std::lock_guard<std::mutex> l(swap_m_); }
         swap_cv_.notify_one();
     }
+    return asked_n;
 }
 
 void Engine::load(const Options& o) {
@@ -2190,6 +2192,14 @@ void Engine::load(const Options& o) {
     // What it costs: an expert the answer keeps using but that arrived after its first token is computed on the
     // CPU instead (the cache holds it, but the split is the first token's).  What it buys: greedy answers that
     // repeat bit for bit, which is what a test, a benchmark of quality or a comparison with another engine needs.
+    // STRATA_POLY_READ_FILL: the cache is filled from the prompt's own routing at the read's end and holds
+    // while the answer is written - a deterministic warm start (the same prompt fills the same cache), where
+    // follow() trades by the machine's pace.  The env only: an A/B knob, not an option yet.
+    read_fill_ = std::getenv("STRATA_POLY_READ_FILL") != nullptr;
+    if (read_fill_)
+        std::fprintf(stderr, "strata-poly: the expert cache is filled from each request's own routing at its "
+                             "read's end (STRATA_POLY_READ_FILL), and holds while the answer is written
+");
     freeze_experts_ = freeze_experts_asked_ = std::getenv("STRATA_FREEZE_EXPERTS") != nullptr;
     if (freeze_experts_)
         std::fprintf(stderr, "strata-poly: the experts' split is frozen for the engine's whole run "
@@ -3472,7 +3482,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         ++use_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
         // a read's routing also counts as heat (no decay: a prompt is finite), for the staging's order while it
         // runs (plan_ahead) and for the cache at its end (Engine::read folds it into recent_)
-        if (in_read_ && opt_.read_heat != 0 && !heat_.empty())
+        if (in_read_ && (opt_.read_heat != 0 || read_fill_) && !heat_.empty())
             ++heat_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
         // the answer's first windows route like the read's tail: the accumulator keeps the current call's
         // routes alone, the layer index dropping (the read's next call began) clearing it
@@ -4561,6 +4571,8 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     }
     const int n_calls = (int) calls_.size();
     in_read_ = true;   // the batches below count their routing into heat_ (moe_rows), for the read's staging
+    read_fill_hold_ = false;
+    if (read_fill_ && !recent_.empty()) std::fill(recent_.begin(), recent_.end(), 0.f);   // the fill: this request only
                        // and for the cache at the read's end
     // DSpark/EAGLE: the read's taps ride to the host (the layer-major order rewrites the device
     // buffer per call); the read's end injects them in batches.  The buffer indexes READ-RELATIVE
@@ -4769,7 +4781,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     // prompt's busiest experts in over cached ones the answer uses less, at its own pace (its uploads, its
     // stream, its gain rule).  use_ counted the routing all along; the profile the run writes knows the prompt's
     // experts too.  --read-heat 0 leaves the counts out.
-    if (opt_.read_heat != 0 && !heat_.empty() && !recent_.empty())
+    if ((opt_.read_heat != 0 || read_fill_) && !heat_.empty() && !recent_.empty())
         for (size_t i = 0; i < heat_.size(); ++i) {
             if (heat_[i] > 0) recent_[i] += (float) std::min<int64_t>(heat_[i], kSwapHeat);
             heat_[i] = 0;
@@ -4794,6 +4806,24 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         if (warm_dbg)
             std::fprintf(stderr, "[warm] the read's tail folded %d experts into recent_, the trades asked\n",
                          folded);
+    }
+    if (read_fill_ && n_swap_ > 0 && !freeze_experts_) {
+        // The answer's cache, from the prompt's own routing, before the first answer token.  The read's
+        // counts are the request's (the same prompt routes the same, and they started clean at the read),
+        // so the answer is a function of the request; a pass fills every free upload slot and the next asks
+        // the rest, and the read itself streamed those experts' bytes - the copies land from the page cache.
+        // After it the cache holds: follow() neither trades nor decays while the answer is written.
+        int moved = 0, passes = 0, asked = 0;
+        for (; passes < 8; ++passes) {
+            asked = trade_experts();
+            if (asked == 0) break;
+            settle_swaps();
+            moved += asked;
+        }
+        read_fill_hold_ = true;
+        if (warm_dbg)
+            std::fprintf(stderr, "[warm] read-fill: %d experts into the cache in %d passes, it holds now\n",
+                         moved, passes);
     }
     // DSpark/EAGLE: the read's rows' taps rode to the host (the layer-major order); the drafter's
     // cache rows fill in batches here - the decode's draft rounds then attend them.  Both read paths
