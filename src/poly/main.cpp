@@ -1509,6 +1509,14 @@ int main(int argc, char** argv) {
                              "with tokens left of --tokens\n");
         return 2;
     }
+    // --cpu-share: -1 auto, 0 none, and a share below 1.  At 1 every expert outside VRAM is the CPU's, the
+    // staging has no expert left to copy and a round of it divides by an empty set (--cpu-share 1 took the
+    // engine down).
+    if (o.cpu_share >= 1.f || o.cpu_share < -1.f) {
+        std::fprintf(stderr, "strata-poly: --cpu-share takes -1 (measured), 0 (none) or a share below 1; "
+                             "%g is not one of them\n", (double) o.cpu_share);
+        return 2;
+    }
     // --check-batch: K sequences growing together would take VRAM from the expert cache that the single runs had,
     // and an expert moved to the CPU rounds differently (issue 55).  Their attention rows get VRAM at load instead.
     if (check > 0) o.kv_grow = false;

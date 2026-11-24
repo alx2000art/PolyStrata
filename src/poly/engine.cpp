@@ -3692,7 +3692,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         std::stable_sort(spare_.begin(), spare_.end(),
                          [&](int32_t a, int32_t b) { return count_[(size_t) a] < count_[(size_t) b]; });
         n_spare = (int) spare_.size();
-        const double s = opt_.cpu_share > 0 ? std::min(opt_.cpu_share, 1.f) : share_[size];
+        // below 1: at 1 the staging has no expert to copy and its rounds come out empty (main.cpp refuses it too,
+        // a defensive clamp keeps a config that slipped through from taking the engine down)
+        const double s = opt_.cpu_share > 0 ? std::min(opt_.cpu_share, 0.95f) : share_[size];
         n_cpu = (int) std::lround(s * n_spare);
         for (int j = 0; j < n_cpu; ++j) on_cpu_[(size_t) spare_[(size_t) j]] = 1;
     }
