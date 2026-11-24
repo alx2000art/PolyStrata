@@ -294,12 +294,13 @@ VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graph
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
 VARIANTS+=("94-graphs|$LOSSLESS_BASE DEL:--no-graphs")
-# 89 — графы на ПРОД-аргументах: 94 против 80 был нечестной парой (LOSSLESS_BASE пинит --ctx-cap 32768,
+# 69 — графы на ПРОД-аргументах: 94 против 80 был нечестной парой (LOSSLESS_BASE пинит --ctx-cap 32768,
 # а конфиг держит 131072), а cap меняет размер KV -> ёмкость кэша экспертов -> набор резидентных
 # экспертов, и --tail-skip 4 (отбрасывает "вне VRAM") даёт другие суммы: 0.5-3 логита при том же top-1.
-# 89 = WORKING_SPEC без пинов + графы: пара 80↔89 меряет только графы.  Зонд логитов прямым запуском
+# 69 = WORKING_SPEC без пинов + графы: пара 80↔69 меряет только графы (номер свободный; 89 занят
+# attend-batch1, и ONLY по подстроке "89" тянул обе ячейки).  Зонд логитов прямым запуском
 # (tools/graph_parts_bisect.sh) показал: при одинаковых аргументах графы и прямые запуски побитово равны.
-VARIANTS+=("89-eta-graphs|$WORKING_SPEC DEL:--no-graphs")
+VARIANTS+=("69-eta-graphs|$WORKING_SPEC DEL:--no-graphs")
 # 95 — графы только на маршрутизаторе карты (c): единственная часть, для которой не было ячейки.  Бисект
 # расхождения ответов 94 против 80 идёт по частям: 98 голова+внимание, 96 хвост слоя, 97 shared-эксперт,
 # 79 логиты, 95 card_moe.  Часть, которая одна меняет ответ, и есть подозреваемая.
@@ -450,7 +451,10 @@ apply_variant() {  # $1 = spec пар "ключ значение ...", plus ENV:
   python3 - "$CONFIG" "$1" <<'PY'
 import json, os, sys
 path, spec = sys.argv[1], sys.argv[2].strip()
-cfg = json.load(open(path, encoding="utf-8-sig"))
+# от чистого снимка (PRISTINE), не от конфига, куда записался предыдущий вариант: его пины иначе
+# наследуются следующей ячейкой, которая их не называла
+src = os.environ.get("PRISTINE") or path
+cfg = json.load(open(src, encoding="utf-8-sig"))
 args = [str(a) for a in (cfg.get("args") or [])]
 env = cfg.get("env") or {}
 # Every variant starts from a clean env for the keys this sweep manages: keys left in the config
@@ -794,6 +798,13 @@ on_interrupt() {
 trap on_interrupt INT TERM
 
 cp "$CONFIG" "$BACKUP" || die "не смог забэкапить конфиг"
+# Каждый вариант считается от ЭТОГО снимка, а не от конфига, в который предыдущий вариант уже записал
+# свои аргументы: apply_variant() пишет args в конфиг, и без снимка пины LOSSLESS_BASE (--ctx-cap 32768
+# и прочее) протекали в следующие по порядку ячейки - 89-eta-graphs после 89-attend-batch1 получила
+# ctx-cap 32768, хотя её спека его не называла, и мерила уже не графы.
+PRISTINE="$OUT_DIR/config.pristine.json"
+cp "$CONFIG" "$PRISTINE" || die "не смог снять чистый снимок конфига"
+export PRISTINE
 log "бэкап конфига: $BACKUP"
 [[ "$FORCE" == "1" ]] && rm -f "$OUT_DIR"/*.json
 failed=()
@@ -1162,7 +1173,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("92-ctxfull", "ctx-cap 132k (KV-бюджет 871 МиБ)"),
        ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
-       ("89-eta-graphs", "графы на прод-аргументах (пара к 80)"),
+       ("69-eta-graphs", "графы на прод-аргументах (пара к 80)"),
        ("44-readheat", "read-heat 1 (тепло в recent_, follow двигает)"),
        ("45-readfill", "дозаливка кэша по роутингу чтения (hold)"),
        ("46-pcie35", "35% CPU-экспертов на карту по PCIe (pcie_frac)"),
