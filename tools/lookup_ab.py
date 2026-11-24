@@ -41,8 +41,7 @@ PROMPTS = [
 ]
 
 
-def run(cmd, **kw):
-    return subprocess.run(cmd, cwd=ROOT, **kw)def load_cfg():
+def load_cfg():
     with open(CFG, encoding="utf-8-sig") as fh:
         return json.load(fh)
 
