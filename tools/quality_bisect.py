@@ -58,11 +58,24 @@ def del_arg(cfg, key):
 
 
 def v_base(cfg):
-    pass
+    # никаких следов прошлых экспериментов
+    env = dict(cfg.get("env") or {})
+    env.pop("STRATA_GRAPH_PARTS", None)
+    cfg["env"] = env
 
 
 def v_graphs(cfg):
     del_arg(cfg, "--no-graphs")
+
+
+def graph_part(letter):
+    """Графы включены, записывается только эта часть (h голова, t хвост, s shared, l логиты, c маршрутизатор)."""
+    def apply(cfg):
+        del_arg(cfg, "--no-graphs")
+        env = dict(cfg.get("env") or {})
+        env["STRATA_GRAPH_PARTS"] = letter
+        cfg["env"] = env
+    return apply
 
 
 def v_lookup3(cfg):
@@ -92,6 +105,11 @@ def v_tail0(cfg):
 VARIANTS = {
     "base": v_base,
     "graphs": v_graphs,
+    "g_h": graph_part("h"),   # голова слоя со вниманием
+    "g_t": graph_part("t"),   # хвост слоя
+    "g_s": graph_part("s"),   # shared-эксперт
+    "g_l": graph_part("l"),   # логиты
+    "g_c": graph_part("c"),   # маршрутизатор карты
     "lookup3": v_lookup3,
     "penalties": v_penalties,
     "convcache": v_convcache,
@@ -190,7 +208,8 @@ def run_probes():
 
 
 def main():
-    names = [n.strip() for n in os.environ.get("VARIANTS", ",".join(VARIANTS)).split(",") if n.strip()]
+    names = [n.strip() for n in
+             os.environ.get("VARIANTS", "base,graphs,g_h,g_t,g_s,g_l,lookup3").split(",") if n.strip()]
     unknown = [n for n in names if n not in VARIANTS]
     if unknown:
         print(f"неизвестные варианты: {unknown}; есть: {list(VARIANTS)}")
