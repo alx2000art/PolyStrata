@@ -239,9 +239,10 @@ VARIANTS+=("84-on-iq512-min1|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_PO
 # явно (-1/0 = дефолты движка), чтобы значение предыдущей ячейки не протекло в следующую.
 PHYS_CORES=$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 if ! [[ "${PHYS_CORES:-0}" =~ ^[1-9][0-9]*$ ]]; then PHYS_CORES=$(nproc); fi
-VARIANTS+=("85-no-cpu|$WORKING_SPEC --cpu-share 0 --threads 0 --vram-reserve-mib -1")   # CPU-лейн не делит DDR-полосу со стейджингом
-VARIANTS+=("86-threads-phys|$WORKING_SPEC --cpu-share -1 --threads $PHYS_CORES --vram-reserve-mib -1")   # без SMT-соседей у gather-ядер
-VARIANTS+=("87-reserve256|$WORKING_SPEC --cpu-share -1 --threads 0 --vram-reserve-mib 256")   # свободные МиБ карты — кэшу экспертов
+LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 32768 --prompt-batch 2048 --expert-swaps 64 --vram-reserve-mib 512 --threads 16 --cpu-share -1"
+VARIANTS+=("85-no-cpu|$LOSSLESS_BASE --cpu-share 0")   # CPU-лейн не делит DDR-полосу со стейджингом
+VARIANTS+=("86-threads-all|$LOSSLESS_BASE --threads 0")   # все логические (32) против 16 физических в проде
+VARIANTS+=("87-reserve256|$LOSSLESS_BASE --vram-reserve-mib 256")   # свободные МиБ карты — кэшу экспертов
 
 # --- 2026-11-24, по профилю [moe]: половина вычисляемых экспертов идёт на CPU (18 мс/токен), потому что
 # STRATA_FREEZE_EXPERTS отключает всю адаптацию кэша (follow/start_swaps/mind_vram/grow_cache). 88 снимает
@@ -252,7 +253,6 @@ VARIANTS+=("87-reserve256|$WORKING_SPEC --cpu-share -1 --threads 0 --vram-reserv
 # 94-graphs падал на cudaGraphInstantiate OOM (docs/Q8_KV.md: графу нужно больше, чем 256 МиБ запаса).
 # --no-graphs в базу не входит: разбор спеки идёт парами «ключ значение», а голый флаг его рассинхронизирует;
 # он и так стоит в конфиге, а 94 снимает его DEL: — поэтому 94 стоит последней, чтобы не протечь дальше.
-LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 0 --prompt-batch 2048 --expert-swaps 64 --vram-reserve-mib 512"
 VARIANTS+=("88-no-freeze|$LOSSLESS_BASE ENV:STRATA_FREEZE_EXPERTS=")
 VARIANTS+=("89-attend-batch1|$LOSSLESS_BASE --attend-batch 1")
 VARIANTS+=("90-idx-mma2|$LOSSLESS_BASE --idx-mma 2")
@@ -261,7 +261,7 @@ VARIANTS+=("91-idx-fused|$LOSSLESS_BASE --idx-fused 1")
 # префилл ~2.9 ГБ VRAM (rows_ = min(prompt_batch, max_context) x ~1.4 МиБ) и в декоде тоже; ctx-cap режет
 # KV-бюджет (132768 -> 871 МиБ, 32768 -> 215 МиБ), префилл не трогая.  93 — НЕ рекомендация: сколько
 # теряет префилл и сколько выигрывает декод, если отдать эти 1.4 ГБ кэшу.
-VARIANTS+=("92-ctx32k|$LOSSLESS_BASE --ctx-cap 32768")
+VARIANTS+=("92-ctxfull|$LOSSLESS_BASE --ctx-cap 0")
 VARIANTS+=("93-pb1024|$LOSSLESS_BASE --prompt-batch 1024")
 # 95 — вдвое агрессивнее свапы: кэш тянет горячий набор во время ответа (~8 ГБ VRAM, ~580 слотов).
 VARIANTS+=("95-swaps128|$LOSSLESS_BASE --expert-swaps 128")
@@ -1117,13 +1117,13 @@ if "80-eta-iq256off" in names:
 
 # lossless-ручки 2026-11-24 (85-87) — тоже пара к 80-eta-iq256off: каждая меняет ровно одну ручку.
 los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
-       ("86-threads-phys", "threads = физические ядра (без SMT)"),
+       ("86-threads-all", "threads = все логические (32)"),
        ("87-reserve256", "vram-reserve 256 МиБ (кэшу больше)"),
        ("88-no-freeze", "без FREEZE (адаптивный кэш; ответы дрейфуют)"),
        ("89-attend-batch1", "attend-batch 1"),
        ("90-idx-mma2", "idx-mma 2"),
        ("91-idx-fused", "idx-fused 1"),
-       ("92-ctx32k", "ctx-cap 32768 (KV-бюджет -650 МиБ)"),
+       ("92-ctxfull", "ctx-cap 132k (KV-бюджет 871 МиБ)"),
        ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
        ("95-swaps128", "expert-swaps 128 (кэш тянет hot set)"),
