@@ -2892,6 +2892,36 @@ void Engine::dbg(const char* name, int il, const float* dev, int n) {
                  il, name, n, sum, abs, h[0], h[1], h[2]);
 }
 
+// STRATA_POLY_LOGITS_TOP=<k>: the logits of the first k calls that want them print their top five, with the
+// position and the sum.  The same request under two settings (a graph replayed, the launches direct) tells at
+// which step the two part and by how much: a top id that differs with a hair between the values is a near tie,
+// one that differs by a lot is another computation.
+void Engine::logit_probe(int n) {
+    static const int k = [] {
+        const char* v = std::getenv("STRATA_POLY_LOGITS_TOP");
+        return v ? std::atoi(v) : 0;
+    }();
+    static int calls = 0;
+    if (k <= 0 || calls >= k || !h_logits_) return;
+    ++calls;
+    int best[5] = {-1, -1, -1, -1, -1};
+    float bv[5] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY};
+    double sum = 0;
+    for (int i = 0; i < n_vocab_; ++i) {
+        const float v = h_logits_[(size_t) i];
+        sum += v;
+        for (int j = 0; j < 5; ++j)
+            if (v > bv[j]) {
+                for (int t = 4; t > j; --t) bv[t] = bv[t - 1], best[t] = best[t - 1];
+                bv[j] = v, best[j] = i;
+                break;
+            }
+    }
+    std::fprintf(stderr, "[logits] pos=%lld n=%d sum=%.6g", (long long) (pos_ + n - 1), n, sum);
+    for (int j = 0; j < 5 && best[j] >= 0; ++j) std::fprintf(stderr, " | %d %.6g", best[j], bv[j]);
+    std::fprintf(stderr, "\n");
+}
+
 // y = w x for n tokens.  xq is x already in Q8_1, when the caller has it.  rows_per_x below n_out gives each group
 // of rows its own input (see gemv_f32); only the float types take it.
 void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x) {
@@ -4577,6 +4607,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
             tail();
         }
         if (want_logits) ck(cudaStreamSynchronize(cs(st_)), "eval");
+        if (want_logits) logit_probe(n);
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);

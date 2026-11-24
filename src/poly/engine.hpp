@@ -594,6 +594,7 @@ protected:
     int trade_experts();
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
+    void logit_probe(int n);
     float* fbuf(size_t n);
     int room(int n) const;
     int room_key(int n) const;
