@@ -138,7 +138,15 @@ void Workers::loop() {
             }
             seen = now;
         }
-        if (++idle < kSpinsBeforeSleep) {
+        // STRATA_POLY_SPIN (pauses): how long a worker spins before it parks.  The default is a millisecond, and
+        // the answer's layers ask for work every fraction of one, so a worker can park and wake several times a
+        // token; a longer spin trades power for the wake latencies (Basalt spins 20 ms).
+        static const int spins = [] {
+            const char* v = std::getenv("STRATA_POLY_SPIN");
+            const int n = v ? std::atoi(v) : 0;
+            return n > 0 ? n : kSpinsBeforeSleep;
+        }();
+        if (++idle < spins) {
             _mm_pause();
             continue;
         }

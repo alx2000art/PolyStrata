@@ -275,6 +275,10 @@ VARIANTS+=("79-graph-logits|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=l DEL:--no-gra
 # время ответа, по темпу машины): это потолок, с которым сверяем дозаливку.
 VARIANTS+=("44-readheat|$LOSSLESS_BASE --read-heat 1")
 VARIANTS+=("45-readfill|$LOSSLESS_BASE ENV:STRATA_POLY_READ_FILL=1")
+# 46/47 — идеи Basalt: GPU забирает часть CPU-экспертов по PCIe во время CPU-фазы (pcie_frac), и
+# длинный спин пула (Basalt 20 мс против нашего 1 мс; 400000 пауз ≈ 20 мс здесь).
+VARIANTS+=("46-pcie35|$LOSSLESS_BASE ENV:STRATA_POLY_PCIE_FRAC=0.35")
+VARIANTS+=("47-spin20|$LOSSLESS_BASE ENV:STRATA_POLY_SPIN=400000")
 VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graphs")
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
@@ -433,7 +437,8 @@ env = cfg.get("env") or {}
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
-           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL")
+           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL",
+           "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -1137,6 +1142,8 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
        ("44-readheat", "read-heat 1 (тепло в recent_, follow двигает)"),
        ("45-readfill", "дозаливка кэша по роутингу чтения (hold)"),
+       ("46-pcie35", "35% CPU-экспертов на карту по PCIe (pcie_frac)"),
+       ("47-spin20", "спин пула 20 мс (Basalt)"),
        ("79-graph-logits", "графы: только logits"),
        ("96-graph-tail", "графы: только tail"),
        ("97-graph-shared", "графы: только shared"),

@@ -2199,6 +2199,12 @@ void Engine::load(const Options& o) {
     if (read_fill_)
         std::fprintf(stderr, "strata-poly: the expert cache is filled from each request's own routing at its "
                              "read's end (STRATA_POLY_READ_FILL), and holds while the answer is written\n");
+    // STRATA_POLY_PCIE_FRAC: the share of the experts the CPU would compute that the card copies over PCIe instead
+    // and runs beside the CPU - the bus is idle during the CPU's phase (Basalt's pcie_frac).  Env only, 0 = off.
+    if (const char* v = std::getenv("STRATA_POLY_PCIE_FRAC")) pcie_frac_ = (float) std::atof(v);
+    if (pcie_frac_ > 0.f)
+        std::fprintf(stderr, "strata-poly: %.0f%% of the CPU's experts go to the card over PCIe (STRATA_POLY_PCIE_FRAC)\n",
+                     100.0 * (double) pcie_frac_);
     freeze_experts_ = freeze_experts_asked_ = std::getenv("STRATA_FREEZE_EXPERTS") != nullptr;
     if (freeze_experts_)
         std::fprintf(stderr, "strata-poly: the experts' split is frozen for the engine's whole run "
@@ -2213,6 +2219,15 @@ void Engine::load(const Options& o) {
         row = ev;
     }
     ev_ = ev_row_[0];
+    {
+        cudaEvent_t ev = nullptr;
+        ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");   // STRATA_POLY_PCIE_FRAC
+        ev_pcie_ = ev;
+        cudaEvent_t free_ev = nullptr;
+        ck(cudaEventCreateWithFlags(&free_ev, cudaEventDisableTiming), "cudaEventCreate");
+        ev_pcie_free_ = free_ev;
+        ck(cudaEventRecord(free_ev, cs(st_)), "pcie stage free");   // nothing holds the buffer yet
+    }
     blas_ = blas_create(st_);
     // The card maps VRAM onto reserved addresses a piece at a time: the attention caches grow with the sequence,
     // and the expert cache has what a short one leaves (cover()).  With --kv-whole the attention caches are one
@@ -2962,7 +2977,36 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             }
             n_host = kept;
         }
-        stats_.gpu_experts += n_cached;
+        // STRATA_POLY_PCIE_FRAC: the first n_stage of the CPU's experts are copied into the staging buffer over
+        // PCIe, and the card runs them while the CPU works on the rest - the bus is idle during that phase, and
+        // the copy reads the same RAM the CPU would, so the two run at once (Basalt's pcie_frac).  A pinned layer
+        // only: its experts are copied straight from the file view (a plain H2D), where an unpinned one would be
+        // read on this thread and the copy would stop overlapping the CPU.
+        int n_stage = 0;
+        float stage_w[64] = {};
+        if (pcie_frac_ > 0.f && n == 1 && n_host > 0) {
+            const bool own = !layers_.empty() && layers_.data() <= &L && &L < layers_.data() + layers_.size();
+            const bool pinned =
+                own && pinned_layer_.size() == layers_.size() && pinned_layer_[(size_t) (&L - layers_.data())];
+            if (pinned) {
+                const int cap = (int) (stage_bytes_ / (2 * L.gu_bytes + L.d_bytes));
+                n_stage = std::min({n_host, cap, 64, (int) std::lround(pcie_frac_ * (float) n_host)});
+            }
+            if (n_stage > 0) {
+                int32_t sids[64];
+                for (int i = 0; i < n_stage; ++i) {
+                    sids[i] = host_e[i];
+                    stage_w[i] = host[i].weight;
+                }
+                // The previous layer's card work may still read the buffer: its "done" rides on st_.
+                ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_pcie_free_, 0), "pcie stage free");
+                stage(L, sids, n_stage, up_, false, stage_);
+                ck(cudaEventRecord((cudaEvent_t) ev_pcie_, cs(up_)), "pcie stage");
+                for (int i = n_stage; i < n_host; ++i) host[i - n_stage] = host[i];
+                n_host -= n_stage;
+            }
+        }
+        stats_.gpu_experts += n_cached + n_stage;
         stats_.cpu_experts += n_host;
         // The launches cost this thread more than they cost the card, so each one less counts.  The cached experts
         // go kSlots at a time, a launch a stage for all of them: gate and up, the activation, its quantization,
@@ -2974,6 +3018,27 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             if (split_) cudaSetDevice(device_);   // one of the experts' threads, which every card's engine shares
             if (first && at == 0) (*first)();
             const size_t ff = (size_t) n_ff_exp_, q8_row = kernels::native_q8_1_bytes(n_ff_exp_);
+            // The PCIe share (STRATA_POLY_PCIE_FRAC): its bytes have to land before the card reads them.  One
+            // expert at a time through row 0, the cached group's loops below reuse the same rows afterwards.
+            if (n_stage > 0) {
+                ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_pcie_, 0), "pcie stage");
+                const size_t gu2 = 2 * L.gu_bytes, down_at = pad((size_t) n_stage * gu2);
+                ScaledRows ss{};
+                for (int j = 0; j < n_stage; ++j) {
+                    kernels::native_mmvq((int) L.gu_type, stage_ + (size_t) j * gu2, (const uint8_t*) xq_, g_,
+                                         n_embd_, 2 * n_ff_exp_, 1, st_);
+                    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, 1, st_);
+                    else swiglu_clamp_rows(g_, h_, n_ff_exp_, 1, limit, st_);
+                    kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
+                    kernels::native_mmvq((int) L.d_type, stage_ + down_at + (size_t) j * L.d_bytes,
+                                         (const uint8_t*) q8_, d_, n_ff_exp_, n_embd_, 1, st_);
+                    ss.x[0] = d_;
+                    ss.acc[0] = fo_;
+                    ss.w[0] = stage_w[j];
+                    add_scaled(ss, 1, n_embd_, st_);
+                }
+                ck(cudaEventRecord((cudaEvent_t) ev_pcie_free_, cs(st_)), "pcie stage free");
+            }
             const int per = rows_ >= kSlots ? kSlots : 1;   // the scratch holds rows_ experts' values
             ScaledRows sum{};
             for (int i0 = 0; i0 < n_cached; i0 += per) {

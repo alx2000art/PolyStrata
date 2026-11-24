@@ -18,6 +18,12 @@
 #include <mutex>
 #include <new>
 #include <vector>
+#if defined(__linux__)
+#include <sys/mman.h>   // madvise(MADV_HUGEPAGE)
+#ifndef MADV_HUGEPAGE
+#define MADV_HUGEPAGE 14   // Linux's value; some libc headers keep it behind _DEFAULT_SOURCE
+#endif
+#endif
 
 namespace strata::poly {
 
@@ -32,6 +38,12 @@ public:
             buf_ = new (std::nothrow) uint8_t[(size_t) n_slots_ * slot_bytes];
             if (!buf_) n_slots_ = 0;
         }
+#if defined(__linux__)
+        // A multi-GiB anonymous block is mmap'd by glibc and page-aligned: 2 MiB pages keep the TLB able to hold
+        // it (a nine-slot expert of 4 KiB pages is 2300 entries, and the pool is tens of thousands).  Advice
+        // only: without THP or on another system the same bytes serve, a little slower.
+        if (buf_) (void) ::madvise(buf_, (size_t) n_slots_ * slot_bytes, MADV_HUGEPAGE);
+#endif
         busy_.assign((size_t) n_slots_, 0);
         tick_.assign((size_t) n_slots_, 0);
         who_.assign((size_t) n_slots_, -1);

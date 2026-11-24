@@ -664,11 +664,15 @@ protected:
     bool read_fill_ = false;                 ///< STRATA_POLY_READ_FILL: the cache is filled from the prompt's
                                              ///< own routing at the read's end, and holds while the answer is written
     bool read_fill_hold_ = false;            ///< the fill is done: no trade, no decay, no shrink until the next read
+    float pcie_frac_ = 0.f;                  ///< STRATA_POLY_PCIE_FRAC: the share of the decode's CPU experts the
+                                             ///< card copies over PCIe and runs beside the CPU
     bool freeze_experts_ = false;            ///< STRATA_FREEZE_EXPERTS: the experts' split is frozen
                                              ///< for the engine's whole run (see Engine::load())
     bool freeze_experts_asked_ = false;      ///< the env was set: refreeze_experts() puts it back after the
                                              ///< serve VRAM resize lifted it (unfreeze_experts())
     void* blas_ = nullptr; ///< cuBLAS on st_
+    void* ev_pcie_ = nullptr;   ///< the staging copy of STRATA_POLY_PCIE_FRAC's experts (up_ -> st_)
+    void* ev_pcie_free_ = nullptr;   ///< the card done with them: the next layer's copy waits on it
     void* ev_ = nullptr;   ///< marks the router's copy to the host: ev_row_'s first, or a window's row's own
     void* ev_row_[8] = {}; ///< one for each token a window can have
     std::vector<void*> dev_allocs_, host_allocs_;
