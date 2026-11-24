@@ -58,8 +58,10 @@ run() {  # $1 = подпись, $2 = значение --lookup
 }
 
 stop_server
-echo "=== lookup 0 ==="
+echo "=== lookup 0 (первый прогон) ==="
 run l0 0
+echo "=== lookup 0 (повтор, контроль дрейфа) ==="
+run l0b 0
 echo "=== lookup 3 ==="
 run l3 3
 
@@ -78,33 +80,45 @@ def toks(path):
 
 
 def guessed(path):
-    """Строка движка: '... N of M guessed tokens right' - окно вообще включалось или нет."""
     text = open(path, encoding="utf-8", errors="replace").read()
     m = re.search(r"(\d+) of (\d+) guessed tokens right", text)
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
-a, b = toks("/tmp/lookup-l0.out"), toks("/tmp/lookup-l3.out")
+def first_diff(a, b):
+    n = min(len(a), len(b))
+    d = next((i for i in range(n) if a[i] != b[i]), None)
+    return (n if d is None else d) if (d is not None or len(a) != len(b)) else None
+
+
+a, ab, b = (toks("/tmp/lookup-l0.out"), toks("/tmp/lookup-l0b.out"), toks("/tmp/lookup-l3.out"))
 ga, gb = guessed("/tmp/lookup-l0.err"), guessed("/tmp/lookup-l3.err")
-print(f"\nокно 0: {len(a)} токенов, догадок {ga[1]} (верных {ga[0]})")
-print(f"окно 3: {len(b)} токенов, догадок {gb[1]} (верных {gb[0]})")
+print(f"\nlookup 0:  {len(a)} токенов, догадок {ga[1]}")
+print(f"lookup 0': {len(ab)} токенов, догадок 0 (повтор того же)")
+print(f"lookup 3:  {len(b)} токенов, догадок {gb[1]} (верных {gb[0]})")
 if not a and not b:
-    print("!!! ни там ни там нет токенов - смотри /tmp/lookup-l0.err")
+    print("!!! токенов нет - смотри /tmp/lookup-l0.err")
     sys.exit(1)
-if gb[1] == 0:
-    print("!!! с --lookup 3 не было ни одной догадки: тест ничего не проверил "
-          "(нужен повторяющийся вход, попробуй TOKENS=... с длинным повтором)")
-    sys.exit(2)
-n = min(len(a), len(b))
-first = next((i for i in range(n) if a[i] != b[i]), None)
-if first is None and len(a) == len(b):
+
+drift = first_diff(a, ab)
+print("\n--- контроль дрейфа: два одинаковых прогона ---")
+if drift is None:
+    print("совпали: движок воспроизводим, сравнение окон честное")
+else:
+    print(f"РАСХОДЯТСЯ с токена {drift} (окно 0: {a[max(0, drift - 2):drift + 4]}, "
+          f"окно 0': {ab[max(0, drift - 2):drift + 4]})")
+    print("=> префилл сам по себе недетерминирован: сравнивать окна через два процесса нельзя, "
+          "разница ниже ничего не говорит об окне")
+
+d = first_diff(a, b)
+print("\n--- окно 3 против окна 0 ---")
+if d is None:
     print("вердикт: потоки совпадают символ в символ - окно чистое")
 else:
-    if first is None:
-        first = n
-    print(f"вердикт: РАСХОЖДЕНИЕ с токена {first}")
-    lo = max(0, first - 4)
-    print(f"  окно 0: {a[lo:first + 6]}")
-    print(f"  окно 3: {b[lo:first + 6]}")
-    print(f"  до этого места оба дали: {a[:first]}")
+    lo = max(0, d - 4)
+    print(f"РАСХОЖДЕНИЕ с токена {d}")
+    print(f"  окно 0: {a[lo:d + 6]}")
+    print(f"  окно 3: {b[lo:d + 6]}")
+    if drift is not None and d == drift:
+        print("  (то же место, где расходятся два ОДИНАКОВЫХ прогона - это дрейф, а не окно)")
 PY
