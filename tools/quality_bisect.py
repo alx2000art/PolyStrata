@@ -26,6 +26,7 @@ import quality_probe as qp   # noqa: E402  - те же пробы, что в о�
 
 CFG = Path(os.environ.get("CFG") or ROOT / "strata-dsv4-ud-iq2_xxs.json")
 LONG = "--long" in sys.argv or os.environ.get("LONG", "1") == "1"
+REPS = max(1, int(os.environ.get("REPS", "1")))   # прогонов проб на вариант: 2 и больше отсеивают дрейф
 
 
 def host_of(cfg):
@@ -240,11 +241,25 @@ def main():
                 results[name] = None
                 continue
             print("    пробы:", flush=True)
-            rows = run_probes()
+            # REPS повторов на вариант: движок недетерминирован даже на greedy, и одна случайная поломка на
+            # одном прогоне ничего не значит - считаем, сколько раз из скольких провалилось
+            passes = [run_probes() for _ in range(REPS)]
+            merged = {}
+            for one in passes:
+                for r in one:
+                    m = merged.setdefault(r["name"], {"name": r["name"], "critical": r["critical"],
+                                                       "fails": 0, "runs": 0, "why": r["why"]})
+                    m["runs"] += 1
+                    if not r["ok"]:
+                        m["fails"] += 1
+                        m["why"] = r["why"]
+            rows = [{"name": m["name"], "critical": m["critical"], "ok": m["fails"] == 0,
+                     "fails": m["fails"], "runs": m["runs"], "why": m["why"]} for m in merged.values()]
             results[name] = rows
             crit = sum(1 for r in rows if r["critical"] and not r["ok"])
             info = sum(1 for r in rows if not r["critical"] and not r["ok"])
-            print(f"    {name}: критичных провалов {crit}, информационных {info}", flush=True)
+            print(f"    {name}: критичных провалов {crit}, информационных {info} (из {REPS} прогонов)",
+                  flush=True)
     finally:
         stop_server(load())
         CFG.write_text(json.dumps(pristine, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -265,10 +280,17 @@ def main():
         cells = []
         for p in probe_names:
             r = by.get(p)
-            cells.append("—" if r is None else ("ок" if r["ok"] else ("**ПРОВАЛ**" if r["critical"] else "провал")))
+            if r is None:
+                cells.append("—")
+            elif r["ok"]:
+                cells.append("ок")
+            else:
+                # сколько раз из скольких провалилось: 1/1 - поломка, 1/3 - дрейф
+                mark = f"{r['fails']}/{r['runs']}"
+                cells.append(f"**ПРОВАЛ {mark}**" if r["critical"] else f"провал {mark}")
         crit = sum(1 for r in rows if r["critical"] and not r["ok"])
         info = sum(1 for r in rows if not r["critical"] and not r["ok"])
-        if name == "base":
+        if name == names[0]:   # эталон - первый вариант списка (nographs или base)
             base_crit = crit
         print(f"| {name} | " + " | ".join(cells) + f" | {crit} | {info} |")
     if base_crit is not None:
