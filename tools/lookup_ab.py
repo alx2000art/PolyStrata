@@ -75,6 +75,12 @@ def port_of(cfg):
     return int(cfg.get("port") or 1524)
 
 
+def host_of(cfg):
+    """Сервер слушает поле host конфига (192.168.5.80), а не только localhost - иначе всё висит на /health."""
+    host = str(cfg.get("host") or "").strip()
+    return "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+
+
 def key_of(cfg):
     return cfg.get("api_key") or ""
 
@@ -83,7 +89,7 @@ def stop_server(port):
     subprocess.run(["pkill", "-TERM", "-f", f"{ROOT}/serve/server.py"], check=False)
     for _ in range(90):
         try:   # the port still takes connections: the server is on its way out
-            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+            conn = http.client.HTTPConnection(host_of(load_cfg()), port, timeout=1)
             conn.connect()
             conn.close()
             time.sleep(1)
@@ -108,7 +114,7 @@ def start_server(cfg, log):
     deadline = time.time() + 900
     while time.time() < deadline:
         try:
-            conn = http.client.HTTPConnection("127.0.0.1", port_of(cfg), timeout=5)
+            conn = http.client.HTTPConnection(host_of(cfg), port_of(cfg), timeout=5)
             conn.request("GET", "/health", headers={"Authorization": "Bearer " + key_of(cfg)})
             body = conn.getresponse().read().decode("utf-8", "replace")
             if '"loaded"' in body and "true" in body:
@@ -127,7 +133,7 @@ def ask(cfg, prompt):
         "max_tokens": MAXNEW,
         "stream": False,
     }).encode()
-    conn = http.client.HTTPConnection("127.0.0.1", port_of(cfg), timeout=1800)
+    conn = http.client.HTTPConnection(host_of(cfg), port_of(cfg), timeout=1800)
     t0 = time.time()
     conn.request("POST", "/v1/chat/completions", body,
                  {"Authorization": "Bearer " + key_of(cfg), "Content-Type": "application/json"})

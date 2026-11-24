@@ -68,16 +68,25 @@ LONG = ("Продолжи рассказ не менее 600 слов, в том
         "стоял на крыльце станции и смотрел, как поезд уходит без него.")
 
 
+def host_of(cfg):
+    """Сервер слушает поле host конфига (192.168.5.80), а не только localhost."""
+    host = str(cfg.get("host") or "").strip()
+    return "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+
+
 def ask(cfg, prompt, max_tokens):
     port = int(cfg.get("port") or 1524)
     body = json.dumps({"model": cfg.get("model_name") or "x",
                        "messages": [{"role": "user", "content": prompt}],
                        "temperature": 0, "max_tokens": max_tokens, "stream": False}).encode()
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=600)
-    conn.request("POST", "/v1/chat/completions", body,
-                 {"Authorization": "Bearer " + (cfg.get("api_key") or ""),
-                  "Content-Type": "application/json"})
-    raw = conn.getresponse().read().decode("utf-8", "replace")
+    try:
+        conn = http.client.HTTPConnection(host_of(cfg), port, timeout=600)
+        conn.request("POST", "/v1/chat/completions", body,
+                     {"Authorization": "Bearer " + (cfg.get("api_key") or ""),
+                      "Content-Type": "application/json"})
+        raw = conn.getresponse().read().decode("utf-8", "replace")
+    except OSError as error:
+        return None, f"нет соединения с {host_of(cfg)}:{port} ({error})"
     try:
         doc = json.loads(raw)
     except ValueError:
