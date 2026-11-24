@@ -44,23 +44,32 @@ def has_word(text, *words):
     low = text.lower().replace("ё", "е")
     return all(re.search(rf"(?<![а-яa-z]){re.escape(w.lower().replace('ё', 'е'))}(?![а-яa-z])", low) for w in words)
 
+def has_any(text, *words):
+    """Любое из слов (альтернативы: «париж» или «paris»), а не все сразу."""
+    low = text.lower().replace("ё", "е")
+    return any(re.search(rf"(?<![а-яa-z]){re.escape(w.lower().replace('ё', 'е'))}(?![а-яa-z])", low) for w in words)
+
+# name, prompt, check, cap, critical.  Критичные — целостность входа и логика: они и решают вердикт.
+# Информационные — счёт, арифметика, факт, формат: на IQ2_XXS они врут штатно, их провал сам по себе
+# не значит «движок сломался», но считать их полезно.
 PROBES = [
     ("echo", "Повтори ровно эту строку, ничего не добавляя и не объясняя: «небо голубое, трава зелёная»",
-     lambda t: has(t, "небо голубое", "трава зелёная"), 80),
-    ("count", "Сколько букв «о» в слове «молоко»? Ответь одним числом.", lambda t: has_word(t, "3"), 60),
-    ("math", "Сколько будет 17 * 23? Ответь одним числом.", lambda t: has_word(t, "391"), 60),
+     lambda t: has(t, "небо голубое", "трава зелёная"), 160, True),
+    ("echo2", "Повтори дословно: «Голубое небо над рекой»", lambda t: has(t, "голубое небо над рекой"), 160, True),
     ("logic", "Все коты — животные. Некоторые животные — чёрные. Следует ли из этого, что некоторые коты "
-              "чёрные? Ответь «да» или «нет».", lambda t: has_word(t, "нет") and not has_word(t, "да"), 60),
-    ("fact", "Столица Франции? Ответь одним словом.", lambda t: has_word(t, "париж", "paris"), 40),
+              "чёрные? Ответь «да» или «нет».", lambda t: has_word(t, "нет") and not has_word(t, "да"), 200, True),
     ("translate", "Переведи на английский: «Дом стоит у реки». Только перевод.",
-     lambda t: has(t, "house") and has(t, "river"), 80),
-    ("format", "Назови химический символ золота. Ответь одним словом, без пояснений.",
-     lambda t: has_word(t, "au") or has(t, "au "), 40),
+     lambda t: has(t, "house") and has(t, "river"), 200, True),
     ("code", "Вот функция на Python:\n```python\ndef moving_average(xs, k):\n    out = []\n    s = 0\n"
              "    for i, x in enumerate(xs):\n        s += x\n        if i >= k:\n            s -= xs[i - k]\n"
              "        out.append(s / k)\n    return out\n```\n"
              "На первых k элементах среднее неверное. Объясни причину и покажи исправленный код.",
-     lambda t: has(t, "min(") or has(t, "i + 1") or has(t, "k - 1"), 500),
+     lambda t: has(t, "min(") or has(t, "i + 1") or has(t, "k - 1"), 700, True),
+    ("count", "Сколько букв «о» в слове «молоко»? Ответь одним числом.", lambda t: has_any(t, "3"), 200, False),
+    ("math", "Сколько будет 17 * 23? Ответь одним числом.", lambda t: has_any(t, "391"), 200, False),
+    ("fact", "Столица Франции? Ответь одним словом.", lambda t: has_any(t, "париж", "paris"), 200, False),
+    ("format", "Назови химический символ золота. Ответь одним словом, без пояснений.",
+     lambda t: has_any(t, "au"), 160, False),
 ]
 
 LONG = ("Продолжи рассказ не менее 600 слов, в том же стиле:\n\n"
@@ -90,19 +99,20 @@ def ask(cfg, prompt, max_tokens):
                       "Content-Type": "application/json"})
         raw = conn.getresponse().read().decode("utf-8", "replace")
     except OSError as error:
-        return None, f"нет соединения с {host_of(cfg)}:{port} ({error})"
+        return None, f"нет соединения с {host_of(cfg)}:{port} ({error})", ""
     try:
         doc = json.loads(raw)
     except ValueError:
-        return None, f"не JSON: {raw[:120]}"
+        return None, f"не JSON: {raw[:120]}", ""
     if doc.get("error"):
-        return None, f"ошибка: {str(doc['error'])[:160]}"
-    msg = (doc.get("choices") or [{}])[0].get("message") or {}
+        return None, f"ошибка: {str(doc['error'])[:160]}", ""
+    choice = (doc.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
     text = msg.get("content") or ""
     # thinking был включён (сервер не послушал): ответ ищем и в рассуждении
     if not text.strip():
         text = msg.get("reasoning_content") or msg.get("reasoning") or ""
-    return text, None
+    return text, None, choice.get("finish_reason") or ""
 
 
 def loop_score(text):
@@ -116,7 +126,7 @@ def loop_score(text):
 def main():
     cfg = cfg_load()
     long_run = "--long" in sys.argv
-    fails = 0
+    crit = info = 0
     print(f"конфиг: {CFG}")
     args = [str(a) for a in cfg.get("args") or []]
     for key in ("--lookup", "--tail-skip", "--ctx-cap", "--prompt-cache", "--conversation-cache-slots"):
@@ -126,35 +136,35 @@ def main():
           f"  temp {((cfg.get('sampling') or {}).get('temperature'))}")
     print("\n| проверка | итог | ответ |")
     print("|---|---|---|")
-    for name, prompt, check, cap in PROBES:
-        text, err = ask(cfg, prompt, max(cap, 160))   # thinking, если сервер его не отключил, съедает бюджет
+    crit = info = 0
+    for name, prompt, check, cap, critical in PROBES:
+        text, err, finish = ask(cfg, prompt, max(cap, 160))   # thinking, если его не отключили, съедает бюджет
         if err:
-            fails += 1
-            print(f"| {name} | ОШИБКА | {err} |")
-            continue
-        if not text.strip():
-            fails += 1
-            print(f"| {name} | ПУСТО | ответа нет: весь бюджет ушёл в рассуждение? |")
-            continue
-        ok = check(text)
+            text, ok, why = "", False, err
+        elif not text.strip():
+            ok, why = False, "пустой ответ"
+        else:
+            ok, why = check(text), f"{text.strip()[:110].replace('|', '/').replace(chr(10), ' ')} [{finish}]"
         if not ok:
-            fails += 1
-        tail = "" if ok else " "
-        print(f"| {name} | {'ок' if ok else 'ПРОВАЛ'} |{tail}{text.strip()[:90].replace('|', '/').replace(chr(10), ' ')} |")
+            if critical:
+                crit += 1
+            else:
+                info += 1
+        print(f"| {name}{'' if critical else ' (инф.)'} | {'ок' if ok else 'ПРОВАЛ'} | {why} |")
     if long_run:
-        text, err = ask(cfg, LONG, 900)
+        text, err, finish = ask(cfg, LONG, 900)
         if err:
-            fails += 1
-            print(f"| loop | ОШИБКА | {err} |")
+            crit += 1
+            print(f"| loop | ПРОВАЛ | {err} |")
         else:
             words, rep = loop_score(text)
             ok = rep < 3
             if not ok:
-                fails += 1
+                crit += 1
             print(f"| loop | {'ок' if ok else 'ПРОВАЛ'} ({words} слов) | повтор окна {rep}, начало: "
                   f"{text.strip()[:70].replace('|', '/').replace(chr(10), ' ')} |")
-    print(f"\nпровалов: {fails}")
-    return fails
+    print(f"\nкритичных провалов: {crit} (echo/logic/translate/code/loop), информационных: {info}")
+    return crit
 
 
 if __name__ == "__main__":
