@@ -1540,6 +1540,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata-poly: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
+        // A window of guesses goes through the batched expert path: for n > 1 the rows are grouped by expert,
+        // some go to the CPU and the others are staged (issue 55 - the two ways round a sum differently), the
+        // halves/whole way is chosen from measured times, and --tail-skip drops by the whole window.  So the
+        // round's tokens are the model's own picks along a route it would not take a token at a time: with
+        // --lookup 3 the answers differ from --lookup 0, and on a small quant they come out worse.  Said once.
+        if (lookup > 0 && !engine.every_expert_cached())
+            std::fprintf(stderr, "strata-poly: --lookup %d: a guessed window takes the batched expert path, which "
+                                 "rounds differently from a token a step (issue 55), and --tail-skip drops by the "
+                                 "window: the answers will differ from --lookup 0 and on a small quant worse.  "
+                                 "Guesses pay only where the cache holds every expert\n",
+                         lookup);
         if (engine.prompt_skip_rows() > 0)
             std::fprintf(stderr, "strata-poly: prompt skip: rows further than %d from the read's end stop at layer %d\n",
                          engine.prompt_skip_rows(), engine.prompt_skip_layer());

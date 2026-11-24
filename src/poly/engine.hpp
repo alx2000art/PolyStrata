@@ -379,6 +379,9 @@ public:
     int64_t pool_misses() const { return pool_misses_.load(std::memory_order_relaxed); }
     int cached_experts() const { return cached_ + (next_ ? next_->cached_experts() : 0); }
     int total_experts() const { return n_moe_ * n_expert_ + (next_ ? next_->total_experts() : 0); }
+    /// Every routed expert of every layer is in VRAM: the batched expert path is the only one then, so a window
+    /// and a token a step at least take the same route (main.cpp warns about --lookup when this is false).
+    bool every_expert_cached() const { return all_cached() && (!next_ || next_->every_expert_cached()); }
     double cached_gib() const { return double(exp_at_) / double(1ull << 30) + (next_ ? next_->cached_gib() : 0); }
     /// The cache as load() filled it, which is as large as resize_cache() makes it again.
     int full_experts() const { return full_cached_ + (next_ ? next_->full_experts() : 0); }
