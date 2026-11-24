@@ -294,6 +294,10 @@ VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graph
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
 VARIANTS+=("94-graphs|$LOSSLESS_BASE DEL:--no-graphs")
+# 95 — графы только на маршрутизаторе карты (c): единственная часть, для которой не было ячейки.  Бисект
+# расхождения ответов 94 против 80 идёт по частям: 98 голова+внимание, 96 хвост слоя, 97 shared-эксперт,
+# 79 логиты, 95 card_moe.  Часть, которая одна меняет ответ, и есть подозреваемая.
+VARIANTS+=("95-graph-cardmo|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=c DEL:--no-graphs")
 
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
@@ -1160,6 +1164,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("49-pooleveloff", "пул не дотягивает освобождённую загрузкой карту"),
        ("50-reserve320", "резерв VRAM 320 вместо 512 МиБ"),
        ("79-graph-logits", "графы: только logits"),
+       ("95-graph-cardmo", "графы: только маршрутизатор карты (c)"),
        ("96-graph-tail", "графы: только tail"),
        ("97-graph-shared", "графы: только shared"),
        ("98-graph-head", "графы: только head"))
