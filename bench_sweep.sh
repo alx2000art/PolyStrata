@@ -248,9 +248,11 @@ VARIANTS+=("87-reserve256|$WORKING_SPEC --cpu-share -1 --threads 0 --vram-reserv
 # фриз (ENV:NAME= без значения; apply_variant не даёт свипу вернуть его обратно). 89-95 — по одной ручке
 # каждая, и каждая ячейка САМА выставляет остальные в прод-значения: apply_variant не сбрасывает аргумент,
 # которого нет в спеке, и иначе 90 мерил бы idx-mma2 вместе с attend-batch из 89 (класс «stale args»).
+# --vram-reserve-mib 512 в базе, а не дефолт: 87-reserve256 оставлял 256 следующим ячейкам, и
+# 94-graphs падал на cudaGraphInstantiate OOM (docs/Q8_KV.md: графу нужно больше, чем 256 МиБ запаса).
 # --no-graphs в базу не входит: разбор спеки идёт парами «ключ значение», а голый флаг его рассинхронизирует;
 # он и так стоит в конфиге, а 94 снимает его DEL: — поэтому 94 стоит последней, чтобы не протечь дальше.
-LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 0 --prompt-batch 2048 --expert-swaps 64"
+LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 0 --prompt-batch 2048 --expert-swaps 64 --vram-reserve-mib 512"
 VARIANTS+=("88-no-freeze|$LOSSLESS_BASE ENV:STRATA_FREEZE_EXPERTS=")
 VARIANTS+=("89-attend-batch1|$LOSSLESS_BASE --attend-batch 1")
 VARIANTS+=("90-idx-mma2|$LOSSLESS_BASE --idx-mma 2")

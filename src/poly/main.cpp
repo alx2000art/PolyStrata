@@ -988,6 +988,9 @@ int serve(Session& ss) {
             // the engine's state is unknown now: the conversation it was reading is lost
             ss.kept.drop();
             try { engine.reset(); } catch (const std::exception&) {}
+            // The server reads ERR on stdout and consumes it; without this line the engine log (where
+            // the diagnostics live) never says why a request failed - a graph that cannot instantiate, say.
+            std::fprintf(stderr, "strata-poly: the request failed: %s\n", e.what());
             std::printf("ERR %s\n", e.what());
             std::fflush(stdout);
             continue;
