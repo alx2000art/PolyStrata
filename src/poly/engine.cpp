@@ -2198,8 +2198,7 @@ void Engine::load(const Options& o) {
     read_fill_ = std::getenv("STRATA_POLY_READ_FILL") != nullptr;
     if (read_fill_)
         std::fprintf(stderr, "strata-poly: the expert cache is filled from each request's own routing at its "
-                             "read's end (STRATA_POLY_READ_FILL), and holds while the answer is written
-");
+                             "read's end (STRATA_POLY_READ_FILL), and holds while the answer is written\n");
     freeze_experts_ = freeze_experts_asked_ = std::getenv("STRATA_FREEZE_EXPERTS") != nullptr;
     if (freeze_experts_)
         std::fprintf(stderr, "strata-poly: the experts' split is frozen for the engine's whole run "
