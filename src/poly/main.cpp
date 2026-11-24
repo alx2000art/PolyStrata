@@ -515,10 +515,15 @@ struct Session {
         // STRATA_POLY_LOOP_WATCH=1: a run of one token 32 long prints the top logits of the run's steps -
         // the '#606' loop's live state, caught while it still is one.  The logits identical step to step say
         // the decode's state stopped moving (a per-step write the replay misses); logits that change under a
-        // stuck argmax say the sampler or the caches; how they change is which of those to hunt.
+        // stuck argmax say the sampler or the caches; how they change is which of those to hunt.  The same
+        // window of tokens coming round a third time is the loop the answers showed instead (a paragraph
+        // that repeats, no 32 tokens alike): the window and its ids print with the logits behind it.
         const bool loop_watch = std::getenv("STRATA_POLY_LOOP_WATCH") != nullptr;
         int32_t watch_tok = 0;
         int watch_run = 0, watch_left = 0;
+        static constexpr size_t kWin = 48;   // tokens of the window the loop repeats
+        std::vector<int32_t> win;
+        std::unordered_map<uint64_t, int> win_seen;
         const auto pick = [&](const float* logits) {
             picked_from = logits;
             if (follow && r.produced < (int64_t) follow->size()) return (*follow)[(size_t) r.produced];
@@ -529,6 +534,21 @@ struct Session {
             if (loop_watch) {
                 if (t == watch_tok) ++watch_run; else { watch_tok = t; watch_run = 1; }
                 if (watch_run >= 32 && watch_left <= 0) watch_left = 12;
+                // the same kWin tokens again: the paragraph loop the answers showed
+                win.push_back(t);
+                if (win.size() > kWin) win.erase(win.begin());
+                if (win.size() == kWin) {
+                    uint64_t h = 1469598103934665603ull;
+                    for (int32_t v : win) h = (h ^ (uint32_t) v) * 1099511628211ull;
+                    const int seen = ++win_seen[h];
+                    if (seen == 3) {
+                        watch_left = 12;
+                        std::fprintf(stderr, "[loop606] window of %zu tokens, 3rd time, pos %lld, ids:",
+                                     kWin, (long long) history.size());
+                        for (int32_t v : win) std::fprintf(stderr, " %d", (int) v);
+                        std::fprintf(stderr, "\n");
+                    }
+                }
                 if (watch_left > 0) {
                     --watch_left;
                     std::fprintf(stderr, "[loop606] step %d of %dx %d, pos %lld: ", watch_run, watch_run,
