@@ -99,10 +99,29 @@ class Sampler {
 public:
     int pick(const float* logits, int n_vocab, const Sampling& s, const std::vector<int32_t>& history,
              std::mt19937_64& rng) {
+        struct Timing {
+            Sampler& self;
+            const Clock::time_point t0;
+            ~Timing() {
+                self.ms_ += ms_since(t0);
+                ++self.calls_;
+            }
+        } timing{*this, Clock::now()};
+        // The logits are the engine's pinned row for this step, refilled before the next one: the penalties go on
+        // them where they lie (517 KB less copied a token) and are taken back after the draw, so a second pick of
+        // the same row starts from the raw values.
+        struct Undo {
+            Sampler& self;
+            float* l;
+            ~Undo() {
+                if (l) self.unpenalize(l);
+            }
+        } undo{*this, nullptr};
         if (penalizes(s)) {
-            pen_.assign(logits, logits + n_vocab);
-            penalize(s, history);
-            logits = pen_.data();
+            float* l = const_cast<float*>(logits);
+            penalize(s, history, l);
+            undo.l = l;
+            logits = l;
         }
         if (s.temperature <= 0.f) return strata::poly::most_likely(logits, n_vocab);
 
@@ -147,6 +166,16 @@ public:
         return cand_[std::discrete_distribution<size_t>(p_.begin(), p_.end())(rng)].id;
     }
 
+    // STRATA_POLY_SAMPLE_DEBUG=1: the sampler's own cost, a line a request (the host's share of a token)
+    void report(const char* tag) {
+        static const bool on = std::getenv("STRATA_POLY_SAMPLE_DEBUG") != nullptr;
+        if (!on || calls_ == 0) return;
+        std::fprintf(stderr, "[sample] %s: %lld picks, %.3f ms each\n", tag, (long long) calls_,
+                     ms_ / (double) calls_);
+        ms_ = 0;
+        calls_ = 0;
+    }
+
 private:
     struct Cand {
         float logit;
@@ -158,16 +187,24 @@ private:
                (s.penalty_repeat != 1.f || s.penalty_freq != 0.f || s.penalty_present != 0.f);
     }
 
-    // on pen_, the logits' copy
-    void penalize(const Sampling& s, const std::vector<int32_t>& history) {
+    // On the logits themselves (see pick()): what each touched id held before, so unpenalize() puts it back
+    void penalize(const Sampling& s, const std::vector<int32_t>& history, float* l) {
         const size_t n = s.penalty_last_n < 0 ? history.size() : std::min(history.size(), (size_t) s.penalty_last_n);
         seen_.clear();
         for (size_t i = history.size() - n; i < history.size(); ++i) ++seen_[history[i]];
+        undo_.clear();
+        undo_.reserve(seen_.size());
         for (const auto& [id, count] : seen_) {
-            float& l = pen_[(size_t) id];
-            l = l <= 0.f ? l * s.penalty_repeat : l / s.penalty_repeat;
-            l -= (float) count * s.penalty_freq + s.penalty_present;
+            float& v = l[(size_t) id];
+            undo_.push_back({(size_t) id, v});
+            v = v <= 0.f ? v * s.penalty_repeat : v / s.penalty_repeat;
+            v -= (float) count * s.penalty_freq + s.penalty_present;
         }
+    }
+
+    void unpenalize(float* l) {
+        for (const auto& [id, was] : undo_) l[id] = was;
+        undo_.clear();
     }
 
     void softmax() {
@@ -180,9 +217,11 @@ private:
     }
 
     std::vector<Cand> cand_;
-    std::vector<float> pen_;
+    std::vector<std::pair<size_t, float>> undo_;   ///< what penalize() changed, for unpenalize()
     std::vector<double> p_;
     std::unordered_map<int32_t, int> seen_;
+    double ms_ = 0.0;          ///< pick()'s own time and calls, for report()
+    long long calls_ = 0;
 };
 
 bool parse_ids(const char* s, std::vector<int32_t>& out) {
@@ -601,6 +640,7 @@ struct Session {
         if (eagle_stats && r.eagle_tot > 0)
             std::fprintf(stderr, "[eagle] the drafter's first guess was the model's pick %lld of %lld (%.1f%%)\n",
                          r.eagle_hit, r.eagle_tot, 100.0 * double(r.eagle_hit) / double(r.eagle_tot));
+        sampler.report("answer");
         return r;
     }
 };

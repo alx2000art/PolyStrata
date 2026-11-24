@@ -688,6 +688,9 @@ protected:
     void* ev_row_[8] = {}; ///< one for each token a window can have
     std::vector<void*> dev_allocs_, host_allocs_;
     std::vector<void*> graphs_;   ///< every recorded graph, to destroy
+    long long graph_n_ = 0;       ///< execs recorded, and the VRAM their instantiate left (eval() prints both)
+    size_t graph_bytes_ = 0;
+    int graph_bucket_ = -1;       ///< the room_key the last line was printed for
     std::map<std::vector<int>, void*> passes_;   ///< a call's layers recorded as one (run()): by its tokens and
                                                  ///< every layer's head_key()
     void* tail_ = nullptr;        ///< one token's launches from the last layer to the logits, recorded

@@ -4052,9 +4052,17 @@ void* Engine::record(F&& work) {
     recording_ = false;
     ck(cudaStreamEndCapture(cs(st_), &g), "cudaStreamEndCapture");
     cudaGraphExec_t exec = nullptr;
+    size_t free_before = 0, total_b = 0;
+    (void) cudaMemGetInfo(&free_before, &total_b);
     const cudaError_t made = cudaGraphInstantiateWithFlags(&exec, g, 0);
     cudaGraphDestroy(g);
     ck(made, "cudaGraphInstantiate");
+    // the exec's VRAM the card's free figure loses: the number a retirement of the steps a conversation has left
+    // would give back (eval() prints the sum as the context's room grows)
+    size_t free_after = 0;
+    (void) cudaMemGetInfo(&free_after, &total_b);
+    ++graph_n_;
+    if (free_before > free_after) graph_bytes_ += free_before - free_after;
     graphs_.push_back(exec);
     return exec;
 }
@@ -4572,6 +4580,19 @@ void Engine::eagle_dump_decode_row(int64_t pos, int32_t token) {
 
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     OnCard here(device_, split_);
+    // What the recorded launches hold so far, a line each time the context's room grows (room_key): the number
+    // and the VRAM the instantiate left - the first number a retirement of the steps a conversation has left
+    // would give back (STRATA_POLY_GRAPH_STATS=0 turns the line off).
+    if (opt_.graphs && graph_n_ > 0 && room_key(n) != graph_bucket_) {
+        static const bool on = [] {
+            const char* v = std::getenv("STRATA_POLY_GRAPH_STATS");
+            return !v || std::atoi(v) != 0;
+        }();
+        graph_bucket_ = room_key(n);
+        if (on)
+            std::fprintf(stderr, "[graphs] room %d (%d rows): %lld execs, %.1f MiB of VRAM\n", graph_bucket_,
+                         room(n), graph_n_, (double) graph_bytes_ / 1048576.0);
+    }
     run(tokens, n);
     // EAGLE-3: the drafter's cache follows the model's own steps - without these rows it would attend a
     // prompt with holes from the first generated token on.  Each row's state is staged where
