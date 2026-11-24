@@ -61,26 +61,41 @@ echo "=== lookup 3 ==="
 run l3 3
 
 python3 - <<'PY'
+import re
 import sys
 
 
 def toks(path):
-    out = []
+    """CLI печатает ответ одной строкой: "12,345,678,..." (не строки T - это серверный протокол)."""
     for line in open(path, encoding="utf-8", errors="replace"):
-        if line.startswith("T "):
-            out.append(int(line[2:].split()[0]))
-    return out
+        line = line.strip()
+        if line and re.fullmatch(r"-?\d+(,-?\d+)*", line):
+            return [int(x) for x in line.split(",")]
+    return []
+
+
+def guessed(path):
+    """Строка движка: '... N of M guessed tokens right' - окно вообще включалось или нет."""
+    text = open(path, encoding="utf-8", errors="replace").read()
+    m = re.search(r"(\d+) of (\d+) guessed tokens right", text)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
 a, b = toks("/tmp/lookup-l0.out"), toks("/tmp/lookup-l3.out")
-print(f"\nокно 0: {len(a)} токенов, окно 3: {len(b)} токенов")
+ga, gb = guessed("/tmp/lookup-l0.err"), guessed("/tmp/lookup-l3.err")
+print(f"\nокно 0: {len(a)} токенов, догадок {ga[1]} (верных {ga[0]})")
+print(f"окно 3: {len(b)} токенов, догадок {gb[1]} (верных {gb[0]})")
 if not a and not b:
-    print("!!! ни там ни там нет токенов — смотри /tmp/lookup-l0.err")
+    print("!!! ни там ни там нет токенов - смотри /tmp/lookup-l0.err")
     sys.exit(1)
+if gb[1] == 0:
+    print("!!! с --lookup 3 не было ни одной догадки: тест ничего не проверил "
+          "(нужен повторяющийся вход, попробуй TOKENS=... с длинным повтором)")
+    sys.exit(2)
 n = min(len(a), len(b))
 first = next((i for i in range(n) if a[i] != b[i]), None)
 if first is None and len(a) == len(b):
-    print("вердикт: потоки совпадают символ в символ — окно чистое")
+    print("вердикт: потоки совпадают символ в символ - окно чистое")
 else:
     if first is None:
         first = n
