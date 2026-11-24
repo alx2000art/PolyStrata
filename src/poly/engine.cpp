@@ -882,7 +882,16 @@ void Engine::cover(int64_t end) {
         // What the rows need beyond what the pool holds comes out of the expert cache, which gives its pieces to the
         // pool (shrink_cache()); nothing is asked of the card.  With the cache gone and the pool still short, the
         // maps below throw: the context does not fit the VRAM this engine has.
-        if (more > vpool_bytes()) shrink_cache(more - vpool_bytes());
+        if (more > vpool_bytes()) {
+            if (freeze_experts_ && more > vpool_bytes())
+                std::fprintf(stderr, "strata-poly: the attention cache needs %zu MiB more than the pool keeps for "
+                                     "it, and STRATA_FREEZE_EXPERTS leaves the expert cache frozen (shrink_cache() "
+                                     "is a no-op): the rows cannot be mapped.  Take the freeze out of the "
+                                     "environment, or leave the rows their room at load (they get it now under a "
+                                     "freeze)\n",
+                             (more - vpool_bytes()) >> 20);
+            shrink_cache(more - vpool_bytes());
+        }
     } else if (exp_) {
         size_t free_b = 0, total_b = 0;
         ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
@@ -1532,13 +1541,17 @@ void Engine::fill_expert_cache() {
                      [](const Cand& a, const Cand& b) { return a.value != b.value ? a.value > b.value : a.e < b.e; });
 
     n_trade_ = (int) sizes.size();
+    // The rows' whole address range: under STRATA_FREEZE_EXPERTS shrink_cache() does nothing, so a read that
+    // outgrows the room the pool keeps for the rows cannot take it from the cache later - it is left for them
+    // from the start, the whole of what max_context can reach.
+    size_t kv_total = 0;
+    for (const Kv& k : kv_) kv_total += k.reserved;
+    for (const Seq& q : seqs_)
+        for (const Kv& k : q.kv) kv_total += k.reserved;
+    if (freeze_experts_ && !pool_on_) reserve += kv_total;
     if (claim_later) {
         // What the engine can use is every expert's slot, the attention caches' whole address range and 512 MiB for the
         // staging buffer and the rounding: a card that holds more than that keeps the rest for its other programs.
-        size_t kv_total = 0;
-        for (const Kv& k : kv_) kv_total += k.reserved;
-        for (const Seq& q : seqs_)
-            for (const Kv& k : q.kv) kv_total += k.reserved;
         const size_t limit = all + 256 + kv_total + (size_t(512) << 20);
         pool_limit_ = limit;
         size_t by_budget = 0;
@@ -1556,6 +1569,12 @@ void Engine::fill_expert_cache() {
     // sized again (resize_cache()), it is no larger than load() made it, or than its addresses with VMM
     const size_t most = vmm_ ? std::min(all, total_b) : full_bytes_ > 0 ? full_bytes_ : all;
     size_t arena = std::min({all, free_b - reserve, arena_.base ? arena_.reserved - 256 : most});
+    if (freeze_experts_ && pool_on_) {
+        // The rows cannot take their handles back from the cache under a frozen answer (shrink_cache() is a no-op
+        // there), so the pool keeps them unmapped: the whole of max_context, and the staging buffer beside them.
+        const size_t keep = kv_total + (stage_map_.base ? 0 : stage_slack);
+        arena = free_b > keep ? std::min(arena, free_b - keep) : 0;
+    }
     if (arena == 0) return;
     if (vmm_) {   // in pieces, so that it can give some up to the attention caches (shrink_cache()) and grow
         if (!arena_.base) vmm_reserve(arena_, most + 256);   // addresses only: grow_cache() maps more of them
