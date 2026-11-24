@@ -629,6 +629,7 @@ protected:
     /// The pool (Options::vram_pool): handles of pg_ bytes, claimed once, that the maps take from and the unmaps give to.
     void vpool_claim(size_t bytes);
     bool vpool_claim_to_budget(size_t margin, size_t limit, size_t& claimed);
+    void claim_free_into_pool();
     size_t vpool_bytes() const { return vpool_.size() * pg_; }
     size_t kv_step_bytes() const;
     void shrink_cache(size_t bytes);
@@ -749,6 +750,8 @@ protected:
     bool pool_on_ = false;       ///< Options::vram_pool, with VMM
     bool pool_claimed_ = false;  ///< fill_expert_cache() has claimed the pool
     size_t pg_ = 0;              ///< the pool's handle size
+    size_t pool_limit_ = 0;      ///< what the pool may hold (fill_expert_cache()'s limit)
+    size_t pool_owned_ = 0;      ///< what its handles hold now, mapped or not
     std::vector<unsigned long long> vpool_;   ///< the pool's handles that are not mapped
     int device_ = 0;
     size_t grain_ = 0;           ///< what the card maps VRAM in

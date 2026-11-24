@@ -540,6 +540,7 @@ void Engine::vpool_claim(size_t bytes) {
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     prop.location.id = device_;
     vpool_.reserve(vpool_.size() + bytes / pg_ + 1);
+    const size_t before = vpool_.size();
     for (size_t got = 0; got + pg_ <= bytes; got += pg_) {
         CUmemGenericAllocationHandle h = 0;
         if (cuMemCreate(&h, pg_, &prop, 0) != CUDA_SUCCESS) {
@@ -548,6 +549,35 @@ void Engine::vpool_claim(size_t bytes) {
         }
         vpool_.push_back(h);
     }
+    pool_owned_ += (vpool_.size() - before) * pg_;
+}
+
+// The pool is claimed once, in fill_expert_cache(), with what the card had free then.  What the load itself frees
+// after that (its staging and uploads) and what the driver hands back sits free for the run otherwise: the loads'
+// buffers are gone and nothing else on this card asks for it.  Claimed here, the experts the cache lacks take it
+// (mind_card_vram() grows the cache by what the pool holds unmapped).  The reserve stays free, and what the pool
+// may not hold (its limit) is left where it is.  STRATA_POLY_POOL_TOPUP=0 turns it off.
+void Engine::claim_free_into_pool() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_POOL_TOPUP");
+        return !v || std::atoi(v) != 0;
+    }();
+    if (!on || !pool_on_ || !pool_claimed_ || pool_limit_ == 0 || pg_ == 0) return;
+    if (pool_owned_ + pg_ > pool_limit_) return;
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return;
+    }
+    const size_t keep = size_t(std::max(reserve_mib_, 0)) << 20;
+    if (free_b <= keep + (16u << 20)) return;
+    const size_t want = std::min(free_b - keep, pool_limit_ - pool_owned_);
+    const size_t had = vpool_bytes();
+    vpool_claim(want);
+    if (vpool_bytes() > had)
+        std::fprintf(stderr, "strata-poly: the pool took %zu MiB more that the card had free (%zu MiB kept for "
+                             "the reserve); the expert cache takes it\n",
+                     (vpool_bytes() - had) >> 20, keep >> 20);
 }
 
 // The pool sized by what the OS lets this process have, where the OS says (Windows: the video memory budget).  The
@@ -1510,6 +1540,7 @@ void Engine::fill_expert_cache() {
         for (const Seq& q : seqs_)
             for (const Kv& k : q.kv) kv_total += k.reserved;
         const size_t limit = all + 256 + kv_total + (size_t(512) << 20);
+        pool_limit_ = limit;
         size_t by_budget = 0;
         const bool budgeted = vpool_claim_to_budget(reserve, limit, by_budget);
         if (!budgeted) vpool_claim(std::min(free_b > reserve ? free_b - reserve : (size_t) 0, limit));
@@ -1693,6 +1724,9 @@ bool Engine::mind_card_vram() {
         // The pool is the cache's and the rows': what the rows gave back (trim_kv()) goes to the experts the cache
         // lacks that are used most.  Nothing outside the pool is looked at: the margin stays where it was left.
         if (minds_++ == 0) return false;   // nothing is recorded before the first request
+        // VRAM the load freed after the claim (its staging and uploads) is no one's: the pool takes it, the cache
+        // below maps it into slots.  The margin, the reserve, stays free as it was.
+        claim_free_into_pool();
         // Two steps of the rows' growth stay in it (kv_step_bytes()), so that an answer that goes on does not take
         // experts out again
         const size_t have = vpool_bytes(), slack = 2 * kv_step_bytes();
@@ -1713,7 +1747,18 @@ bool Engine::mind_card_vram() {
         held_is_budget();
         return true;
     }
-    return free >= keep + (int64_t) (kArenaPiece >> 20) && grow_cache(size_t(free - keep) << 20) > 0;
+    if (free < keep + (int64_t) (kArenaPiece >> 20)) return false;
+    if (grow_cache(size_t(free - keep) << 20) > 0) return true;
+    // Said once: VRAM the reserve leaves free and no expert takes is either every missing one already coming, or
+    // the cache's addresses are used up (grow_cache() maps no further) - it says which.
+    static bool said = false;
+    if (!said) {
+        said = true;
+        std::fprintf(stderr, "strata-poly: %lld MiB free beside the %lld MiB reserve and the expert cache took none "
+                             "of it (slots by addresses: %zu of %zu MiB mapped)\n",
+                     (long long) (free - keep), (long long) keep, arena_.mapped >> 20, arena_.reserved >> 20);
+    }
+    return false;
 }
 
 // A read of several calls copies each layer's experts that are not cached through the staging buffer, a round

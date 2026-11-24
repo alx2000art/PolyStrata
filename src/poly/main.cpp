@@ -1454,6 +1454,8 @@ int main(int argc, char** argv) {
     if (check > 0) o.kv_grow = false;
     // over --tail-skip, as Strata's engine reads it: =0 turns a model's default off
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
+    // STRATA_POLY_VRAM_RESERVE=<MiB>: the reserve over --vram-reserve-mib, for a sweep's own hand on it
+    if (const char* v = std::getenv("STRATA_POLY_VRAM_RESERVE")) o.vram_reserve_mib = std::atoi(v);
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||

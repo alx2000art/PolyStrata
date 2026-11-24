@@ -283,6 +283,13 @@ VARIANTS+=("47-spin20|$LOSSLESS_BASE ENV:STRATA_POLY_SPIN=400000")
 # Только длинные промпты (poly/long) и только если у модели есть хвост window-only слоёв: старт движка
 # печатает "prompt skip: ... stop at layer N" (N = n_layer, если такого хвоста нет).
 VARIANTS+=("48-prompskip|$LOSSLESS_BASE ENV:STRATA_POLY_PROMPT_SKIP=2668")
+# 49/50 — то, что карта держит свободным.  49 — выключить дотягивание пула (STRATA_POLY_POOL_TOPUP=0:
+# память, освобождённая самой загрузкой, остаётся у карты) — контроль для 80, где дотягивание включено.
+# 50 — резерв 320 вместо 512 МиБ: +192 МиБ кэшу (~21 эксперт), ступенька ночного бенча 256 давала +1.9%,
+# но графам при 131k нужно 512; у нас ctx-cap 32k — проверяем, хватает ли 320 (смотреть на
+# cudaGraphInstantiate: out of memory в логе движка).
+VARIANTS+=("49-pooleveloff|$LOSSLESS_BASE ENV:STRATA_POLY_POOL_TOPUP=0")
+VARIANTS+=("50-reserve320|$LOSSLESS_BASE ENV:STRATA_POLY_VRAM_RESERVE=320")
 VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graphs")
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
@@ -442,7 +449,8 @@ env = cfg.get("env") or {}
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
            "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL",
-           "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN", "STRATA_POLY_PROMPT_SKIP")
+           "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN", "STRATA_POLY_PROMPT_SKIP", "STRATA_POLY_POOL_TOPUP",
+           "STRATA_POLY_VRAM_RESERVE")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -1149,6 +1157,8 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("46-pcie35", "35% CPU-экспертов на карту по PCIe (pcie_frac)"),
        ("47-spin20", "спин пула 20 мс (Basalt)"),
        ("48-prompskip", "prompt skip: дальние строки останавливаются раньше"),
+       ("49-pooleveloff", "пул не дотягивает освобождённую загрузкой карту"),
+       ("50-reserve320", "резерв VRAM 320 вместо 512 МиБ"),
        ("79-graph-logits", "графы: только logits"),
        ("96-graph-tail", "графы: только tail"),
        ("97-graph-shared", "графы: только shared"),
