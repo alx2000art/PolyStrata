@@ -3852,6 +3852,18 @@ int Engine::room_key(int n) const {
     return key;
 }
 
+// STRATA_GRAPH_PARTS=htscl: which recorded launches the answer's path uses (default every part).  For finding
+// the one whose recording breaks the answers: h = a layer's head (attention and router), t = its tail,
+// s = the shared expert, c = the all-cached experts' moe_card path, l = the logits.  Unset or "*" = all; ""
+// = none (same as --no-graphs, one part at a time can be left out).
+static bool graph_part(char part) {
+    static const std::string all = [] {
+        const char* v = std::getenv("STRATA_GRAPH_PARTS");
+        return std::string(v ? v : "*");
+    }();
+    return all == "*" || all.find(part) != std::string::npos;
+}
+
 // Records what `work` hands to the stream, as a graph that is launched with one call from then on.
 template <class F>
 void* Engine::record(F&& work) {
@@ -3950,13 +3962,13 @@ void Engine::run(const int32_t* tokens, int n) {
     const auto up = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
-        if (replay && L.fixed) replayed(L.heads, head, [&] { up_body(il, m); });
+        if (replay && L.fixed && graph_part('h')) replayed(L.heads, head, [&] { up_body(il, m); });
         else up_body(il, m);
     };
     const auto tail = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         dbg("ffn", il, fo_, n_embd_);
-        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, m); tap_capture(il, m); });
+        if (replay && L.fixed && graph_part('t')) replayed(L.tail, rec, [&] { layer_tail(L, il, m); tap_capture(il, m); });
         else { layer_tail(L, il, m); tap_capture(il, m); }
     };
 
@@ -4049,14 +4061,14 @@ void Engine::run(const int32_t* tokens, int n) {
     const auto on_card = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         if (!card) return false;
-        if (replay && L.card == 1) replayed(L.card_moe, rec, [&] { moe_card(L, il, m); });
+        if (replay && L.card == 1 && graph_part('c')) replayed(L.card_moe, rec, [&] { moe_card(L, il, m); });
         else if (!moe_card(L, il, m)) return false;
         stats_.gpu_experts += m * n_used_;
         return true;
     };
     // Once every layer has shown that, a call's layers are one recording: on an RTX 5090 the card waited 2 to 4
     // microseconds from one layer's recording to the next, four of them a layer.
-    bool whole = card && replay;
+    bool whole = card && replay && graph_part('h') && graph_part('c');
     for (int il = lo_; il < hi_ && whole; ++il) {
         const Layer& L = layers_[(size_t) il];
         whole = L.fixed && (!L.moe || L.card == 1);
@@ -4101,7 +4113,7 @@ void Engine::run(const int32_t* tokens, int n) {
             // Свой ключ, не пересекающийся с N.heads (head_key*recs+rec) и N.tail (rec): хвост принадлежит
             // предыдущему слою, поэтому рекорд хранится у СЛЕДУЮЩЕГО, а ключ расширен номером хвоста.
             const size_t key = (size_t) head_key(il + 1, n) * recs + (size_t) n - 1 + recs * (size_t) recs;
-            if (replay && N.fixed) {
+            if (replay && N.fixed && graph_part('h') && graph_part('t')) {
                 auto& made = N.merged;
                 if (made.size() <= key) made.resize(key + 1, nullptr);
                 if (!made[key])
@@ -4218,7 +4230,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
                 shift_rows(i);
                 pos_ = at[(size_t) i];
                 const size_t head = (size_t) head_key(il, 1) * recs + 3 * wn + (size_t) i;
-                if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, 1); });
+                if (replay && L.fixed && graph_part('h')) replayed(L.heads, head, [&] { layer_head(L, il, 1); });
                 else layer_head(L, il, 1);
                 shift_rows(-i);
                 pos_ = at[(size_t) i];
@@ -4232,9 +4244,9 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
             moe_rows(L, il, n);
         } else {
             ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
-            if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, n); });
+            if (replay && graph_part('s')) replayed(L.shared, rec, [&] { moe_shared(L, il, n); });
             else moe_shared(L, il, n);
-            if (!capped && card && L.card == 1 && replay) {
+            if (!capped && card && L.card == 1 && replay && graph_part('c')) {
                 replayed(L.card_moe, rec, [&] { moe_card(L, il, n); });
                 stats_.gpu_experts += n * n_used_;
             } else if (!capped && card && moe_card(L, il, n)) {
@@ -4243,7 +4255,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
                 moe_add(n);
             }
         }
-        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, n); });
+        if (replay && L.fixed && graph_part('t')) replayed(L.tail, rec, [&] { layer_tail(L, il, n); });
         else layer_tail(L, il, n);
     }
 
@@ -4409,7 +4421,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     }
     // The model's output: the last token's for the logits, and every token's for the draft block.
     if (want_logits || draft_) {
-        const bool replay = opt_.graphs && n == 1 && want_logits && !opt_.dump;
+        const bool replay = opt_.graphs && n == 1 && want_logits && !opt_.dump && graph_part('l');
         const int m = draft_ ? n : 1;
         float* h = draft_ ? hn_ + n_embd_ : xn_;
         const auto tail = [&] {

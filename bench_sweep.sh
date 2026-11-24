@@ -265,6 +265,12 @@ VARIANTS+=("93-pb1024|$LOSSLESS_BASE --prompt-batch 1024")
 VARIANTS+=("95-swaps128|$LOSSLESS_BASE --expert-swaps 128")
 # 94 — последняя: по профилю без фриза ждать GPU стало ~15.7 мс/токен при десятках запусков на слой, а в
 # конфиге стоит --no-graphs; 94 возвращает графы (DEL снимает флаг).  Последняя — чтобы графы не протекли.
+# 96-98: клетки для поиска той записи, которая ломает ответы (94 с графами отвечала пустым токеном на
+# каждый промпт).  Заграфена ровно одна часть: t - хвост слоя, s - shared-эксперт, h - голова.
+VARIANTS+=("79-graph-logits|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=l DEL:--no-graphs")
+VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graphs")
+VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
+VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
 VARIANTS+=("94-graphs|$LOSSLESS_BASE DEL:--no-graphs")
 
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
@@ -420,7 +426,7 @@ env = cfg.get("env") or {}
 # lesson.  The model's own env (PIN_EXPERTS, STAGED_TILES, ...) stays.
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
-           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN")
+           "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -1118,7 +1124,11 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("92-ctx32k", "ctx-cap 32768 (KV-бюджет -650 МиБ)"),
        ("93-pb1024", "prompt-batch 1024 (префилл против кэша)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
-       ("95-swaps128", "expert-swaps 128 (кэш тянет hot set)"))
+       ("95-swaps128", "expert-swaps 128 (кэш тянет hot set)"),
+       ("79-graph-logits", "графы: только logits"),
+       ("96-graph-tail", "графы: только tail"),
+       ("97-graph-shared", "графы: только shared"),
+       ("98-graph-head", "графы: только head"))
 if "80-eta-iq256off" in names and any(nm in names for nm, _ in los):
     lines.append("")
     lines.append("## lossless-ручки (пара к `80-eta-iq256off`)")
