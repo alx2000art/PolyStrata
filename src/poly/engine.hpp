@@ -798,6 +798,7 @@ protected:
     size_t again_ = SIZE_MAX;    ///< while alloc_caches() points at the bound sequence's buffers again: the next one
     void park_bound();
     void take_bound(int s);
+    void forget_graphs();   ///< every recorded launch of the bound sequence let go (take_bound())
     void hold(int s);   ///< bind() on this card alone
     size_t other_rows() const;
     size_t budget_ = 0;          ///< their VRAM and the expert cache's together, as the cache was filled

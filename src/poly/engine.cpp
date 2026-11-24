@@ -843,6 +843,35 @@ void Engine::take_bound(int s) {
     again_ = 0;
     alloc_caches();
     again_ = SIZE_MAX;
+    // A recorded launch bakes the pointers it was handed, and some of them point into this sequence's buffers.
+    // Every map travels with its sequence now, but one pointer missed is enough for a replay to reach another
+    // conversation's memory - the second window that answered with the first one's text.  So the bound
+    // sequence's recordings are dropped and made again: a switch costs a few dozen captures, and no replay can
+    // cross to another conversation whatever the maps do.
+    forget_graphs();
+}
+
+// Every recorded launch of the bound sequence, let go: the maps emptied, the execs destroyed.  Called when the
+// bound sequence changes (take_bound()) and when the engine ends.
+void Engine::forget_graphs() {
+    if (graphs_.empty() && passes_.empty() && !tail_) return;
+    ck(cudaStreamSynchronize(cs(st_)), "the recorded launches");
+    for (void* g : graphs_) cudaGraphExecDestroy((cudaGraphExec_t) g);
+    graphs_.clear();
+    passes_.clear();
+    tail_ = nullptr;
+    for (Layer& L : layers_) {
+        L.heads.clear();
+        L.shared.clear();
+        L.shared_run.clear();
+        L.tail.clear();
+        L.merged.clear();
+        L.card_moe.clear();
+        L.rows_heads.clear();
+    }
+    graph_n_ = 0;
+    graph_bytes_ = 0;
+    graph_bucket_ = -1;
 }
 
 void Engine::hold(int s) {
