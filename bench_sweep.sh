@@ -279,6 +279,10 @@ VARIANTS+=("45-readfill|$LOSSLESS_BASE ENV:STRATA_POLY_READ_FILL=1")
 # длинный спин пула (Basalt 20 мс против нашего 1 мс; 400000 пауз ≈ 20 мс здесь).
 VARIANTS+=("46-pcie35|$LOSSLESS_BASE ENV:STRATA_POLY_PCIE_FRAC=0.35")
 VARIANTS+=("47-spin20|$LOSSLESS_BASE ENV:STRATA_POLY_SPIN=400000")
+# 48 — prompt skip (Basalt): строки дальше 2668 от конца чтения не идут выше последнего сжатого слоя.
+# Только длинные промпты (poly/long) и только если у модели есть хвост window-only слоёв: старт движка
+# печатает "prompt skip: ... stop at layer N" (N = n_layer, если такого хвоста нет).
+VARIANTS+=("48-prompskip|$LOSSLESS_BASE ENV:STRATA_POLY_PROMPT_SKIP=2668")
 VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graphs")
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
@@ -438,7 +442,7 @@ env = cfg.get("env") or {}
 MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_STAGE2_DEBUG", "STRATA_POLY_STAGE_SPEC",
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
            "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL",
-           "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN")
+           "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN", "STRATA_POLY_PROMPT_SKIP")
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
@@ -1144,6 +1148,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("45-readfill", "дозаливка кэша по роутингу чтения (hold)"),
        ("46-pcie35", "35% CPU-экспертов на карту по PCIe (pcie_frac)"),
        ("47-spin20", "спин пула 20 мс (Basalt)"),
+       ("48-prompskip", "prompt skip: дальние строки останавливаются раньше"),
        ("79-graph-logits", "графы: только logits"),
        ("96-graph-tail", "графы: только tail"),
        ("97-graph-shared", "графы: только shared"),

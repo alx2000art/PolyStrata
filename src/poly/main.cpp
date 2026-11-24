@@ -1470,6 +1470,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata-poly: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
+        if (engine.prompt_skip_rows() > 0)
+            std::fprintf(stderr, "strata-poly: prompt skip: rows further than %d from the read's end stop at layer %d\n",
+                         engine.prompt_skip_rows(), engine.prompt_skip_layer());
         if (o.skip_weight > 0)
             std::fprintf(stderr, "strata-poly: skip weight %.3f: an expert outside VRAM that every token of a window "
                                  "weighs under %.1f%% of its experts' weight is left out (in place of --tail-skip)\n",

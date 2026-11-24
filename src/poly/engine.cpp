@@ -2201,6 +2201,7 @@ void Engine::load(const Options& o) {
                              "read's end (STRATA_POLY_READ_FILL), and holds while the answer is written\n");
     // STRATA_POLY_PCIE_FRAC: the share of the experts the CPU would compute that the card copies over PCIe instead
     // and runs beside the CPU - the bus is idle during the CPU's phase (Basalt's pcie_frac).  Env only, 0 = off.
+    if (const char* v = std::getenv("STRATA_POLY_PROMPT_SKIP")) skip_rows_ = std::atoi(v);
     if (const char* v = std::getenv("STRATA_POLY_PCIE_FRAC")) pcie_frac_ = (float) std::atof(v);
     if (pcie_frac_ > 0.f)
         std::fprintf(stderr, "strata-poly: %.0f%% of the CPU's experts go to the card over PCIe (STRATA_POLY_PCIE_FRAC)\n",
@@ -3869,11 +3870,13 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         cpu_experts(*workers_, host_.data(), (int) host_.size(), n, gt, dt, n_embd_, n_ff_exp_, h_x_, limit, gelu_,
                     h_cpu_, opt_.cpu_tiled != 0, nullptr);
         const double cpu = ms_since(start);
+        const Clock::time_point t_join = Clock::now();
         behind.wait();
+        const double join = ms_since(t_join);   // the host waiting out the slower of the card and the CPU
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
         if (s2_debug_)
-            std::fprintf(stderr, "[moe] il=%d cpu %.0f ms / gpu %.0f ms (both had to run in parallel)\n", il, cpu,
-                         gpu);
+            std::fprintf(stderr, "[moe] il=%d cpu %.2f ms / gpu %.2f ms (join %.2f, both in parallel)\n", il, cpu,
+                         gpu, join);
         stats_.cpu_ms += cpu;
         stats_.cpu_experts += (int64_t) host_.size();
         // the share that would have had both done at once, if each one's time grows with its share
@@ -4800,8 +4803,13 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                 pos_ = pos0 + call.at;
                 tok_ = tokens + call.at;
                 if (host) ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_in_[c % 2], 0), "read");
+                // Prompt skip (STRATA_POLY_PROMPT_SKIP): a call wholly further than skip_rows_ from the
+                // read's end stops before the window-only layers - the answer never attends those rows there
+                // (the window is shorter than the distance), so their deep states are never read.
+                const bool skip = skip_rows_ > 0 && il < n_layer_ && il >= window_only_from() &&
+                                  pos0 + call.at + call.m <= pos0 + n - skip_rows_;
                 if (il < n_layer_) {
-                    layer(il, call.m);
+                    if (!skip) layer(il, call.m);
                 } else {
                     output_rows(0, call.m, hn_ + n_embd_);
                     draft_rows(tokens + call.at, ahead_pos_ == pos_ && tokens[call.at] == ahead_tok_ ? 1 : 0, call.m);
@@ -4810,7 +4818,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                 if (uint8_t* state = call.mark >= 0 ? marks[call.mark].state : nullptr) {
                     ck(cudaStreamSynchronize(cs(st_)), "read");
                     const int64_t pos = pos_ + call.m;
-                    if (il < n_layer_) save_layer(il, pos, state);
+                    if (il < n_layer_ && !skip) save_layer(il, pos, state);
                     if (k == turns - 1) {   // what no turn is for: a layer behind the model's, the last output
                         for (int j = n_layer_; j < (int) layers_.size(); ++j) save_layer(j, pos, state);
                         save_last(state);

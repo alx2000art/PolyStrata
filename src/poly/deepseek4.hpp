@@ -45,6 +45,7 @@ protected:
     bool route_card(int il, int n, int32_t* ids, float* w) override;
     void moe_shared(const Layer& L, int il, int n) override;
     int head_key(int il, int n) const override;
+    int window_only_from() const override;
 
 private:
     /// A compressor: its weights, and the rows of the positions whose block is not done yet, in two rings.

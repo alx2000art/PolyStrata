@@ -258,6 +258,9 @@ public:
     int n_embd() const { return n_embd_; }
     int max_context() const { return opt_.max_context; }
     int threads() const { return workers_ ? workers_->threads() : 0; }
+    /// STRATA_POLY_PROMPT_SKIP: the rows (0 = off) and the layer they stop at.
+    int prompt_skip_rows() const { return skip_rows_; }
+    int prompt_skip_layer() const { return window_only_from(); }
     /// The NUMA node the CPU threads were kept on, and the share of the experts' pages it holds; -1: no node chosen.
     int numa_node() const { return node_; }
     double numa_share() const { return node_share_; }
@@ -489,6 +492,10 @@ protected:
     /// Which recording of a layer's head fits n tokens from pos().  Launches that are sized by the rows they read
     /// are recorded once for each size (room()), and the architecture numbers the sizes from 0.
     virtual int head_key(int il, int n) const { (void) il, (void) n; return 0; }
+    /// The first layer from which every layer above it attends its window alone: a row the answer never
+    /// attends (further from it than the window) may stop there (STRATA_POLY_PROMPT_SKIP).  n_layer_: no
+    /// such layer, and the skip does nothing.
+    virtual int window_only_from() const { return n_layer_; }
     /// layer_head() takes step()'s rows in one call: the products for every row at once, and each row's recurrent
     /// state and attention rows from its own sequence (rows_of_, seq_state(), seq_buf()), its position from at_.
     /// Otherwise step() runs the head a row at a time, with the row's sequence bound.
@@ -664,6 +671,8 @@ protected:
     bool read_fill_ = false;                 ///< STRATA_POLY_READ_FILL: the cache is filled from the prompt's
                                              ///< own routing at the read's end, and holds while the answer is written
     bool read_fill_hold_ = false;            ///< the fill is done: no trade, no decay, no shrink until the next read
+    int skip_rows_ = 0;                      ///< STRATA_POLY_PROMPT_SKIP: rows this far from the read's
+                                             ///< end stop at window_only_from()
     float pcie_frac_ = 0.f;                  ///< STRATA_POLY_PCIE_FRAC: the share of the decode's CPU experts the
                                              ///< card copies over PCIe and runs beside the CPU
     bool freeze_experts_ = false;            ///< STRATA_FREEZE_EXPERTS: the experts' split is frozen

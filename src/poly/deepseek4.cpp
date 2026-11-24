@@ -414,6 +414,16 @@ void DeepSeek4::squeeze(Block& B, Squeeze& S, int64_t pos, int n) {
 // they are sized for.
 int DeepSeek4::head_key(int il, int n) const { return blocks_[(size_t) il].ratio ? room_key(n) : 0; }
 
+// The layers above the last compressed one attend their window (128 rows) alone: a prompt row further than
+// that from the answer is never attended there, so its deep states need not be computed at all
+// (STRATA_POLY_PROMPT_SKIP, Basalt's default).  Every layer compressed: n_layer_, and nothing is skipped.
+int DeepSeek4::window_only_from() const {
+    int last = -1;
+    for (int il = 0; il < (int) blocks_.size() && il < n_layer_; ++il)
+        if (blocks_[(size_t) il].ratio) last = il;
+    return last + 1;
+}
+
 // The output projection: the heads in groups, each group through its own low-rank matrix, then all of them through
 // one.  A group of a token is n_head / groups heads that lie together.
 void DeepSeek4::out_proj(Block& B, int n) {
