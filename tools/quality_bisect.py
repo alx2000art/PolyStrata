@@ -128,19 +128,37 @@ def stop_server(cfg):
 
 def start_server(cfg, log_path):
     log = open(log_path, "w", encoding="utf-8")
-    subprocess.Popen([str(ROOT / ".venv/bin/python"), str(ROOT / "serve/server.py"), "--engine", "strata",
-                      "--config", str(CFG), "--port", str(int(cfg.get("port") or 1524))],
-                     cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env={**os.environ})
-    for _ in range(1200):
+    proc = subprocess.Popen([str(ROOT / ".venv/bin/python"), str(ROOT / "serve/server.py"), "--engine", "strata",
+                             "--config", str(CFG), "--port", str(int(cfg.get("port") or 1524))],
+                            cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                            env={**os.environ})
+    t0 = time.time()
+    shown = 0
+    for _ in range(200):          # до 10 минут, но с отчётом каждые 15 секунд
         try:
             c = http.client.HTTPConnection(host_of(cfg), int(cfg.get("port") or 1524), timeout=5)
             c.request("GET", "/health", headers={"Authorization": "Bearer " + (cfg.get("api_key") or "")})
             body = c.getresponse().read().decode("utf-8", "replace")
             if '"loaded"' in body and "true" in body:
+                print(f"    сервер готов ({time.time() - t0:.0f} с)", flush=True)
                 return True
         except OSError:
             pass
+        if proc.poll() is not None:   # сервер вышел: не ждём впустую
+            print(f"!!! сервер вышел с кодом {proc.returncode}; хвост {log_path}:", flush=True)
+            try:
+                lines = Path(log_path).read_text(encoding="utf-8", errors="replace").strip().splitlines()
+                for line in lines[-6:]:
+                    print("      " + line, flush=True)
+            except OSError:
+                pass
+            return False
+        elapsed = time.time() - t0
+        if elapsed - shown >= 15:
+            shown = elapsed
+            print(f"    жду сервер: {elapsed:.0f} с ...", flush=True)
         time.sleep(3)
+    print("!!! сервер не поднялся за 10 минут", flush=True)
     return False
 
 
@@ -156,6 +174,8 @@ def run_probes():
         else:
             rows.append({"name": name, "critical": critical, "ok": check(text),
                          "why": f"{text.strip()[:70].replace(chr(10), ' ')} [{finish}]"})
+        r = rows[-1]
+        print(f"      {name}: {'ок' if r['ok'] else 'ПРОВАЛ'} — {r['why'][:70]}", flush=True)
     if LONG:
         text, err, finish = qp.ask(qp.cfg_load(), qp.LONG, 900)
         if err:
@@ -164,6 +184,8 @@ def run_probes():
             words, rep = qp.loop_score(text)
             rows.append({"name": "loop", "critical": True, "ok": rep < 3,
                          "why": f"{words} слов, повтор окна {rep}"})
+        r = rows[-1]
+        print(f"      loop: {'ок' if r['ok'] else 'ПРОВАЛ'} — {r['why'][:70]}", flush=True)
     return rows
 
 
@@ -184,11 +206,12 @@ def main():
             save(cfg)
             print(f"\n=== вариант {name}: рестарт ===", flush=True)
             stop_server(cfg)
+            print("    сервер остановлен, поднимаю ...", flush=True)
             if not start_server(cfg, ROOT / f".bisect-{name}.log"):
                 print(f"!!! {name}: сервер не поднялся (.bisect-{name}.log)", flush=True)
                 results[name] = None
                 continue
-            print("    сервер готов, пробы ...", flush=True)
+            print("    пробы:", flush=True)
             rows = run_probes()
             results[name] = rows
             crit = sum(1 for r in rows if r["critical"] and not r["ok"])
