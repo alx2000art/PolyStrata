@@ -78,7 +78,11 @@ def ask(cfg, prompt, max_tokens):
     port = int(cfg.get("port") or 1524)
     body = json.dumps({"model": cfg.get("model_name") or "x",
                        "messages": [{"role": "user", "content": prompt}],
-                       "temperature": 0, "max_tokens": max_tokens, "stream": False}).encode()
+                       "temperature": 0, "max_tokens": max_tokens, "stream": False,
+                       # без рассуждений: иначе на коротком max_tokens весь бюджет уходит в <think>,
+                       # а content приходит пустым (так же их отключает ab_patches.py)
+                       "chat_template_kwargs": {"enable_thinking": False},
+                       "thinking": {"type": "disabled"}}).encode()
     try:
         conn = http.client.HTTPConnection(host_of(cfg), port, timeout=600)
         conn.request("POST", "/v1/chat/completions", body,
@@ -93,7 +97,12 @@ def ask(cfg, prompt, max_tokens):
         return None, f"не JSON: {raw[:120]}"
     if doc.get("error"):
         return None, f"ошибка: {str(doc['error'])[:160]}"
-    return ((doc.get("choices") or [{}])[0].get("message") or {}).get("content") or "", None
+    msg = (doc.get("choices") or [{}])[0].get("message") or {}
+    text = msg.get("content") or ""
+    # thinking был включён (сервер не послушал): ответ ищем и в рассуждении
+    if not text.strip():
+        text = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    return text, None
 
 
 def loop_score(text):
@@ -118,10 +127,14 @@ def main():
     print("\n| проверка | итог | ответ |")
     print("|---|---|---|")
     for name, prompt, check, cap in PROBES:
-        text, err = ask(cfg, prompt, cap)
+        text, err = ask(cfg, prompt, max(cap, 160))   # thinking, если сервер его не отключил, съедает бюджет
         if err:
             fails += 1
             print(f"| {name} | ОШИБКА | {err} |")
+            continue
+        if not text.strip():
+            fails += 1
+            print(f"| {name} | ПУСТО | ответа нет: весь бюджет ушёл в рассуждение? |")
             continue
         ok = check(text)
         if not ok:
