@@ -49,7 +49,10 @@ run() {  # $1 = подпись, $2 = значение --lookup
   local -a A=("${BASE[@]}")
   local i
   for i in "${!A[@]}"; do [[ "${A[$i]}" == "--lookup" ]] && A[$((i + 1))]="$lookup"; done
-  "$BIN" "${A[@]}" --tokens "$TOKENS" --max-new "$MAXNEW" --temperature 0 --seed 1 \
+  # STRATA_FREEZE_EXPERTS: без него кэш экспертов перестраивается во время чтения промпта, и суммы
+  # слоёв округляются иначе - два процесса расходятся уже на ПЕРВОМ токене, и окно тут ни при чём
+  # (так и вышло: первое расхождение с токена 0 при нуле догадок).  С фризом сравнение честное.
+  env STRATA_FREEZE_EXPERTS=1 "$BIN" "${A[@]}" --tokens "$TOKENS" --max-new "$MAXNEW" --temperature 0 --seed 1 \
       > "/tmp/lookup-$tag.out" 2> "/tmp/lookup-$tag.err" || {
     echo "!!! $tag: движок вышел с ошибкой, хвост:"; tail -4 "/tmp/lookup-$tag.err"; return 1; }
 }
