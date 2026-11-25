@@ -327,6 +327,19 @@ VARIANTS+=("68-eta-ram0|$WORKING_SPEC --ram-experts-mib 0")
 # 79 логиты, 95 card_moe.  Часть, которая одна меняет ответ, и есть подозреваемая.
 VARIANTS+=("95-graph-cardmo|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=c DEL:--no-graphs")
 
+# По умолчанию — только необходимый набор: эталон и ручки, решения по которым ещё нет.  FULL=1 гоняет
+# все варианты (ночной обзор).  ONLY по-прежнему выбирает из этого списка.
+if [[ "${FULL:-0}" != "1" ]]; then
+    _essential=$'\n80-eta-iq256off\n53-eta-nographs\n44-readheat\n45-readfill\n47-spin20\n87-reserve256\n54-eta-tailskipall\n39-eta-pb4096\n'
+    keep=()
+    for entry in "${VARIANTS[@]}"; do
+        name="${entry%%|*}"
+        [[ "$_essential" == *$'\n'"$name"$'\n'* ]] && keep+=("$entry")
+    done
+    VARIANTS=("${keep[@]}")
+    unset _essential keep
+fi
+
 # ONLY: оставить только выбранные варианты.  NOW=1 - те же, но первыми (контроли 00/01/15/99 и
 # рабочая спека уходят в конец, чтобы быстрый прогон не тратил время на них).
 if [[ -n "$ONLY" ]]; then
