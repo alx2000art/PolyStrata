@@ -9,18 +9,22 @@
 //
 // Nothing here knows the model.  E is the engine:
 //     void reset();
+//     int64_t pos() const;
 //     size_t state_bytes() const;  void save_state(uint8_t*);  void load_state(const uint8_t*, int64_t pos);
 //     size_t row_bytes() const;    void save_rows(int64_t first, int64_t n, uint8_t*);
 //     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
 #pragma once
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <new>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -35,11 +39,16 @@ struct CacheOptions {
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
     FILE* log = nullptr;       ///< where parking is reported; the server reads these lines
+    uint64_t fingerprint = 0;  ///< what a session file must match to be loaded: a file holds raw state and rows, which
+                               ///< mean nothing to another model or build (main.cpp fills it from the engine)
 };
 
 template<class E>
 class Conversations {
 public:
+    /// Why a session file could not be written or read; main.cpp names it in the answer to the server
+    /// (SERR <invalid|memory|storage|io>).
+    enum class FileError { invalid, memory, storage, io };
     Conversations(E& engine, CacheOptions o)
         : e_(engine), o_(std::move(o)), slots_((size_t) std::max(o_.park_slots, 0) + 1) {}
 
@@ -402,6 +411,233 @@ private:
         return true;
     }
 
+    // ---- the session file: one conversation whole, states and rows, so that it comes back after a restart, or
+    // stays on the disk while the RAM keeps others.  The blobs are what park() keeps, plus one more at the end of
+    // what the engine has - its live state - so a restored conversation reads nothing of itself back at all.
+    // Layout (little endian, version 1):
+    //     "SPCSV1\0\0"  u64 fingerprint  i64 tokens  i64 prompt  tokens x i32
+    //     u32 marks, each { i64 pos  u64 bytes  bytes }
+    //     u32 rows,  each { i64 first  i64 keep  u64 bytes  bytes }
+    // The fingerprint is what main.cpp makes of the engine's geometry: raw state of another model or build means
+    // nothing here, so such a file is refused rather than loaded.
+    bool save_file(const std::string& path, std::string& why) {
+        last_file_bytes_ = 0;
+        last_file_error_ = FileError::io;
+        Slot& s = cur();
+        const int64_t end = std::min(len(s), e_.pos());
+        if (end < 1 || s.marks.empty()) {
+            last_file_error_ = FileError::invalid;
+            why = "no conversation to save";
+            return false;
+        }
+        const Clock::time_point t0 = Clock::now();
+        std::vector<Checkpoint> marks;
+        for (const Checkpoint& m : s.marks)
+            if (m.pos <= end) marks.push_back(m);
+        const bool live = marks.empty() || marks.back().pos < end;
+        const int64_t from = saved(s);
+        // The rows and the state are copied out whole: the host must have room for them before one is taken
+        const size_t need = (size_t) (end - from) * e_.row_bytes() + (live ? e_.state_bytes() : 0);
+        if (o_.admit && !o_.admit(need)) {
+            last_file_error_ = FileError::memory;
+            why = "the host cannot spare " + std::to_string(need >> 20) + " MiB for the session file";
+            return false;
+        }
+        BlobPtr tail;   // the rows the engine still has only in its caches
+        if (from < end) {
+            tail = blob((size_t) (end - from) * e_.row_bytes());
+            if (!tail) {
+                last_file_error_ = FileError::memory;
+                why = "not enough RAM for the rows to be written";
+                return false;
+            }
+            e_.save_rows(from, end - from, tail->p.get());
+        }
+        BlobPtr tip;    // the state at the end: what the engine holds now
+        if (live) {
+            tip = blob(e_.state_bytes());
+            if (!tip) {
+                last_file_error_ = FileError::memory;
+                why = "not enough RAM for the state to be written";
+                return false;
+            }
+            e_.save_state(tip->p.get());
+        }
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) {
+            last_file_error_ = errno == ENOSPC ? FileError::storage : FileError::io;
+            why = "cannot write " + path + ": " + std::strerror(errno);
+            return false;
+        }
+        const auto put = [&](const void* p, size_t n) { return std::fwrite(p, 1, n, f) == n; };
+        const auto put64 = [&](uint64_t v) { return put(&v, sizeof v); };
+        const auto put32 = [&](uint32_t v) { return put(&v, sizeof v); };
+        const auto puti64 = [&](int64_t v) { return put(&v, sizeof v); };
+        const auto put_state = [&](const BlobPtr& b) { return put64(b->bytes) && put(b->p.get(), b->bytes); };
+        bool ok = put("SPCSV1\0\0", 8) && put64(o_.fingerprint) && puti64((int64_t) s.seq.size()) &&
+                  puti64(s.prompt) && put(s.seq.data(), s.seq.size() * sizeof(int32_t)) &&
+                  put32((uint32_t) (marks.size() + (live ? 1 : 0)));
+        for (size_t k = 0; ok && k < marks.size(); ++k) ok = puti64(marks[k].pos) && put_state(marks[k].state);
+        if (ok && live) ok = puti64(end) && put_state(tip);
+        ok = ok && put32((uint32_t) (s.rows.size() + (tail ? 1 : 0)));
+        const size_t row = e_.row_bytes();
+        for (size_t k = 0; ok && k < s.rows.size(); ++k) {
+            const size_t bytes = (size_t) s.rows[k].keep * row;
+            ok = puti64(s.rows[k].first) && puti64(s.rows[k].keep) && put64(bytes) &&
+                 put(s.rows[k].blob->p.get(), bytes);
+        }
+        if (ok && tail) ok = puti64(from) && puti64(end - from) && put64(tail->bytes) && put(tail->p.get(), tail->bytes);
+        const long at = std::ftell(f);
+        if (std::fclose(f) != 0 || !ok) {
+            if (errno == ENOSPC) last_file_error_ = FileError::storage;
+            why = "cannot write " + path;
+            return false;
+        }
+        last_file_bytes_ = (size_t) at;
+        say("saved", end, t0, cur_);
+        return true;
+    }
+
+    // The conversation of `path` takes the engine; the one the engine held is parked if it can be, and dropped
+    // when it cannot.  The end state the file holds puts the engine at the conversation's end, so its next turn
+    // reads none of it again.
+    bool load_file(const std::string& path, std::string& why) {
+        last_file_bytes_ = 0;
+        last_file_error_ = FileError::io;
+        const Clock::time_point t0 = Clock::now();
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) {
+            why = "cannot read " + path + ": " + std::strerror(errno);
+            return false;
+        }
+        const auto get = [&](void* p, size_t n) { return std::fread(p, 1, n, f) == n; };
+        // The file's data is what the host must hold at the parse's peak: checked before one byte is taken
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (size < 0) {
+            std::fclose(f);
+            why = "cannot read " + path + ": " + std::strerror(errno);
+            return false;
+        }
+        if (o_.admit && !o_.admit((size_t) size)) {
+            std::fclose(f);
+            last_file_error_ = FileError::memory;
+            why = "the host cannot spare " + std::to_string((size_t) size >> 20) + " MiB to read the session file";
+            return false;
+        }
+        char magic[8] = {};
+        uint64_t fp = 0;
+        int64_t n = 0, prompt = 0;
+        uint32_t n_marks = 0, n_rows = 0;
+        bool ok = get(magic, 8) && std::memcmp(magic, "SPCSV1", 6) == 0 && get(&fp, sizeof fp) && get(&n, sizeof n) &&
+                  get(&prompt, sizeof prompt);
+        if (!ok) {
+            std::fclose(f);
+            last_file_error_ = FileError::invalid;
+            why = "not a session file: " + path;
+            return false;
+        }
+        if (fp != o_.fingerprint) {
+            std::fclose(f);
+            last_file_error_ = FileError::invalid;
+            why = "the session file is of another model or build";
+            return false;
+        }
+        Slot in;
+        if (n < 1 || n > e_.max_context()) {
+            std::fclose(f);
+            last_file_error_ = FileError::invalid;
+            why = "the session file holds " + std::to_string((long long) n) + " tokens, which the context cannot keep";
+            return false;
+        }
+        in.seq.resize((size_t) n);
+        ok = get(in.seq.data(), (size_t) n * sizeof(int32_t)) && get(&n_marks, sizeof n_marks);
+        for (uint32_t k = 0; ok && k < n_marks; ++k) {
+            int64_t pos = 0;
+            uint64_t bytes = 0;
+            ok = get(&pos, sizeof pos) && get(&bytes, sizeof bytes);
+            if (!ok) break;
+            if (bytes != e_.state_bytes() || pos < 1 || pos > n || (!in.marks.empty() && pos <= in.marks.back().pos)) {
+                ok = false;
+                last_file_error_ = FileError::invalid;
+                why = "the session file's checkpoints do not fit this engine";
+                break;
+            }
+            BlobPtr b = blob((size_t) bytes);
+            if (!b) {
+                ok = false;
+                last_file_error_ = FileError::memory;
+                why = "not enough RAM for the states of the session";
+                break;
+            }
+            if (!(ok = get(b->p.get(), (size_t) bytes))) break;
+            in.marks.push_back({pos, b});
+        }
+        if (ok && in.marks.empty()) {
+            ok = false;
+            last_file_error_ = FileError::invalid;
+            why = "the session file holds no checkpoint";
+        }
+        ok = ok && get(&n_rows, sizeof n_rows);
+        const size_t row = e_.row_bytes();
+        for (uint32_t k = 0; ok && k < n_rows; ++k) {
+            int64_t first = 0, keep = 0;
+            uint64_t bytes = 0;
+            ok = get(&first, sizeof first) && get(&keep, sizeof keep) && get(&bytes, sizeof bytes);
+            if (!ok) break;
+            if (first != (in.rows.empty() ? 0 : in.rows.back().first + in.rows.back().keep) || keep < 1 ||
+                bytes != (uint64_t) (keep * (int64_t) row) || first + keep > n) {
+                ok = false;
+                last_file_error_ = FileError::invalid;
+                why = "the session file's rows do not fit this engine";
+                break;
+            }
+            BlobPtr b = blob((size_t) bytes);
+            if (!b) {
+                ok = false;
+                last_file_error_ = FileError::memory;
+                why = "not enough RAM for the rows of the session";
+                break;
+            }
+            if (!(ok = get(b->p.get(), (size_t) bytes))) break;
+            in.rows.push_back({b, first, keep, keep});
+        }
+        const long at = std::ftell(f);
+        std::fclose(f);
+        if (!ok) {
+            if (last_file_error_ == FileError::io) last_file_error_ = FileError::invalid;
+            if (why.empty()) why = "the session file is damaged";
+            return false;
+        }
+        in.prompt = std::max<int64_t>(0, std::min(prompt, n));
+        // The engine takes this conversation: the one it held is parked if it can be, and dropped when it cannot -
+        // the operator asked for this one.  A file that holds no state at its end leaves the conversation at its
+        // last checkpoint.
+        if (!cur().seq.empty() && park(slots_.size())) cur_ = take(cur_);
+        slots_[cur_] = std::move(in);
+        const int64_t mark = cur().marks.back().pos;
+        cut(cur(), mark);
+        e_.reset();
+        e_.load_state(state_at(cur(), mark), mark);
+        for (const Rows& r : cur().rows) e_.load_rows(r.blob->p.get(), r.first, r.keep, r.first, r.keep);
+        cur().stamp = ++clock_;
+        last_file_bytes_ = at > 0 ? (size_t) at : 0;
+        say("loaded", mark, t0, cur_);
+        return true;
+    }
+
+    size_t last_file_bytes() const { return last_file_bytes_; }
+    /// The protocol's word for why save_file()/load_file() last said no.
+    const char* last_file_error() const {
+        switch (last_file_error_) {
+            case FileError::memory: return "memory";
+            case FileError::storage: return "storage";
+            case FileError::io: return "io";
+            default: return "invalid";
+        }
+    }
+
     // `with` is the current slot when its conversation is the one just parked.
     void say(const char* what, int64_t tokens, Clock::time_point t0, size_t with) const {
         if (!o_.log) return;
@@ -418,6 +654,8 @@ private:
     size_t cur_ = 0;
     uint64_t clock_ = 0;
     size_t evictions_ = 0;
+    size_t last_file_bytes_ = 0;    // the bytes the last save_file() wrote, or the file's size after load_file()
+    FileError last_file_error_ = FileError::invalid;
     std::vector<Checkpoint> due_;   // inside()'s checkpoints, until read() makes them the conversation's
     std::vector<int64_t> after_;    // where the conversation's checkpoints are once that read is done
     int64_t turn_ = -1;             // turn_at()'s place in the prompt being read; -1: none

@@ -1592,6 +1592,7 @@ void Engine::fill_expert_cache() {
             all += bytes;
         }
     }
+    model_bytes_ = all;   // the files' own measure of the model (model_expert_bytes()): a session file's fingerprint
     std::stable_sort(cands.begin(), cands.end(),
                      [](const Cand& a, const Cand& b) { return a.value != b.value ? a.value > b.value : a.e < b.e; });
 

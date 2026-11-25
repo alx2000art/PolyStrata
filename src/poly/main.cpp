@@ -395,14 +395,32 @@ struct Session {
     int piece_calls = kPiece;             // generate()'s pieces when it is given `between`
 
     Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
-        : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
+        : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f, e)),
           most(lookup > 0 || e.drafts() ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
           look(lookup > 0 && most > 1),
           repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most) {}
 
-    static CacheOptions with_floor(const CacheFlags& f) {
+    // A session file holds raw state and rows, which mean nothing to another engine: the numbers they are laid out
+    // by, and the model's own size (two models of one shape differ there first), are the whole check.  Every number
+    // here is the same on every run of the same files - nothing of how much VRAM was free at the start.
+    static uint64_t fingerprint(const Engine& e) {
+        uint64_t h = 1469598103934665603ull;   // FNV-1a over "SPCSV1"'s numbers
+        const auto mix = [&h](uint64_t v) {
+            for (int i = 0; i < 8; ++i) h = (h ^ ((v >> (8 * i)) & 0xff)) * 1099511628211ull;
+        };
+        mix((uint64_t) e.n_embd());
+        mix((uint64_t) e.n_vocab());
+        mix((uint64_t) e.state_bytes());
+        mix((uint64_t) e.row_bytes());
+        mix((uint64_t) e.max_window());
+        mix((uint64_t) e.model_expert_bytes());
+        return h;
+    }
+
+    static CacheOptions with_floor(const CacheFlags& f, const Engine& e) {
         CacheOptions o = f.o;
         o.log = stderr;
+        o.fingerprint = fingerprint(e);
         o.admit = [floor = (uint64_t) f.min_free_mib << 20](size_t bytes) {
             return strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes, floor);
         };
@@ -916,6 +934,52 @@ int serve(Session& ss) {
                             free_mib, engine.max_rows());
             } catch (const std::exception& e) {
                 std::printf("ERR VRAM: %s\n", e.what());
+            }
+            std::fflush(stdout);
+            continue;
+        }
+        // SAVE <path> / RESTORE <path>: the conversation the engine holds, whole, to or from a file between requests
+        // (the server's /slots/0?action=save|restore).  The file holds the checkpoints, the rows and the state at
+        // the end, so a restored conversation goes on from where it was found, its next turn reading none of it.
+        // Answers as the core's server: SAVED / RESTORED <tokens> <bytes> <ms>; SERR <kind> 0 <reason> for a
+        // refusal that leaves the engine in step; FATAL for a restore that failed after the device was written.
+        if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
+            const bool save = line[0] == 'S';
+            const std::string path = line.substr(save ? 5 : 8);
+            if (writing()) {
+                std::printf("SERR invalid 0 not while batch slots are writing\n");
+                std::fflush(stdout);
+                continue;
+            }
+            try {
+                engine.bind(0);   // a session is sequence 0's; a batch slot may have been the bound one
+            } catch (const std::exception& e) {
+                std::printf("SERR invalid 0 %s\n", e.what());
+                std::fflush(stdout);
+                continue;
+            }
+            const Clock::time_point t0 = Clock::now();
+            std::string why;
+            try {
+                if (save ? ss.kept.save_file(path, why) : ss.kept.load_file(path, why))
+                    std::printf("%s %zu %zu %.1f\n", save ? "SAVED" : "RESTORED", ss.kept.seq().size(),
+                                ss.kept.last_file_bytes(), ms_since(t0));
+                else
+                    std::printf("SERR %s 0 %s\n", ss.kept.last_file_error(), why.c_str());
+            } catch (const std::bad_alloc&) {
+                // host memory ran out while the file was being read or written, before the device was touched
+                std::printf("SERR memory 0 not enough RAM for the session file\n");
+            } catch (const std::exception& e) {
+                if (save) {
+                    std::printf("SERR io 0 %s\n", e.what());
+                } else {
+                    // load_file() read and checked the whole file before it touched the device: a throw is a device
+                    // write that failed part way, and only a fresh engine can be trusted after that
+                    std::printf("FATAL restoring the session file failed after the device state was changed: %s\n",
+                                e.what());
+                    std::fflush(stdout);
+                    return 1;
+                }
             }
             std::fflush(stdout);
             continue;

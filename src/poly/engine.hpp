@@ -389,6 +389,10 @@ public:
     /// The cache as load() filled it, which is as large as resize_cache() makes it again.
     int full_experts() const { return full_cached_ + (next_ ? next_->full_experts() : 0); }
     double full_gib() const { return double(full_bytes_) / double(1ull << 30) + (next_ ? next_->full_gib() : 0); }
+    /// Every expert's slot of the layers this engine runs, summed: the model's own size as its file gives it.  The
+    /// same on every run of the same files, and different between models and quants - what a session file's
+    /// fingerprint takes it for.  Zero when the engine keeps no expert cache at all.
+    size_t model_expert_bytes() const { return model_bytes_ + (next_ ? next_->model_expert_bytes() : 0); }
     /// The VRAM the cache was last sized to leave free, and what is free now, in MiB: on several cards, the
     /// first card's reserve and the least that one of them has free.
     int reserve_mib() const { return reserve_mib_; }
@@ -811,6 +815,7 @@ protected:
     int minds_ = 0;              ///< mind_vram()'s calls
     int full_cached_ = 0;        ///< the cache as load() filled it: its experts and their bytes
     size_t full_bytes_ = 0;
+    size_t model_bytes_ = 0;     ///< every expert's slot, summed (model_expert_bytes()); from the files, so stable
     float* scratch_ = nullptr;
     size_t scratch_at_ = 0;
     float* state_ = nullptr;     ///< every recurrent layer's state; with a draft block, hn_'s first row
