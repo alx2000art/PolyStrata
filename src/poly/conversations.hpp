@@ -744,6 +744,11 @@ public:
             rows_end = first + keep;
         }
         const long at = std::ftell(f);
+        if (ok && rows_end < in.marks.back().pos) {
+            ok = false;
+            why = "the session file's rows do not reach its last checkpoint";
+            last_file_error_ = FileError::invalid;
+        }
         if (!ok) {
             std::fclose(f);
             if (last_file_error_ == FileError::io) last_file_error_ = FileError::invalid;
