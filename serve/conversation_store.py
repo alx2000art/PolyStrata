@@ -4,7 +4,8 @@
 Разговор узнаётся по первым KEY_TOKENS (1024) своим токенам: у продолжения того же чата они те же (шаблон
 рендерит историю одинаково), у другого чата — другие.  Короче MIN_TOKENS (2048) не сохраняется: у такого
 чтение дешевле записи, и первые 1024 токена ещё не устоялись (первый ход короткий — ключ сменился бы на
-втором).  Файлы — conv-<ключ>.spcs, не больше slots штук; самый давно использованный удаляется.
+втором).  Файлы — conv-<ключ>.spcs, не больше slots штук и max_mib мегабайт; самые давно использованные
+удаляются (один файл, только что записанный, может выйти за бюджет: он не трогается).
 
 Сам файл пишет движок (SAVE <path> / RESTORE <path>, session_file у сервера): здесь только имена, замена
 через временный файл (оборванная запись не портит прежний), учёт роста и уборка старых.  Ошибки хранилища
@@ -19,13 +20,17 @@ from pathlib import Path
 KEY_TOKENS = 1024      # первые токены, по которым разговор узнаётся
 MIN_TOKENS = 2048      # короче этого файл не пишется: восстановление не окупает запись
 MIN_GROW = 2048        # столько токенов должно прибавиться, чтобы сохранять разговор ещё раз
+MAX_MIB = 10240        # бюджет хранилища, когда не задан другой
 
 
 class ConversationStore:
-    def __init__(self, path, slots=5, log=None):
+    DEFAULT_MAX_MIB = MAX_MIB
+
+    def __init__(self, path, slots=5, max_mib=MAX_MIB, log=None):
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.slots = max(1, int(slots))
+        self.max_bytes = max(0, int(max_mib)) << 20   # 0: только по числу файлов
         self.log = log or (lambda message: None)
         self.live = None       # (key, tokens): разговор, который держит движок, и сколько в нём токенов
         self.saved = {}        # key -> токенов в файле, который мы записали в этом запуске
@@ -101,17 +106,46 @@ class ConversationStore:
         self.saved.pop(key, None)
 
     def evict(self, keep=None):
-        """Оставить не больше slots файлов, самые давно использованные удаляются; `keep` не трогается."""
-        files = sorted(self.path.glob("conv-*.spcs"),
-                       key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
-        for old in files[self.slots:]:
-            if keep is not None and old.name == self.file(keep).name:
+        """Оставить не больше slots файлов и max_bytes байт: самые давно использованные удаляются.  `keep` -
+        только что записанный или прочитанный - не трогается, даже когда он один больше бюджета."""
+        files = []
+        for p in self.path.glob("conv-*.spcs"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, p))
+        files.sort(key=lambda item: item[0], reverse=True)     # свежие первыми
+        total = sum(size for _, size, _ in files)
+        drop = [p for i, (_, _, p) in enumerate(files) if i >= self.slots]
+        for i, (_, size, _) in enumerate(files):
+            if i >= self.slots:
+                total -= size
+        for _, size, p in reversed(files[:self.slots]):        # от старых к свежим
+            if self.max_bytes == 0 or total <= self.max_bytes:
+                break
+            if keep is not None and p.name == self.file(keep).name:
+                continue
+            drop.append(p)
+            total -= size
+        for p in drop:
+            if keep is not None and p.name == self.file(keep).name:
                 continue
             try:
-                old.unlink()
+                p.unlink()
+            except OSError:
+                continue
+            self.saved.pop(p.stem[len("conv-"):], None)
+
+    def bytes_held(self):
+        """Сколько занимают файлы хранилища сейчас."""
+        total = 0
+        for p in self.path.glob("conv-*.spcs"):
+            try:
+                total += p.stat().st_size
             except OSError:
                 pass
-            self.saved.pop(old.stem[len("conv-"):], None)
+        return total
 
     # ---- the two calls the server makes, with their failures kept out of the request ----
     @staticmethod

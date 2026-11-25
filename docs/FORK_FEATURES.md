@@ -60,7 +60,9 @@ in order; the later ones depend on the earlier ones.
    chats by itself: a chat is saved when another one arrives, and one that has a file is restored before a
    token of it is read. Files are named by a conversation's first 1024 tokens (a chat's continuation has the
    same), chats shorter than 2048 tokens are not kept, and `--conversation-store-slots N` (default 5) bounds
-   the store, the least recently used files deleted first. `tools/session_roundtrip.py` walks the whole path
+   the store, the least recently used files deleted first. `--conversation-store-max-mib` (default 10240, 0 =
+   only the count bounds it) caps the bytes all the files take, the same way; the file just written or restored
+   is never deleted, even when it alone is bigger. `tools/session_roundtrip.py` walks the whole path
    over HTTP: save, restart the engine, restore, and compare the answer with a live control.
 
 ## The base layer

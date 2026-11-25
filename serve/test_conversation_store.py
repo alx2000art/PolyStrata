@@ -10,7 +10,8 @@ from serve.conversation_store import ConversationStore, MIN_GROW, MIN_TOKENS
 class FakeEngine:
     """session_file как у StrataEngine: SAVE пишет файл, RESTORE его читает; причины отказа — ValueError."""
 
-    def __init__(self):
+    def __init__(self, size=5):
+        self.size = size
         self.saved = []            # (path, tokens)
         self.restored = []         # paths
         self.refuse_restore = None
@@ -18,9 +19,9 @@ class FakeEngine:
     def session_file(self, action, path):
         if action == "save":
             tokens = 5000
-            Path(path).write_bytes(b"state")
+            Path(path).write_bytes(b"x" * self.size)
             self.saved.append((path, tokens))
-            return {"tokens": tokens, "bytes": 5, "ms": 1.0}
+            return {"tokens": tokens, "bytes": self.size, "ms": 1.0}
         if self.refuse_restore:
             raise ValueError(self.refuse_restore)
         if not Path(path).is_file():
@@ -103,6 +104,27 @@ class Store(unittest.TestCase):
             p.touch()                                    # aa стало новее только что записанного
         s.save(e, "bb", MIN_TOKENS)
         self.assertTrue(s.file("bb").exists())
+
+    def test_byte_budget_drops_the_oldest(self):
+        d = tempfile.mkdtemp()
+        s, e = self.store(d), FakeEngine(size=1000)
+        s.max_bytes = 2500
+        for key in ("aa", "bb", "cc"):
+            s.save(e, key, MIN_TOKENS)
+            time.sleep(0.01)
+        # три файла по 1000 байт при бюджете 2500: уходит самый старый, остаются два свежих
+        self.assertEqual(sorted(p.name for p in Path(d).glob("conv-*.spcs")),
+                         ["conv-bb.spcs", "conv-cc.spcs"])
+
+    def test_one_file_bigger_than_the_budget_stays(self):
+        d = tempfile.mkdtemp()
+        s, e = self.store(d), FakeEngine(size=5000)
+        s.max_bytes = 100                                 # меньше одного файла
+        s.save(e, "aa", MIN_TOKENS)
+        s.save(e, "bb", MIN_TOKENS)
+        self.assertTrue(s.file("bb").exists())            # только что записанный не трогается
+        self.assertFalse(s.file("aa").exists())           # а прежний под бюджет не подходит
+        self.assertEqual(s.bytes_held(), 5000)
 
 
 if __name__ == "__main__":

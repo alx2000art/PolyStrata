@@ -7733,6 +7733,10 @@ def main() -> int:
     ap.add_argument("--conversation-store-slots", type=int, default=None, metavar="N",
                     help="conversation store: how many chats are kept, the least recently used ones deleted "
                          "(also \"conversation_store_slots\" in the config; default 5)")
+    ap.add_argument("--conversation-store-max-mib", type=int, default=None, metavar="MiB",
+                    help="conversation store: the bytes all its files may take, the least recently used ones "
+                         "deleted (also \"conversation_store_max_mib\" in the config; default 10240, 0 = only the "
+                         "count bounds it)")
     ap.add_argument("--replicas", type=int, default=None, metavar="N",
                     help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
                          "each, requests spread over them (also \"replicas\" in the config: a number, or "
@@ -7860,15 +7864,19 @@ def main() -> int:
             raise SystemExit("[strata] conversation_store: not with parallel requests (\"parallel\" / --batch)")
         try:
             slots = int(a.conversation_store_slots or cfg.get("conversation_store_slots") or 5)
+            max_mib = int(a.conversation_store_max_mib or cfg.get("conversation_store_max_mib") or
+                          ConversationStore.DEFAULT_MAX_MIB)
             svc.conversation_store = ConversationStore(
-                slot_save_dir(a.conversation_store) if a.conversation_store else
-                slot_save_dir(store, cfg.get("cwd")), slots=slots,
+                slot_save_dir(os.path.expanduser(a.conversation_store) if a.conversation_store else
+                              (os.path.expanduser(store) if isinstance(store, str) else store), cfg.get("cwd")),
+                slots=slots, max_mib=max_mib,
                 log=lambda message: print(f"[strata] {message}", flush=True))
         except (TypeError, ValueError, OSError) as e:
             raise SystemExit(f"[strata] conversation_store: {e}")
         print(f"[strata] conversation store on: {svc.conversation_store.path} (up to "
-              f"{svc.conversation_store.slots} chats: one is saved when another arrives, and comes back from its "
-              "file instead of being read again)", flush=True)
+              f"{svc.conversation_store.slots} chats and "
+              f"{svc.conversation_store.max_bytes / 2**30:.1f} GiB: a chat is saved when another one arrives, and "
+              "comes back from its file instead of being read again)", flush=True)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")
