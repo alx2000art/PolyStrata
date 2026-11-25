@@ -34,6 +34,8 @@ struct Fake {
     std::vector<uint64_t> a = std::vector<uint64_t>(ctx), b = std::vector<uint64_t>(ctx);
 
     void reset() { h = 1, at = 0; }
+    int64_t pos() const { return at; }
+    int max_context() const { return (int) ctx; }
     void eval(const int32_t* t, int64_t n) {
         for (int64_t i = 0; i < n; ++i, ++at, ++read) {
             a[(size_t) at] = h = mix(h, t[i]);
@@ -314,6 +316,43 @@ void long_read() {
     check(left[1] == six, "which are five of the fifteen inside, beside the one before the prompt's last token");
 }
 
+// A conversation written to a file and read back into another engine must leave that engine exactly where the
+// first one was - the same rows, the same state - so its next turn is taken up at the very end and reads none of
+// it.  A file of another model or build (fingerprint) is refused rather than loaded.
+void session_file() {
+    const char* path = "conversations_test.spcs";
+    CacheOptions o = options(0);   // no parking: the file must carry the rows the engine holds itself
+    o.fingerprint = 0x5E5510Full;
+    Chat c(o);
+    std::vector<int32_t> a = text(11, 12000);
+    c.ask(a, 5);
+    check(c.e.at == (int64_t) a.size(), "the conversation is at its end before the save");
+    std::string why;
+    check(c.kept.save_file(path, why), "the conversation is written to a file");
+    check((int64_t) c.kept.last_file_bytes() > (int64_t) a.size() * 16, "the file holds the rows and the state");
+
+    Fake e2;   // another engine, as after a restart
+    Conversations<Fake> kept2(e2, o);
+    check(kept2.load_file(path, why), "the file is read back");
+    check(e2.at == c.e.at && e2.h == c.e.h, "the state is the one that was saved");
+    check(e2.holds(a), "and so are the rows");
+    check(kept2.seq() == a, "the conversation is the one that was saved");
+
+    const int64_t read = e2.read;
+    std::vector<int32_t> b = a + text(12, 40);
+    check(kept2.resume(b) == (int64_t) a.size(), "the next turn is taken up at the conversation's end");
+    check(e2.read == read, "and nothing of it is read again");
+
+    CacheOptions wrong = o;
+    wrong.fingerprint = 0xBAD;
+    Fake e3;
+    Conversations<Fake> kept3(e3, wrong);
+    check(!kept3.load_file(path, why), "a file of another model or build is refused");
+    check(std::strcmp(kept3.last_file_error(), "invalid") == 0, "as an invalid file");
+    check(e3.at == 0 && kept3.seq().empty(), "and the engine stays as it was");
+    std::remove(path);
+}
+
 int main() {
     for (const int64_t f : {0, 6000, 700}) {   // 700: reads that start and end between checkpoints
         far = f;
@@ -331,6 +370,11 @@ int main() {
     }
     quits = 0;
     long_read();
+    for (const int64_t f : {0, 6000}) {        // a prompt read a call at a time, and one read in one go
+        far = f;
+        session_file();
+    }
+    far = 0;
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }
