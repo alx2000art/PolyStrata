@@ -2771,6 +2771,7 @@ void Engine::alloc() {
     use_.assign(layers_.size() * n_expert_, 0);
     heat_.assign(layers_.size() * n_expert_, 0);
     warm_heat_.assign(layers_.size() * n_expert_, 0);
+    tail_rank_.assign((size_t) n_expert_, 1 << 20);   // STRATA_POLY_TAIL_SKIP_ALL: the best place of each expert
     if (dspark_taps_n_) dspark_taps_ = (float*) dmalloc(rows_ * size_t(dspark_taps_n_) * n_embd_ * sizeof(float),
                                                         "the dspark taps");
     if (eagle3_) {
@@ -3072,12 +3073,15 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             const uint8_t* slot;
             float w;
             int row;
+            int32_t e;   ///< its expert: the rank-only tail skip decides on it, whichever list it is in
         };
         CpuExpert host[kCpuRows * kMaxUsed];
         Cached cached[kCpuRows * kMaxUsed];
         int32_t host_e[kCpuRows * kMaxUsed], host_k[kCpuRows * kMaxUsed];   // a host entry's expert and its place
         float host_rel[kCpuRows * kMaxUsed];   // and its weight's share of its token's experts' weight
         int n_host = 0, n_cached = 0;
+        if (opt_.tail_skip_all && opt_.tail_skip > 0 && opt_.skip_weight <= 0.f)
+            std::fill(tail_rank_.begin(), tail_rank_.end(), 1 << 20);   // the best place of each expert
         const Clock::time_point t_rt = Clock::now();
         for (int t = 0; t < m; ++t) {
             int ids[kMaxUsed];
@@ -3090,10 +3094,11 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 host_rel[n_host] = w_all > 0.f ? w[k] / w_all : 1.f;
                 if (route_dump_) route_dump_put(il, ids[k]);
                 const size_t e = (size_t) ids[k];
+                if (opt_.tail_skip_all && e < tail_rank_.size() && (int32_t) k < tail_rank_[e]) tail_rank_[e] = k;
                 ++use_[(size_t) il * n_expert_ + e];
                 if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
                 if (const uint8_t* s = L.slot[e]) {
-                    cached[n_cached++] = {s, w[k], at + t};
+                    cached[n_cached++] = {s, w[k], at + t, (int32_t) e};
                     continue;
                 }
                 host_e[n_host] = (int32_t) e;
@@ -3108,13 +3113,44 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         // Options::skip_weight in place of the places: one whose weight is under that share of its token's experts'
         // weight, for every token here.  It keeps an expert the router weighs high at any place, and leaves out one it
         // weighs low at any place, so for the same change of the answers it leaves out more (docs/BACKENDS.md).
-        if (opt_.skip_weight > 0.f) {
+        if (opt_.tail_skip_all && opt_.tail_skip > 0 && opt_.skip_weight <= 0.f) {
+            // Rank only (STRATA_POLY_TAIL_SKIP_ALL): a place the router put this far down is left out wherever
+            // the expert lives.  Whether it is in VRAM decides the speed and not the answer - the same tokens lose
+            // the same experts from run to run, and a cache that happened to hold one changes nothing.
+            int kept = 0;
+            for (int i = 0; i < n_host; ++i) {
+                if (tail_rank_[(size_t) host_e[i]] >= opt_.tail_skip) {
+                    ++stats_.tail_experts;
+                    continue;
+                }
+                host_e[kept] = host_e[i];
+                host_k[kept] = host_k[i];
+                host_rel[kept] = host_rel[i];
+                host[kept++] = host[i];
+            }
+            n_host = kept;
+            kept = 0;
+            for (int i = 0; i < n_cached; ++i) {
+                if (tail_rank_[(size_t) cached[i].e] >= opt_.tail_skip) {
+                    ++stats_.tail_experts;
+                    continue;
+                }
+                cached[kept++] = cached[i];
+            }
+            n_cached = kept;
+        } else if (opt_.skip_weight > 0.f) {
             int kept = 0;
             for (int i = 0; i < n_host; ++i) {
                 bool low = true;
                 for (int j = 0; j < n_host && low; ++j) low = host_e[j] != host_e[i] || host_rel[j] < opt_.skip_weight;
-                if (low) ++stats_.tail_experts;
-                else host[kept++] = host[i];
+                if (low) {
+                    ++stats_.tail_experts;
+                    continue;
+                }
+                host_e[kept] = host_e[i];
+                host_k[kept] = host_k[i];
+                host_rel[kept] = host_rel[i];
+                host[kept++] = host[i];
             }
             n_host = kept;
         } else if (opt_.tail_skip > 0) {
@@ -3122,8 +3158,14 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             for (int i = 0; i < n_host; ++i) {
                 bool low = true;
                 for (int j = 0; j < n_host && low; ++j) low = host_e[j] != host_e[i] || host_k[j] >= opt_.tail_skip;
-                if (low) ++stats_.tail_experts;
-                else host[kept++] = host[i];
+                if (low) {
+                    ++stats_.tail_experts;
+                    continue;
+                }
+                host_e[kept] = host_e[i];
+                host_k[kept] = host_k[i];
+                host_rel[kept] = host_rel[i];
+                host[kept++] = host[i];
             }
             n_host = kept;
         }

@@ -1522,6 +1522,8 @@ int main(int argc, char** argv) {
     if (check > 0) o.kv_grow = false;
     // over --tail-skip, as Strata's engine reads it: =0 turns a model's default off
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
+    // STRATA_POLY_TAIL_SKIP_ALL=1: the drop by the router's place alone, not only for the experts outside VRAM
+    if (const char* v = std::getenv("STRATA_POLY_TAIL_SKIP_ALL")) o.tail_skip_all = std::atoi(v) != 0;
     // STRATA_POLY_VRAM_RESERVE=<MiB>: the reserve over --vram-reserve-mib, for a sweep's own hand on it
     if (const char* v = std::getenv("STRATA_POLY_VRAM_RESERVE")) o.vram_reserve_mib = std::atoi(v);
     const long long most = 1LL << 24;   // MiB: 16 TiB
@@ -1563,6 +1565,11 @@ int main(int argc, char** argv) {
                                  "at place %d or later among its experts is left out; STRATA_ROUTE_TAIL_SKIP=0 turns "
                                  "it off\n",
                          o.tail_skip, o.tail_skip + 1);
+        if (o.tail_skip_all && o.tail_skip > 0)
+            std::fprintf(stderr, "strata-poly: tail skip %d by rank (STRATA_POLY_TAIL_SKIP_ALL): a place the router "
+                                 "put that far down is left out wherever the expert lives, so the same tokens lose "
+                                 "the same experts whatever the cache holds\n",
+                         o.tail_skip);
         // Pages on another node than the threads are read at about two thirds of the speed.  The file cache puts a
         // page on the node of whatever read it first, so a file read back by something else lands on any.
         const bool far = engine.numa_share() > 0.0 && engine.numa_share() < 0.95;

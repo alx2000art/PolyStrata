@@ -147,6 +147,8 @@ struct Options {
     float skip_weight = 0;        ///< in place of tail_skip: a routed expert outside VRAM whose router weight is under
                                   ///< this share of its token's experts' weight, for every token of the call, is left
                                   ///< out (--skip-weight); 0: tail_skip decides
+    bool tail_skip_all = false;   ///< STRATA_POLY_TAIL_SKIP_ALL: tail_skip by the place alone, whatever VRAM holds -
+                                  ///< the same tokens lose the same experts whatever the cache had (determinism)
     std::string layer_split;      ///< the layers across the CUDA devices this process sees, in their order: "auto"
                                   ///< (by each card's free VRAM) or the first layer of each later card ("20,30");
                                   ///< empty, or one device: the current card alone
@@ -950,6 +952,8 @@ protected:
     std::string swap_error_;         ///< why the thread stopped; follow() throws it
     std::vector<float> recent_;      ///< per (layer, expert): its uses by written tokens, halved every kSwapHalf
     std::vector<uint8_t> coming_;    ///< per (layer, expert): on its way into the cache
+    std::vector<int32_t> tail_rank_;   ///< per expert: the best place it was routed at in this call's chunk
+                                       ///< (STRATA_POLY_TAIL_SKIP_ALL decides on it, VRAM or not)
     std::vector<Pick> in_, out_;     ///< per trade number: the experts to bring in, and the ones to give up
     std::vector<size_t> trade_at_;   ///< per trade number: how many of its pairs follow() has taken
     std::atomic<int64_t> pool_hits_{0}, pool_misses_{0};   ///< the ladder's RAM rung (follow_loop())

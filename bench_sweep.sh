@@ -304,6 +304,10 @@ VARIANTS+=("69-eta-graphs|$WORKING_SPEC DEL:--no-graphs")
 # 53 — контроль к 80 (конфиг с графами): те же аргументы, графы выключены.  Пара 80↔53 отвечает
 # «графы ускоряют или замедляют» без примеси hit-рейта: у обоих одна нагрузка и один кэш.
 VARIANTS+=("53-eta-nographs|$WORKING_SPEC --no-graphs")
+# 54 — tail-skip по рангу (STRATA_POLY_TAIL_SKIP_ALL): выбрасывается место 4+ у роутера независимо от того,
+# в VRAM эксперт или нет.  Сравнивать с 80: скорость (должна не упасть) и ответы (должны перестать зависеть
+# от состояния кэша — это и есть замена лоссовой ручки на детерминированную).
+VARIANTS+=("54-eta-tailskipall|$WORKING_SPEC ENV:STRATA_POLY_TAIL_SKIP_ALL=1")
 # 67/68 — балансировка CPU-лейна: nvtop на декоде показывает карту на 73% и процесс на ~10.4 ядрах из 16,
 # то есть простаивает и карта, и шесть ядер.  CPU-лейн при этом упирается не в ядра, а в полосу RAM
 # (43 слоя x ~9 экспертов x 0.39 промахов x 9.2 МиБ ~ 1.4 ГиБ/токен = ~40 ГБ/с).  Отсюда две пробы:
@@ -474,6 +478,7 @@ MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_ST
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
            "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL",
            "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN", "STRATA_POLY_PROMPT_SKIP", "STRATA_POLY_POOL_TOPUP",
+           "STRATA_POLY_TAIL_SKIP_ALL",
            "STRATA_POLY_SAMPLE_DEBUG", "STRATA_POLY_GRAPH_STATS",
            "STRATA_POLY_VRAM_RESERVE")
 for k in list(env):
@@ -1197,6 +1202,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("94-graphs", "графы включены (DEL --no-graphs)"),
        ("69-eta-graphs", "графы на прод-аргументах (пара к 80)"),
        ("53-eta-nographs", "без графов на прод-аргументах (контроль к 80)"),
+       ("54-eta-tailskipall", "tail-skip по рангу, без зависимости от VRAM"),
        ("67-eta-threads20", "20 потоков (SMT) против 16 физических"),
        ("68-eta-ram0", "без RAM-пула экспертов: page cache прямо в прижатый буфер"),
        ("44-readheat", "read-heat 1 (тепло в recent_, follow двигает)"),
