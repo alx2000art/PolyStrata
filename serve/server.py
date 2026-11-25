@@ -7863,9 +7863,13 @@ def main() -> int:
             # as with --slot-save-path: a save holds the engine between requests, and parallel requests share it
             raise SystemExit("[strata] conversation_store: not with parallel requests (\"parallel\" / --batch)")
         try:
-            slots = int(a.conversation_store_slots or cfg.get("conversation_store_slots") or 5)
-            max_mib = int(a.conversation_store_max_mib or cfg.get("conversation_store_max_mib") or
-                          ConversationStore.DEFAULT_MAX_MIB)
+            # 0 is a value here (no byte budget), so the config's numbers are taken as they are, not with `or`
+            slots = a.conversation_store_slots if a.conversation_store_slots is not None else \
+                cfg.get("conversation_store_slots")
+            max_mib = a.conversation_store_max_mib if a.conversation_store_max_mib is not None else \
+                cfg.get("conversation_store_max_mib")
+            slots = 5 if slots is None else int(slots)
+            max_mib = ConversationStore.DEFAULT_MAX_MIB if max_mib is None else int(max_mib)
             svc.conversation_store = ConversationStore(
                 slot_save_dir(os.path.expanduser(a.conversation_store) if a.conversation_store else
                               (os.path.expanduser(store) if isinstance(store, str) else store), cfg.get("cwd")),
