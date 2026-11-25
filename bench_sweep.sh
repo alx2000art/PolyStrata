@@ -313,6 +313,10 @@ VARIANTS+=("54-eta-tailskipall|$WORKING_SPEC ENV:STRATA_POLY_TAIL_SKIP_ALL=1")
 # (вдвое больше вызовов, каждый всё равно читает почти всё), значит в обратную сторону должен помогать
 # потолок: 4096 строк за вызов — вдвое меньше повторных чтений тех же экспертов.
 VARIANTS+=("39-eta-pb4096|$WORKING_SPEC --prompt-batch 4096")
+# 36 — контроль к 39: 2048 строк за вызов.  Сравниваем не только скорость, но и процент попаданий
+# в кэш экспертов (сервер печатает его в конце ответа: "expert cache N% hit"): если с 4096 он падает —
+# дело в VRAM под скретч, если нет — в вытеснении page cache.
+VARIANTS+=("36-eta-pb2048|$WORKING_SPEC --prompt-batch 2048")
 # 38 — то же с более широким чтением: раунд 4096 строк требует и буфера побольше
 VARIANTS+=("38-eta-pb4096-read|$WORKING_SPEC --prompt-batch 4096 --stage-read-mib 3072")
 # 67/68 — балансировка CPU-лейна: nvtop на декоде показывает карту на 73% и процесс на ~10.4 ядрах из 16,
@@ -330,7 +334,7 @@ VARIANTS+=("95-graph-cardmo|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=c DEL:--no-gra
 # По умолчанию — только необходимый набор: эталон и ручки, решения по которым ещё нет.  FULL=1 гоняет
 # все варианты (ночной обзор).  ONLY по-прежнему выбирает из этого списка.
 if [[ "${FULL:-0}" != "1" ]]; then
-    _essential=$'\n80-eta-iq256off\n53-eta-nographs\n44-readheat\n45-readfill\n47-spin20\n87-reserve256\n54-eta-tailskipall\n39-eta-pb4096\n'
+    _essential=$'\n80-eta-iq256off\n53-eta-nographs\n44-readheat\n45-readfill\n47-spin20\n87-reserve256\n54-eta-tailskipall\n39-eta-pb4096\n36-eta-pb2048\n'
     keep=()
     for entry in "${VARIANTS[@]}"; do
         name="${entry%%|*}"
@@ -1226,6 +1230,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("53-eta-nographs", "без графов на прод-аргументах (контроль к 80)"),
        ("54-eta-tailskipall", "tail-skip по рангу, без зависимости от VRAM"),
        ("39-eta-pb4096", "prompt-batch 4096: вдвое меньше вызовов на префилле"),
+       ("36-eta-pb2048", "prompt-batch 2048 (контроль к 39, по hit-рейту)"),
        ("38-eta-pb4096-read", "prompt-batch 4096 + чтение 3072 МиБ"),
        ("67-eta-threads20", "20 потоков (SMT) против 16 физических"),
        ("68-eta-ram0", "без RAM-пула экспертов: page cache прямо в прижатый буфер"),
