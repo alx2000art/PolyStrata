@@ -116,6 +116,17 @@ class Store(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in Path(d).glob("conv-*.spcs")),
                          ["conv-bb.spcs", "conv-cc.spcs"])
 
+    def test_save_live_only_when_it_grew(self):
+        d = tempfile.mkdtemp()
+        s, e = self.store(d), FakeEngine()               # the fake's SAVE answers 5000 tokens
+        self.assertIsNone(s.save_live(e))                 # nothing live yet
+        s.switch(e, [1] * 3000)
+        self.assertIsNotNone(s.save_live(e))              # idle: the chat is worth its first file
+        self.assertTrue(s.file(s.key([1] * 3000)).exists())
+        self.assertIsNone(s.save_live(e))                 # nothing new since: no write
+        s.touch(5000 + MIN_GROW)                          # it grew by the floor since the file
+        self.assertIsNotNone(s.save_live(e))
+
     def test_one_file_bigger_than_the_budget_stays(self):
         d = tempfile.mkdtemp()
         s, e = self.store(d), FakeEngine(size=5000)

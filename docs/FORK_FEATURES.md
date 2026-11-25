@@ -54,16 +54,25 @@ in order; the later ones depend on the earlier ones.
    one conversation whole: its checkpoints, the rows its tokens left in the compressed caches, and the state
    at the end of what the engine holds. A restored conversation therefore stands at its very end, and its
    next turn reads none of itself back (the fast path `resume()` already has for a prompt that continues the
-   engine's own position). The file opens with a fingerprint of the numbers its state and rows are laid out
-   by and the model's own expert bytes, so another model's or build's file is refused rather than loaded.
+   engine's own position). The payloads are packed — a run of zeros is written as its length, and a real
+   DeepSeek4 file is about a third of its bytes — and the rows go through one fixed 512-position stage in
+   both directions, so a save never holds the conversation's gigabytes of host memory and a restore never
+   reads the file into one blob. The file opens with a fingerprint of the numbers its state and rows are laid
+   out by and the model's own expert bytes, so another model's or build's file is refused rather than loaded;
+   a damaged one is walked whole and refused before the engine is touched.
    `--conversation-store DIR` (or `"conversation_store"` in the config) turns it into a cache of the last
-   chats by itself: a chat is saved when another one arrives, and one that has a file is restored before a
-   token of it is read. Files are named by a conversation's first 1024 tokens (a chat's continuation has the
+   chats by itself: a chat is saved when another one arrives, after `--conversation-store-idle-s` seconds
+   without requests (default 60, -1 off) and at the server's exit, and one that has a file is restored before
+   a token of it is read. Files are named by a conversation's first 1024 tokens (a chat's continuation has the
    same), chats shorter than 2048 tokens are not kept, and `--conversation-store-slots N` (default 5) bounds
    the store, the least recently used files deleted first. `--conversation-store-max-mib` (default 10240, 0 =
    only the count bounds it) caps the bytes all the files take, the same way; the file just written or restored
-   is never deleted, even when it alone is bigger. `tools/session_roundtrip.py` walks the whole path
-   over HTTP: save, restart the engine, restore, and compare the answer with a live control.
+   is never deleted, even when it alone is bigger.
+   Checkpoints sit where the prompt's turns begin, which the server sends in the GEN line
+   (`checkpoints=POS,POS,...`, read from its template's turn markers), beside the one before the prompt's last
+   token: `--prompt-cache N` (default 6) keeps the last N of them, and `--prompt-cache-every N` (default 0)
+   adds a token-interval rule on top. `tools/session_roundtrip.py` walks the whole path over HTTP: save,
+   restart the engine, restore, and compare the answer with a live control.
 
 ## The base layer
 

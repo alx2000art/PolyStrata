@@ -7,6 +7,9 @@
 втором).  Файлы — conv-<ключ>.spcs, не больше slots штук и max_mib мегабайт; самые давно использованные
 удаляются (один файл, только что записанный, может выйти за бюджет: он не трогается).
 
+Разговор сохраняется, когда уходит со сцены (пришёл другой чат), после IDLE_S секунд без запросов и при
+выходе сервера — так обрыв, OOM или перезапуск теряют не больше последнего окна простоя.
+
 Сам файл пишет движок (SAVE <path> / RESTORE <path>, session_file у сервера): здесь только имена, замена
 через временный файл (оборванная запись не портит прежний), учёт роста и уборка старых.  Ошибки хранилища
 не валят запрос: пишутся в log, разговор просто прочитается заново (исключение — движок умер: это решает
@@ -20,11 +23,14 @@ from pathlib import Path
 KEY_TOKENS = 1024      # первые токены, по которым разговор узнаётся
 MIN_TOKENS = 2048      # короче этого файл не пишется: восстановление не окупает запись
 MIN_GROW = 2048        # столько токенов должно прибавиться, чтобы сохранять разговор ещё раз
+IDLE_GROW = 8192       # а на простое - столько: файл на 90k токенов это ~1.7 ГБ записи
 MAX_MIB = 10240        # бюджет хранилища, когда не задан другой
+IDLE_S = 60.0          # секунд простоя, после которых движок сохраняет разговор (--conversation-store-idle-s)
 
 
 class ConversationStore:
     DEFAULT_MAX_MIB = MAX_MIB
+    DEFAULT_IDLE_S = IDLE_S
 
     def __init__(self, path, slots=5, max_mib=MAX_MIB, log=None):
         self.path = Path(path)
@@ -47,12 +53,12 @@ class ConversationStore:
     def has(self, key):
         return self.file(key).is_file()
 
-    def worth_saving(self, key, tokens):
+    def worth_saving(self, key, tokens, min_grow=MIN_GROW):
         """Есть ли смысл писать файл сейчас: разговор достаточно длинный, а с прошлой записи заметно вырос."""
         if tokens < MIN_TOKENS:
             return False
         was = self.saved.get(key)
-        return was is None or tokens - was >= MIN_GROW
+        return was is None or tokens - was >= min_grow
 
     def switch(self, engine, ids):
         """Перед запросом: прежний разговор уходит в файл, этот поднимается из своего, если файл есть.
@@ -70,6 +76,14 @@ class ConversationStore:
         """Разговор, который держит движок, вырос: столько в нём теперь токенов."""
         if self.live is not None:
             self.live = (self.live[0], tokens)
+
+    def save_live(self, engine, min_grow=MIN_GROW):
+        """Сохранить разговор, который держит движок, если он вырос с прошлой записи: простой и выход сервера.
+        Зовётся, когда движок свободен (между запросами).  Простой пишет реже (IDLE_GROW): файл длинного
+        разговора - это гигабайты, и после каждого короткого молчания писать его заново незачем."""
+        if self.live is None:
+            return None
+        return self._save(engine, self.live[0], self.live[1], min_grow)
 
     def save(self, engine, key, tokens):
         """Движок кладёт разговор в файл; временный файл заменяет прежний только после успеха."""
@@ -153,8 +167,8 @@ class ConversationStore:
         kind = getattr(error, "kind", None)
         return f"{kind}: {error}" if kind else str(error)
 
-    def _save(self, engine, key, tokens):
-        if not self.worth_saving(key, tokens):
+    def _save(self, engine, key, tokens, min_grow=MIN_GROW):
+        if not self.worth_saving(key, tokens, min_grow):
             return None
         t0 = time.time()
         try:

@@ -66,7 +66,7 @@ from serve import runconfig  # noqa: E402
 from serve import models as registry  # noqa: E402
 from serve.model_gate import Cancelled, ModelGate  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
-from serve.conversation_store import ConversationStore  # noqa: E402
+from serve.conversation_store import ConversationStore, IDLE_GROW, MIN_GROW  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
@@ -147,9 +147,9 @@ EFFORT_TEXT = {"low": "Reasoning effort is set to low. Keep your thinking brief 
                         "assumptions, consider plausible alternatives, and prioritize correctness, consistency, and "
                         "clarity in the final answer."}
 VISION_START = "<|vision_start|>"
-# The tokens that open a chat turn in each call format's template.  The last one in a prompt begins the reply's
-# turn: strata-poly keeps a checkpoint there (turn_at), which the chat's next request goes on from.  The second one
-# ends the first turn: the system prompt with the tools, which "warm_start" keeps.
+# The tokens that open a chat turn in each call format's template.  strata-poly keeps a checkpoint at every one of
+# them (the GEN line's checkpoints), so a chat's next request goes on from the turn it edits or continues.  The
+# second one ends the first turn: the system prompt with the tools, which "warm_start" keeps.
 TURN_OPENERS = {"function": ("<|im_start|>",), "gemma": ("<|turn>",),
                 "glm": ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"),
                 "dsml": ("<｜User｜>", "<｜Assistant｜>"), "lfm2": ("<|im_start|>",)}
@@ -1282,11 +1282,12 @@ class StrataEngine:
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
     def turn_key(self, ids) -> str:
-        """`turn_at=POS`: where the prompt's last turn begins (its last token of turn_ids).  strata-poly keeps a
-        checkpoint there, which the chat's next request goes on from; the Qwen3.8 engine skips the key and finds the
-        place itself."""
-        at = next((i for i in range(len(ids) - 1, 0, -1) if ids[i] in self.turn_ids), None)
-        return f" turn_at={at}" if at is not None else ""
+        """`checkpoints=POS,POS,...`: where the prompt's turns begin (the markers of turn_ids), one checkpoint each.
+        A chat's next request renders the conversation up to a turn's start as this one does, so a client that
+        edits or regenerates a turn is taken up exactly there; the engine keeps the last few.  The core engine
+        skips the key and finds the place itself."""
+        at = [i for i in range(1, len(ids)) if ids[i] in self.turn_ids]
+        return f" checkpoints={','.join(map(str, at))}" if at else ""
 
     def _send(self, text: str):
         btrace("send>", text[:60])
@@ -3221,6 +3222,9 @@ class Service:
         # --conversation-store DIR (opt-in): the chats the engine held, on disk - a chat is saved when another one
         # arrives, and one that has a file comes back from it instead of being read again (conversation_store.py)
         self.conversation_store = None
+        self.store_idle_s = 60.0                      # conversation_store_idle_s: save the live chat after this idle
+        self.store_idle_thread = None                 # the thread that watches for it
+        self.store_idle_stop = threading.Event()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
@@ -3328,7 +3332,7 @@ class Service:
             "dsml" if pre in ("joyai-llm", "deepseek-v3") else "lfm2" if pre == "lfm2" else "function"
         self.turn_ids = frozenset(t[0] for t in (tokenizer.encode(s, parse_special=True)
                                                  for s in TURN_OPENERS[self.call_format]) if len(t) == 1)
-        self.engine.turn_ids = self.turn_ids            # the GEN line's turn_at (StrataEngine.turn_key)
+        self.engine.turn_ids = self.turn_ids            # the GEN line's checkpoints (StrataEngine.turn_key)
         self.think_open_ids = []
         if self.call_format == "gemma":
             # after its calls Gemma opens the tools' answer, which is the client's to give: the reply ends there.
@@ -3894,6 +3898,37 @@ class Service:
             return None
 
     # ---- the conversation store (--conversation-store, conversation_store.py) ----
+    def store_save_live(self, timeout: float = 0.0) -> None:
+        """Save the chat the engine holds (at idle, or at exit), if it grew since its file was written.  The fifo is
+        taken first - a save may not interleave with a request - and never waited for longer than `timeout`."""
+        st = self.conversation_store
+        if st is None or st.live is None or not self.loaded():
+            return
+        got = self.fifo.acquire(True, timeout) if timeout > 0 else self.fifo.acquire(False)
+        if not got:
+            if timeout > 0:
+                print("[strata] conversation store: the engine is busy; the chat was not saved at exit", flush=True)
+            return
+        try:
+            if self.loaded():
+                st.save_live(self.engine, IDLE_GROW if timeout <= 0 else MIN_GROW)
+        finally:
+            self.fifo.release()
+
+    def start_store_idle(self) -> None:
+        """--conversation-store-idle-s: the chat the engine holds is saved after that long without requests, so a
+        crash, an OOM kill or a restart loses at most the last idle window, not the whole chat."""
+        if self.conversation_store is None or self.store_idle_s < 0 or self.store_idle_thread is not None:
+            return
+
+        def run():
+            while not self.store_idle_stop.wait(5.0):
+                if time.time() - self.last_request_at >= self.store_idle_s:
+                    self.store_save_live(0.0)   # non-blocking: a request in flight is skipped, the next round retries
+
+        self.store_idle_thread = threading.Thread(target=run, name="conversation-store-idle", daemon=True)
+        self.store_idle_thread.start()
+
     def ensure_loaded(self):
         """Start the engine if it is not running (unloaded, or it died - issue #27), after the before_load hook and
         the free-VRAM check.  The caller holds self.fifo."""
@@ -7669,6 +7704,15 @@ def shutdown(svc: Service, httpd, hub=None) -> None:
     """Ctrl+C / SIGTERM: stop serving, then end the engine and the vision encoder that run now - after a switch not the
     ones the server started with (#37) - and the MCP servers PolyStrata started."""
     engine, vision = svc.engine, svc.vision
+    # The chat the engine holds is written before it ends: the last idle save may be an hour old, and a long chat is
+    # the very thing that takes minutes to read again.  The fifo is waited for a little: a running answer finishes
+    # first (a second Ctrl+C gives up on that, as it always did on the engine's memory).
+    if svc.conversation_store is not None:
+        svc.store_idle_stop.set()
+        try:
+            svc.store_save_live(5.0)
+        except Exception as e:  # noqa: BLE001 - an exit must not be blocked by the store
+            print(f"[strata] conversation store: the chat was not saved at exit ({e})", flush=True)
     closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
                hub.close if hub is not None else None]
     for close in filter(None, closers):
@@ -7737,6 +7781,10 @@ def main() -> int:
                     help="conversation store: the bytes all its files may take, the least recently used ones "
                          "deleted (also \"conversation_store_max_mib\" in the config; default 10240, 0 = only the "
                          "count bounds it)")
+    ap.add_argument("--conversation-store-idle-s", type=float, default=None, metavar="SECONDS",
+                    help="conversation store: save the chat the engine holds after this long without requests, so a "
+                         "crash loses at most that much (also \"conversation_store_idle_s\" in the config; "
+                         "default 60, -1 = only on a switch and at exit)")
     ap.add_argument("--replicas", type=int, default=None, metavar="N",
                     help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
                          "each, requests spread over them (also \"replicas\" in the config: a number, or "
@@ -7870,6 +7918,10 @@ def main() -> int:
                 cfg.get("conversation_store_max_mib")
             slots = 5 if slots is None else int(slots)
             max_mib = ConversationStore.DEFAULT_MAX_MIB if max_mib is None else int(max_mib)
+            idle_s = a.conversation_store_idle_s if a.conversation_store_idle_s is not None else \
+                cfg.get("conversation_store_idle_s")
+            idle_s = ConversationStore.DEFAULT_IDLE_S if idle_s is None else float(idle_s)
+            svc.store_idle_s = idle_s
             svc.conversation_store = ConversationStore(
                 slot_save_dir(os.path.expanduser(a.conversation_store) if a.conversation_store else
                               (os.path.expanduser(store) if isinstance(store, str) else store), cfg.get("cwd")),
@@ -7877,10 +7929,12 @@ def main() -> int:
                 log=lambda message: print(f"[strata] {message}", flush=True))
         except (TypeError, ValueError, OSError) as e:
             raise SystemExit(f"[strata] conversation_store: {e}")
+        idle = (f"a chat is saved when another one arrives, and after {idle_s:g} s without requests" if idle_s >= 0
+                else "a chat is saved when another one arrives")
         print(f"[strata] conversation store on: {svc.conversation_store.path} (up to "
-              f"{svc.conversation_store.slots} chats and "
-              f"{svc.conversation_store.max_bytes / 2**30:.1f} GiB: a chat is saved when another one arrives, and "
-              "comes back from its file instead of being read again)", flush=True)
+              f"{svc.conversation_store.slots} chats and {svc.conversation_store.max_bytes / 2**30:.1f} GiB: {idle}, "
+              "and comes back from its file instead of being read again)", flush=True)
+        svc.start_store_idle()
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")

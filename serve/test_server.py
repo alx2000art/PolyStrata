@@ -1742,11 +1742,21 @@ class LastTurn(unittest.TestCase):
     def test_the_last_turn(self):
         self.assertEqual(self.engine.turn_ids, {256})          # <|im_start|>, from the Service
         ids = self.svc.encode_prompt(self.MSGS, None, {})
-        at = int(self.engine.turn_key(ids).split("=")[1])
+        key = self.engine.turn_key(ids)
+        self.assertTrue(key.startswith(" checkpoints="))
+        at = int(key.strip().split("=", 1)[1].split(",")[-1])   # the last turn's start
         self.assertTrue(self.tok.decode(ids[at:]).startswith("<|im_start|>assistant\n"))
         reply = {"role": "assistant", "content": "ok", "reasoning_content": "Say hello."}
         nxt = self.svc.encode_prompt(self.MSGS + [reply, {"role": "user", "content": "and?"}], None, {})
         self.assertEqual(nxt[:at + 1], ids[:at + 1])
+
+    def test_every_turn(self):
+        ids = self.svc.encode_prompt(self.MSGS + [{"role": "assistant", "content": "ok"},
+                                                  {"role": "user", "content": "and?"}], None, {})
+        at = [int(p) for p in self.engine.turn_key(ids).strip().split("=", 1)[1].split(",")]
+        self.assertGreaterEqual(len(at), 2)                     # the first user turn and the second
+        for p in at:
+            self.assertTrue(self.tok.decode(ids[p:]).startswith("<|im_start|>"), p)
 
     def test_no_turn(self):
         self.assertEqual(self.engine.turn_key(self.tok.encode("plain text")), "")
