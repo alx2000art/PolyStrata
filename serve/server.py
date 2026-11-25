@@ -66,6 +66,7 @@ from serve import runconfig  # noqa: E402
 from serve import models as registry  # noqa: E402
 from serve.model_gate import Cancelled, ModelGate  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
+from serve.conversation_store import ConversationStore  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
@@ -3217,6 +3218,9 @@ class Service:
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
+        # --conversation-store DIR (opt-in): the chats the engine held, on disk - a chat is saved when another one
+        # arrives, and one that has a file comes back from it instead of being read again (conversation_store.py)
+        self.conversation_store = None
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
@@ -3889,11 +3893,14 @@ class Service:
         except Exception:
             return None
 
+    # ---- the conversation store (--conversation-store, conversation_store.py) ----
     def ensure_loaded(self):
         """Start the engine if it is not running (unloaded, or it died - issue #27), after the before_load hook and
         the free-VRAM check.  The caller holds self.fifo."""
         if self.loaded() and not self._vision_down():
             return
+        if self.conversation_store is not None:
+            self.conversation_store.live = None   # the engine that held that chat is gone; its file is what is left
         hook_failed = None
         if self.before_load:
             cmd = self.before_load
@@ -4902,6 +4909,10 @@ class Service:
                             with self.status_lock:
                                 self.status["queued"] -= 1
                         raise
+                    # --conversation-store: the chat the engine holds goes to its file when another one arrives, and
+                    # this one comes back from its own before a token of it is read.  Between requests, fifo held.
+                    if self.conversation_store is not None and not emb and not par:
+                        self.conversation_store.switch(self.engine, ids)
                     with self.status_lock:
                         if par:
                             self.status["queued"] -= 1
@@ -5188,6 +5199,10 @@ class Service:
                                 timings = request_timings(seen, n, last)
                                 self.last_timings = dict(timings, at=int(time.time())) if timings else None
                             self.last_request_at = time.time()
+                            # --conversation-store: what the engine holds now is this chat up to its answer
+                            if self.conversation_store is not None and not emb and not par and \
+                                    finish in ("stop", "length"):
+                                self.conversation_store.touch(seen + n)
                             now = time.time()
                             el = now - st.get("started", now)
                             ft = st.get("first_token")
@@ -7711,6 +7726,13 @@ def main() -> int:
     ap.add_argument("--slot-save-path", default=None, metavar="DIR",
                     help="enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the "
                          "conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)")
+    ap.add_argument("--conversation-store", default=None, metavar="DIR",
+                    help="keep the chats the engine held on disk: a chat is saved when another one arrives, and one "
+                         "that has a file comes back from it instead of being read again (also \"conversation_store\" "
+                         "in the config; off by default)")
+    ap.add_argument("--conversation-store-slots", type=int, default=None, metavar="N",
+                    help="conversation store: how many chats are kept, the least recently used ones deleted "
+                         "(also \"conversation_store_slots\" in the config; default 5)")
     ap.add_argument("--replicas", type=int, default=None, metavar="N",
                     help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
                          "each, requests spread over them (also \"replicas\" in the config: a number, or "
@@ -7827,6 +7849,26 @@ def main() -> int:
             raise SystemExit(f"[strata] {e}")
         print(f"[strata] slot save/restore on: {svc.slot_save_path} (session files are kept until deleted: "
               "about 1.2 GB per 63K-token conversation; restore only files this server wrote)", flush=True)
+    # --conversation-store DIR / "conversation_store": the same kind of file, written and read by the server itself -
+    # a chat is saved when another one arrives and comes back from its file instead of being read again.
+    store = a.conversation_store or cfg.get("conversation_store")
+    if store:
+        if not hasattr(svc.engine, "session_file"):
+            raise SystemExit("[strata] conversation_store: this engine keeps no session files")
+        if getattr(svc.engine, "batch", 0):
+            # as with --slot-save-path: a save holds the engine between requests, and parallel requests share it
+            raise SystemExit("[strata] conversation_store: not with parallel requests (\"parallel\" / --batch)")
+        try:
+            slots = int(a.conversation_store_slots or cfg.get("conversation_store_slots") or 5)
+            svc.conversation_store = ConversationStore(
+                slot_save_dir(a.conversation_store) if a.conversation_store else
+                slot_save_dir(store, cfg.get("cwd")), slots=slots,
+                log=lambda message: print(f"[strata] {message}", flush=True))
+        except (TypeError, ValueError, OSError) as e:
+            raise SystemExit(f"[strata] conversation_store: {e}")
+        print(f"[strata] conversation store on: {svc.conversation_store.path} (up to "
+              f"{svc.conversation_store.slots} chats: one is saved when another arrives, and comes back from its "
+              "file instead of being read again)", flush=True)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")

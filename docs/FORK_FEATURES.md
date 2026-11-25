@@ -49,6 +49,20 @@ in order; the later ones depend on the earlier ones.
    key in the server config turns the conversation cache on: `"auto"` or `true` sizes it from the
    free RAM, a number means that many MiB. `--conversation-cache-mib` in the args wins over it.
 
+9. **Session files for strata-poly, and a conversation store** — `SAVE <path>` / `RESTORE <path>` on the
+   poly engine's stdin (the server's `/slots/0?action=save|restore`, the same API the core engine has) write
+   one conversation whole: its checkpoints, the rows its tokens left in the compressed caches, and the state
+   at the end of what the engine holds. A restored conversation therefore stands at its very end, and its
+   next turn reads none of itself back (the fast path `resume()` already has for a prompt that continues the
+   engine's own position). The file opens with a fingerprint of the numbers its state and rows are laid out
+   by and the model's own expert bytes, so another model's or build's file is refused rather than loaded.
+   `--conversation-store DIR` (or `"conversation_store"` in the config) turns it into a cache of the last
+   chats by itself: a chat is saved when another one arrives, and one that has a file is restored before a
+   token of it is read. Files are named by a conversation's first 1024 tokens (a chat's continuation has the
+   same), chats shorter than 2048 tokens are not kept, and `--conversation-store-slots N` (default 5) bounds
+   the store, the least recently used files deleted first. `tools/session_roundtrip.py` walks the whole path
+   over HTTP: save, restart the engine, restore, and compare the answer with a live control.
+
 ## The base layer
 
 On top of the patches, the `base` commit adds three engine features, each with a switch:
