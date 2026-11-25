@@ -1524,6 +1524,8 @@ int main(int argc, char** argv) {
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
     // STRATA_POLY_TAIL_SKIP_ALL=1: the drop by the router's place alone, not only for the experts outside VRAM
     if (const char* v = std::getenv("STRATA_POLY_TAIL_SKIP_ALL")) o.tail_skip_all = std::atoi(v) != 0;
+    // STRATA_POLY_PREFILL_CPU_SHARE=<share>: the prompt batch's CPU share (it takes none by default)
+    if (const char* v = std::getenv("STRATA_POLY_PREFILL_CPU_SHARE")) o.prefill_cpu_share = (float) std::atof(v);
     // STRATA_POLY_VRAM_RESERVE=<MiB>: the reserve over --vram-reserve-mib, for a sweep's own hand on it
     if (const char* v = std::getenv("STRATA_POLY_VRAM_RESERVE")) o.vram_reserve_mib = std::atoi(v);
     const long long most = 1LL << 24;   // MiB: 16 TiB

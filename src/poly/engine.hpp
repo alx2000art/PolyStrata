@@ -124,6 +124,9 @@ struct Options {
     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
                                   ///< computes while the others are copied: the ones the fewest tokens chose;
                                   ///< below 0: as the two took the time between them; 0: none
+    float prefill_cpu_share = -1.f;   ///< STRATA_POLY_PREFILL_CPU_SHARE: the same share for a prompt batch, which
+                                      ///< takes none by default (its copies are staged ahead, nothing to overlap);
+                                      ///< below 0 or 0: none
     int expert_swaps = 64;        ///< experts on their way into the cache at a time while an answer is written, each
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts

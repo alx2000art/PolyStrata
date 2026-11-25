@@ -3640,7 +3640,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
     const bool ahead = opt_.stage_ahead > 0 && (n >= opt_.stage_ahead || shared_ahead_);
-    const bool spare = !ahead && opt_.cpu_share != 0 && !all_cached();   // the CPU may take some (below)
+    // The CPU takes no expert of a call that stages ahead (a read): its share there competes with the copies
+    // rather than overlapping them.  STRATA_POLY_PREFILL_CPU_SHARE names a fixed share anyway - the card's
+    // compute and the bus are walls at a prompt batch, and the CPU has some MACs to spare between its copies.
+    const bool spare = (ahead ? opt_.prefill_cpu_share > 0.f : opt_.cpu_share != 0) && !all_cached();
     // The layer's tables.  tok and place: a row's token, and its place among that token's experts.  bounds: each
     // expert's first row.  rel: the same for the experts of a staging round, counted from the round's first row.
     // w: the weight of each place.
@@ -3765,7 +3768,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         n_spare = (int) spare_.size();
         // below 1: at 1 the staging has no expert to copy and its rounds come out empty (main.cpp refuses it too,
         // a defensive clamp keeps a config that slipped through from taking the engine down)
-        const double s = opt_.cpu_share > 0 ? std::min(opt_.cpu_share, 0.95f) : share_[size];
+        const double s = ahead ? (double) opt_.prefill_cpu_share
+                               : (opt_.cpu_share > 0 ? std::min(opt_.cpu_share, 0.95f) : share_[size]);
         n_cpu = (int) std::lround(s * n_spare);
         for (int j = 0; j < n_cpu; ++j) on_cpu_[(size_t) spare_[(size_t) j]] = 1;
     }

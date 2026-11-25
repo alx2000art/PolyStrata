@@ -315,6 +315,10 @@ VARIANTS+=("54-eta-tailskipall|$WORKING_SPEC ENV:STRATA_POLY_TAIL_SKIP_ALL=1")
 VARIANTS+=("39-eta-pb4096|$WORKING_SPEC --prompt-batch 4096")
 # 38 — то же с более широким чтением: раунд 4096 строк требует и буфера побольше
 VARIANTS+=("38-eta-pb4096-read|$WORKING_SPEC --prompt-batch 4096 --stage-read-mib 3072")
+# 37 — CPU берёт долю экспертов И на префилле (по умолчанию не берёт: его копии идут вперемешку со
+# стейджингом, но на батче стенами стоят и вычисления карты, и шина).  8% экспертов вне VRAM по нашей
+# оценке ~66 мс CPU на слой против ~96 мс карты — влезает; 15% уже не влезет.
+VARIANTS+=("37-eta-prefcpu|$WORKING_SPEC ENV:STRATA_POLY_PREFILL_CPU_SHARE=0.08")
 # 67/68 — балансировка CPU-лейна: nvtop на декоде показывает карту на 73% и процесс на ~10.4 ядрах из 16,
 # то есть простаивает и карта, и шесть ядер.  CPU-лейн при этом упирается не в ядра, а в полосу RAM
 # (43 слоя x ~9 экспертов x 0.39 промахов x 9.2 МиБ ~ 1.4 ГиБ/токен = ~40 ГБ/с).  Отсюда две пробы:
@@ -485,7 +489,7 @@ MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_ST
            "STRATA_POLY_SWAP_SYNC", "STRATA_POLY_IQ256", "STRATA_POLY_IQ256_DOWN", "STRATA_POLY_IQ256_CHECK",
            "STRATA_POLY_IQ512", "STRATA_POLY_IQ512_MIN", "STRATA_GRAPH_PARTS", "STRATA_POLY_READ_FILL",
            "STRATA_POLY_PCIE_FRAC", "STRATA_POLY_SPIN", "STRATA_POLY_PROMPT_SKIP", "STRATA_POLY_POOL_TOPUP",
-           "STRATA_POLY_TAIL_SKIP_ALL",
+           "STRATA_POLY_TAIL_SKIP_ALL", "STRATA_POLY_PREFILL_CPU_SHARE",
            "STRATA_POLY_SAMPLE_DEBUG", "STRATA_POLY_GRAPH_STATS",
            "STRATA_POLY_VRAM_RESERVE")
 for k in list(env):
@@ -1212,6 +1216,7 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("54-eta-tailskipall", "tail-skip по рангу, без зависимости от VRAM"),
        ("39-eta-pb4096", "prompt-batch 4096: вдвое меньше вызовов на префилле"),
        ("38-eta-pb4096-read", "prompt-batch 4096 + чтение 3072 МиБ"),
+       ("37-eta-prefcpu", "CPU берёт 8% экспертов и на префилле"),
        ("67-eta-threads20", "20 потоков (SMT) против 16 физических"),
        ("68-eta-ram0", "без RAM-пула экспертов: page cache прямо в прижатый буфер"),
        ("44-readheat", "read-heat 1 (тепло в recent_, follow двигает)"),
