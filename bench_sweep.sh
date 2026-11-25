@@ -509,6 +509,17 @@ while i < len(toks):
         i += 1
         continue
     v = (toks[i + 1] if i + 1 < len(toks) else "")
+    # A bare flag (--no-graphs, --kv-whole): no value follows it, and the next token - if any - starts another
+    # argument.  Read as a pair it swallowed the next flag's value (--no-graphs ate --stage-read-mib's 2048 and
+    # the engine refused to start, cell 53).
+    if v == "" or v.startswith("--"):
+        if k not in args:
+            args.append(k)
+        j = args.index(k) if k in args else -1
+        if j < 0:
+            bad.append(k)
+        i += 1
+        continue
     idx = args.index(k) if k in args else -1
     if idx >= 0 and idx + 1 < len(args):
         args[idx + 1] = v
