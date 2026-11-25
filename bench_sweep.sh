@@ -840,7 +840,9 @@ cp "$CONFIG" "$BACKUP" || die "не смог забэкапить конфиг"
 # свои аргументы: apply_variant() пишет args в конфиг, и без снимка пины LOSSLESS_BASE (--ctx-cap 32768
 # и прочее) протекали в следующие по порядку ячейки - 89-eta-graphs после 89-attend-batch1 получила
 # ctx-cap 32768, хотя её спека его не называла, и мерила уже не графы.
-PRISTINE="$OUT_DIR/config.pristine.json"
+# Без .json в имени: FORCE=1 ниже чистит "$OUT_DIR"/*.json, и снимок с таким расширением удалялся
+# вместе с прошлыми ячейками (первый же прогон с FORCE=1 упал на FileNotFoundError).
+PRISTINE="$OUT_DIR/config.pristine"
 cp "$CONFIG" "$PRISTINE" || die "не смог снять чистый снимок конфига"
 export PRISTINE
 log "бэкап конфига: $BACKUP"
