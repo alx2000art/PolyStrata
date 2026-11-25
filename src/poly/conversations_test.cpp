@@ -31,6 +31,7 @@ struct Fake {
     uint64_t h = 1;
     int64_t at = 0, read = 0;
     size_t state = 8;   // bytes a checkpoint takes; the hash is the first 8
+    size_t pad = 0;     // zero bytes each row adds: a real model's compressed rows are mostly empty positions
     std::vector<uint64_t> a = std::vector<uint64_t>(ctx), b = std::vector<uint64_t>(ctx);
 
     void reset() { h = 1, at = 0; }
@@ -45,14 +46,24 @@ struct Fake {
     size_t state_bytes() const { return state; }
     void save_state(uint8_t* dst) const { std::memcpy(dst, &h, 8); }
     void load_state(const uint8_t* src, int64_t pos) { std::memcpy(&h, src, 8), at = pos; }
-    size_t row_bytes() const { return 16; }
+    size_t row_bytes() const { return 16 + pad; }
+    // A row is its hash and token, then `pad` zero bytes - the layout a compressed row's empty positions make.
     void save_rows(int64_t first, int64_t n, uint8_t* dst) const {
-        std::memcpy(dst, &a[(size_t) first], (size_t) n * 8);
-        std::memcpy(dst + n * 8, &b[(size_t) first], (size_t) n * 8);
+        const size_t rb = row_bytes();
+        std::memset(dst, 0, (size_t) n * rb);
+        for (int64_t i = 0; i < n; ++i, dst += rb) {
+            std::memcpy(dst, &a[(size_t) (first + i)], 8);
+            std::memcpy(dst + 8, &b[(size_t) (first + i)], 8);
+        }
     }
     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
-        std::memcpy(&a[(size_t) first], src + (first - from) * 8, (size_t) n * 8);
-        std::memcpy(&b[(size_t) first], src + count * 8 + (first - from) * 8, (size_t) n * 8);
+        (void) count;
+        const size_t rb = row_bytes();
+        src += (size_t) (first - from) * rb;
+        for (int64_t i = 0; i < n; ++i, src += rb) {
+            std::memcpy(&a[(size_t) (first + i)], src, 8);
+            std::memcpy(&b[(size_t) (first + i)], src + 8, 8);
+        }
     }
 
     bool holds(const std::vector<int32_t>& ids) const {
@@ -76,11 +87,17 @@ struct Chat {
     std::vector<std::pair<int64_t, uint8_t*>> due;
     explicit Chat(const CacheOptions& o) : kept(e, o) {}
 
-    // A request as the server makes it: the prompt, where its last turn begins, then `reply` generated tokens.
-    // Returns where the prompt was taken up, and leaves the tokens the engine then holds in `ids`.
+    // A request as the server makes it: the prompt, where its turns begin (the template's turn markers; one
+    // position is the older spelling), then `reply` generated tokens.  Returns where the prompt was taken up, and
+    // leaves the tokens the engine then holds in `ids`.
     int64_t ask(std::vector<int32_t>& ids, int reply = 3, int64_t turn = -1) {
+        std::vector<int64_t> anchors;
+        if (turn > 0) anchors.push_back(turn);
+        return ask_anchors(ids, reply, anchors);
+    }
+    int64_t ask_anchors(std::vector<int32_t>& ids, int reply, const std::vector<int64_t>& anchors) {
         const int64_t n = (int64_t) ids.size(), from = kept.resume(ids);
-        kept.turn_at(turn);
+        kept.checkpoints_at(anchors);
         check(from >= 0 && from < n && e.at == from, "a prompt is taken up before its last token");
         for (int64_t i = from; i < n;) {
             const bool last = i == n - 1;
@@ -95,7 +112,7 @@ struct Chat {
                 e.h ^= 0x5EEDull;
                 const int64_t back = kept.rewind();
                 check(back <= i && e.at == back && e.holds(kept.seq()), "a read given up leaves the last checkpoint");
-                return ask(ids, reply, turn);
+                return ask_anchors(ids, reply, anchors);
             }
             if (far > 0 && !last) {
                 kept.inside(i, m, due);
@@ -316,6 +333,31 @@ void long_read() {
     check(left[1] == six, "which are five of the fifteen inside, beside the one before the prompt's last token");
 }
 
+// The server names where the prompt's turns begin, from its template's markers: a checkpoint goes at each, so a
+// client that edits or regenerates a turn is taken up exactly where that turn begins - whatever the token interval.
+// A prompt whose turns were never named has only the one before its last token.
+void turns() {
+    CacheOptions o = options(0);
+    o.every = 0;   // the default now: the turns' starts are what a checkpoint is for
+    Chat c(o);
+    std::vector<int32_t> a = text(31, 6000);
+    const std::vector<int64_t> at = {1000, 2500, 4000, 5500};
+    c.ask_anchors(a, 3, at);
+    std::vector<int32_t> e(a.begin(), a.begin() + 4700);   // an edit inside the turn that begins at 4000
+    e = e + text(32, 50);
+    check(c.ask_anchors(e, 3, at) == 4000, "an edited turn is taken up where that turn begins");
+    std::vector<int32_t> f(a.begin(), a.begin() + 3000);   // and one inside the turn that begins at 2500
+    f = f + text(33, 50);
+    check(c.ask_anchors(f, 3, at) == 2500, "another one, at its own start");
+
+    Chat d(o);
+    std::vector<int32_t> g = text(34, 3000);
+    d.ask(g, 1);                                            // no turn named: one checkpoint, before the last token
+    std::vector<int32_t> h(g.begin(), g.begin() + 1000);
+    h = h + text(35, 10);
+    check(d.ask(h, 1) == 0, "a prompt without named turns is not come back to inside");
+}
+
 // A conversation written to a file and read back into another engine must leave that engine exactly where the
 // first one was - the same rows, the same state - so its next turn is taken up at the very end and reads none of
 // it.  A file of another model or build (fingerprint) is refused rather than loaded.
@@ -328,12 +370,14 @@ void session_file() {
     c.ask(a, 5);
     check(c.e.at == (int64_t) a.size(), "the conversation is at its end before the save");
     std::string why;
-    check(c.kept.save_file(path, why), "the conversation is written to a file");
+    const bool saved = c.kept.save_file(path, why);
+    check(saved, ("the conversation is written to a file: " + why).c_str());
     check((int64_t) c.kept.last_file_bytes() > (int64_t) a.size() * 16, "the file holds the rows and the state");
 
     Fake e2;   // another engine, as after a restart
     Conversations<Fake> kept2(e2, o);
-    check(kept2.load_file(path, why), "the file is read back");
+    const bool loaded = kept2.load_file(path, why);
+    check(loaded, ("the file is read back: " + why).c_str());
     check(e2.at == c.e.at && e2.h == c.e.h, "the state is the one that was saved");
     check(e2.holds(a), "and so are the rows");
     check(kept2.seq() == a, "the conversation is the one that was saved");
@@ -342,6 +386,25 @@ void session_file() {
     std::vector<int32_t> b = a + text(12, 40);
     check(kept2.resume(b) == (int64_t) a.size(), "the next turn is taken up at the conversation's end");
     check(e2.read == read, "and nothing of it is read again");
+
+    // A real model's rows are mostly zeros (a block's compressed row once per block): the file must come out a
+    // fraction of them, and read back whole through chunks.
+    {
+        Chat p(o);
+        p.e.pad = 4096;   // 4 KiB of zeros in every row, 16 bytes of it
+        std::vector<int32_t> big = text(21, 12000);
+        p.ask(big, 2);
+        const bool ok = p.kept.save_file(path, why);
+        check(ok, ("a zero-heavy conversation is written to a file: " + why).c_str());
+        const int64_t raw = (int64_t) big.size() * (int64_t) p.e.row_bytes();
+        check((int64_t) p.kept.last_file_bytes() * 4 < raw, "the payloads are packed: under a quarter of the rows");
+        Fake e4;
+        e4.pad = 4096;
+        Conversations<Fake> kept4(e4, o);
+        const bool back = kept4.load_file(path, why);
+        check(back, ("the packed file is read back: " + why).c_str());
+        check(e4.holds(big), "and its rows are the same bit for bit");
+    }
 
     CacheOptions wrong = o;
     wrong.fingerprint = 0xBAD;
@@ -370,6 +433,7 @@ int main() {
     }
     quits = 0;
     long_read();
+    turns();
     for (const int64_t f : {0, 6000}) {        // a prompt read a call at a time, and one read in one go
         far = f;
         session_file();

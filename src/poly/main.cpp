@@ -404,7 +404,7 @@ struct Session {
     // by, and the model's own size (two models of one shape differ there first), are the whole check.  Every number
     // here is the same on every run of the same files - nothing of how much VRAM was free at the start.
     static uint64_t fingerprint(const Engine& e) {
-        uint64_t h = 1469598103934665603ull;   // FNV-1a over "SPCSV1"'s numbers
+        uint64_t h = 1469598103934665603ull;   // FNV-1a over the numbers a session file is laid out by
         const auto mix = [&h](uint64_t v) {
             for (int i = 0; i < 8; ++i) h = (h ^ ((v >> (8 * i)) & 0xff)) * 1099511628211ull;
         };
@@ -441,12 +441,15 @@ struct Session {
 
     // Reads the prompt and generates.  on_token gets every token, the end-of-sequence one included.  The rows of
     // the prompt's pictures have ids below zero (take_pictures()); `pad` is the token they stand in for.
+    // `checkpoints` are the places the prompt's turns begin, which the server reads from its template: a checkpoint
+    // goes at each, so a client that edits or regenerates a turn is taken up where that turn begins.
     // `between`, when given, reads the prompt in pieces of piece_calls calls and is asked after each but the last
     // one, with where the read is: false stops it there, as a cancel does, and the conversation holds what was read.
     template<class OnToken, class OnProgress>
-    Result generate(const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad, int64_t turn_at,
-                    int64_t max_new, const Sampling& s, const std::atomic<bool>& stop, OnToken on_token,
-                    OnProgress on_progress, const std::function<bool(int64_t)>* between = nullptr) {
+    Result generate(const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad,
+                    std::vector<int64_t> checkpoints, int64_t max_new, const Sampling& s,
+                    const std::atomic<bool>& stop, OnToken on_token, OnProgress on_progress,
+                    const std::function<bool(int64_t)>* between = nullptr) {
         Result r;
         const int64_t n = (int64_t) ids.size();
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
@@ -459,7 +462,7 @@ struct Session {
                                  "before do not reach; the expert cache %d -> %d experts\n",
                          double(freed) / double(1ull << 30), had, engine.cached_experts());
         }
-        kept.turn_at(turn_at);
+        kept.checkpoints_at(std::move(checkpoints));
         asked += n;
         reused += r.resume;
         on_progress(r.resume, n, 0.0, true);
@@ -684,16 +687,17 @@ struct Session {
 };
 
 // GEN <max_new> [key=value ...] <id,id,...>, or GENI with the file of the prompt's pictures ahead of the ids and
-// the key image_pad, the token whose runs in the ids are the pictures' places.  turn_at is the place in the ids
-// where the prompt's last turn begins (the server knows the template's turn tokens): a checkpoint goes there.
-bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t& pad, int64_t& turn_at,
-               std::string& pictures, std::vector<int32_t>& ids) {
+// the key image_pad, the token whose runs in the ids are the pictures' places.  `checkpoints` are the places in the
+// ids where the prompt's turns begin (the server knows the template's turn tokens), comma-separated; a single
+// `turn_at` is the older spelling of one of them.  A checkpoint goes at each.
+bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t& pad,
+               std::vector<int64_t>& checkpoints, std::string& pictures, std::vector<int32_t>& ids) {
     const bool geni = line.rfind("GENI ", 0) == 0;
     char* p = nullptr;
     max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &p, 10);
     if (max_new < 1) return false;
     pad = -1;
-    turn_at = -1;
+    checkpoints.clear();
     for (;;) {   // key=value tokens, then the file and the ids
         while (*p == ' ') ++p;
         const char* start = p;
@@ -716,7 +720,21 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
         else if (key == "penalty_present") s.penalty_present = std::strtof(v, nullptr);
         else if (key == "seed") s.seed = std::strtoull(v, nullptr, 10);
         else if (key == "image_pad") pad = (int32_t) std::atoi(v);
-        else if (key == "turn_at") turn_at = std::strtoll(v, nullptr, 10);
+        else if (key == "turn_at") {
+            const long long at = std::strtoll(v, nullptr, 10);
+            if (at > 0) checkpoints.push_back(at);
+        } else if (key == "checkpoints") {
+            const char* q = v;
+            while (*q != '\0') {
+                char* end = nullptr;
+                const long long at = std::strtoll(q, &end, 10);
+                if (end == q || at < 0) return false;
+                if (at > 0) checkpoints.push_back(at);
+                if (*end == '\0') break;
+                if (*end != ',') return false;
+                q = end + 1;
+            }
+        }
         // other keys belong to the other engine and are skipped
     }
     pictures.clear();
@@ -896,7 +914,7 @@ int serve(Session& ss) {
         Sampling s;
         std::vector<int32_t> ids;
         int32_t pad = -1;
-        int64_t turn_at = -1;
+        std::vector<int64_t> checkpoints;
         std::string file;
         // VRAM [reserve_mib], the server's POST /v1/vram: the expert cache sized again between requests, to leave
         // that much VRAM to other programs; alone, back to what the engine started with
@@ -1040,7 +1058,7 @@ int serve(Session& ss) {
             std::fflush(stdout);
             continue;
         }
-        if (!parse_gen(line, max_new, s, pad, turn_at, file, ids)) {
+        if (!parse_gen(line, max_new, s, pad, checkpoints, file, ids)) {
             std::printf("ERR bad request\n");
             std::fflush(stdout);
             continue;
@@ -1084,7 +1102,7 @@ int serve(Session& ss) {
                                      "now, %lld MiB left\n",
                              had, engine.cached_experts(), engine.cached_gib(), (long long) engine.vram_free_mib());
             r = ss.generate(
-                ids, pictures, pad, turn_at, max_new, s, lines.stop,
+                ids, pictures, pad, checkpoints, max_new, s, lines.stop,
                 [&](int32_t t) {
                     first = t;
                     std::printf("T %d\n", (int) t);
@@ -1194,7 +1212,7 @@ int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures,
     std::atomic<bool> stop{false};
     std::string out;
     const Session::Result r = ss.generate(
-        ids, pictures, pad, -1, max_new, s, stop,
+        ids, pictures, pad, std::vector<int64_t>{}, max_new, s, stop,
         [&](int32_t t) {
             if (top_probs > 0) print_top(ss.picked_from, ss.engine.n_vocab(), top_probs);
             out += (out.empty() ? "" : ",") + std::to_string(t);
@@ -1365,10 +1383,12 @@ void usage() {
                  "                         the answers (Maya's Turbo's cap; DSv4 routes 6) (default 0 = all)\n"
                  "  --cpu-tiled N          1: the CPU experts' gate/up through the tiled K-quant kernels\n"                 "                         (default 1; 0 = the per-row vec_dot path)\n"                 "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
-                 "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
-                 "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
-                 "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
-                 "                         (default 2048, 0 = none)\n"
+                 "  --prompt-cache N       checkpoints kept of a conversation (default 6; 0 = a prompt is read\n"
+                 "                         from its start unless it goes on from the last token).  One goes at the\n"
+                 "                         start of every turn the server names (checkpoints= in GEN) and one before\n"
+                 "                         the prompt's last token; here a state is a few MB, not the core engine's\n"
+                 "  --prompt-cache-every N besides those, a checkpoint every N prompt tokens (default 0 = only at\n"
+                 "                         the turns' starts; a prompt without them gets the one at its end)\n"
                  "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
                  "                         without being read again (default 0 = off; auto: 40%% of the RAM free\n"
                  "                         once loaded, above the floor below, at most 8192)\n"
