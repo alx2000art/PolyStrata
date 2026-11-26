@@ -83,7 +83,7 @@ if [[ "$NIGHT" == "1" && -z "$ONLY" ]]; then
   FULL=1
   # Полные имена, а не номера: ONLY совпадает подстрокой, и "50" поймало бы 50-on-stage2-512,
   # "10" — 57-on-share100, "12" — 73-on-stage128 и т.д.
-  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,15-all-off-m,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,94-graphs,99-all-off-c"
+  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,94-graphs,99-all-off-c"
   # Прод не фризит кэш экспертов: ночной набор меряет прод-подобную скорость (без фриза decode ~+18%).
   # Повторы тогда дрейфуют по раскладке кэша, поэтому детерминизм в этом режиме не проверяется
   # (см. SWEEP_DET_SKIP в цикле); decode в сводке и так берётся максимумом по повторам.
@@ -290,6 +290,9 @@ if ! [[ "${PHYS_CORES:-0}" =~ ^[1-9][0-9]*$ ]]; then PHYS_CORES=$(nproc); fi
 # то есть ~650 МиБ меньше кэшу экспертов; поэтому lossless-ячейки меряются на прод-раскладке, а не на
 # «выжатой под кэш».  92-ctxfull (--ctx-cap 0 = auto до потолка модели) остаётся отдельной пробой.
 LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 131072 --prompt-batch 2048 --expert-swaps 64 --vram-reserve-mib 512 --threads 16 --cpu-share -1"
+# 37 — сама lossless-база: кластер 44-50/87 меряется против неё (у них общие пины pb2048/expert-swaps/
+# threads/cpu-share/резерв), а не против 80, с которым они расходятся ещё и этими пинами.
+VARIANTS+=("37-on-lossless|$LOSSLESS_BASE")
 VARIANTS+=("85-no-cpu|$LOSSLESS_BASE --cpu-share 0")   # CPU-лейн не делит DDR-полосу со стейджингом
 VARIANTS+=("86-threads-all|$LOSSLESS_BASE --threads 0")   # все логические (32) против 16 физических в проде
 VARIANTS+=("87-reserve256|$LOSSLESS_BASE --vram-reserve-mib 256")   # свободные МиБ карты — кэшу экспертов
@@ -1394,12 +1397,13 @@ los = (("85-no-cpu", "cpu-share 0 (CPU-лейн не делит шину)"),
        ("98-graph-head", "графы: только head"))
 if "80-eta-iq256off" in names and any(nm in names for nm, _ in los):
     lines.append("")
-    lines.append("## lossless-ручки (пара к `80-eta-iq256off`)")
+    los_base = "37-on-lossless" if "37-on-lossless" in names else "80-eta-iq256off"
+    lines.append(f"## lossless-ручки (пара к `{los_base}`)")
     for nm, lbl in los:
         if nm not in names:
             continue
         try:
-            nn, dd, pp, ta, tb = delta(os.path.join(out_dir, "80-eta-iq256off.json"),
+            nn, dd, pp, ta, tb = delta(os.path.join(out_dir, los_base + ".json"),
                                        os.path.join(out_dir, nm + ".json"))
             lines.append(f"* {lbl}: decode {dd:+.1f}%, prefill {pp:+.1f}% ({nn} пар, TTFT {ta:.2f} → {tb:.2f}s)")
         except Exception as e:
