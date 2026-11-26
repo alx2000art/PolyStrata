@@ -285,7 +285,11 @@ VARIANTS+=("84-on-iq512-min1|$WORKING_SPEC ENV:STRATA_POLY_IQ256=1 ENV:STRATA_PO
 # явно (-1/0 = дефолты движка), чтобы значение предыдущей ячейки не протекло в следующую.
 PHYS_CORES=$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 if ! [[ "${PHYS_CORES:-0}" =~ ^[1-9][0-9]*$ ]]; then PHYS_CORES=$(nproc); fi
-LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 32768 --prompt-batch 2048 --expert-swaps 64 --vram-reserve-mib 512 --threads 16 --cpu-share -1"
+# ctx-cap 131072, как в проде, а не 32768: при 32k длинный промпт + max_new упирается в контекст и падает
+# (doc-30k и живые чаты 50k+), а нам нужны настоящие длинные чтения.  Цена — KV-бюджет 871 МиБ вместо 215,
+# то есть ~650 МиБ меньше кэшу экспертов; поэтому lossless-ячейки меряются на прод-раскладке, а не на
+# «выжатой под кэш».  92-ctxfull (--ctx-cap 0 = auto до потолка модели) остаётся отдельной пробой.
+LOSSLESS_BASE="$WORKING_SPEC --attend-batch 0 --idx-mma 1 --idx-fused 0 --ctx-cap 131072 --prompt-batch 2048 --expert-swaps 64 --vram-reserve-mib 512 --threads 16 --cpu-share -1"
 VARIANTS+=("85-no-cpu|$LOSSLESS_BASE --cpu-share 0")   # CPU-лейн не делит DDR-полосу со стейджингом
 VARIANTS+=("86-threads-all|$LOSSLESS_BASE --threads 0")   # все логические (32) против 16 физических в проде
 VARIANTS+=("87-reserve256|$LOSSLESS_BASE --vram-reserve-mib 256")   # свободные МиБ карты — кэшу экспертов
@@ -340,9 +344,9 @@ VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graph
 VARIANTS+=("97-graph-shared|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=s DEL:--no-graphs")
 VARIANTS+=("98-graph-head|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=h DEL:--no-graphs")
 VARIANTS+=("94-graphs|$LOSSLESS_BASE DEL:--no-graphs")
-# 69 — графы на ПРОД-аргументах: 94 против 80 был нечестной парой (LOSSLESS_BASE пинит --ctx-cap 32768,
-# а конфиг держит 131072), а cap меняет размер KV -> ёмкость кэша экспертов -> набор резидентных
-# экспертов, и --tail-skip 4 (отбрасывает "вне VRAM") даёт другие суммы: 0.5-3 логита при том же top-1.
+# 69 — графы на ПРОД-аргументах: 94 против 80 — нечестная пара (LOSSLESS_BASE пинит --prompt-batch 2048,
+# --expert-swaps 64, threads/cpu-share и резерв), а pb меняет кэш экспертов и через --tail-skip 4 (отбрасывает
+# "вне VRAM") другие суммы: 0.5-3 логита при том же top-1.  ctx-cap теперь 131072 в обоих — не он разводит.
 # 69 = WORKING_SPEC без пинов + графы: пара 80↔69 меряет только графы (номер свободный; 89 занят
 # attend-batch1, и ONLY по подстроке "89" тянул обе ячейки).  Зонд логитов прямым запуском
 # (tools/graph_parts_bisect.sh) показал: при одинаковых аргументах графы и прямые запуски побитово равны.
@@ -975,9 +979,9 @@ trap on_interrupt INT TERM
 
 cp "$CONFIG" "$BACKUP" || die "не смог забэкапить конфиг"
 # Каждый вариант считается от ЭТОГО снимка, а не от конфига, в который предыдущий вариант уже записал
-# свои аргументы: apply_variant() пишет args в конфиг, и без снимка пины LOSSLESS_BASE (--ctx-cap 32768
-# и прочее) протекали в следующие по порядку ячейки - 89-eta-graphs после 89-attend-batch1 получила
-# ctx-cap 32768, хотя её спека его не называла, и мерила уже не графы.
+# свои аргументы: apply_variant() пишет args в конфиг, и без снимка пины LOSSLESS_BASE (--prompt-batch 2048
+# и прочее) протекали в следующие по порядку ячейки - 69-eta-graphs после 89-attend-batch1 получила
+# pb 2048, хотя её спека его не называла, и мерила уже не графы.
 # Без .json в имени: FORCE=1 ниже чистит "$OUT_DIR"/*.json, и снимок с таким расширением удалялся
 # вместе с прошлыми ячейками (первый же прогон с FORCE=1 упал на FileNotFoundError).
 PRISTINE="$OUT_DIR/config.pristine"
