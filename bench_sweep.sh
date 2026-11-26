@@ -784,7 +784,7 @@ if os.environ.get("SWEEP_DET_SKIP"):
     # placement drifts): the gate would throw its delta away.  None, not False - the summary counts it.
     d["meta"]["deterministic"] = None
     json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    print("  детерминизм: не проверяется (ячейка снимает FREEZE - дрейф раскладки ожидаем)")
+    print("  детерминизм: не проверяется (FREEZE снят - ячейкой или всем прогоном; дрейф раскладки ожидаем)")
 else:
     det = all(len(v) == 1 for k, v in per.items() if len(v) > 1 and k not in ignore)
     d["meta"]["deterministic"] = det
