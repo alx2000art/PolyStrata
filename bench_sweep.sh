@@ -853,6 +853,11 @@ PY
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 cfg["warm_start"] = sys.argv[2]
+# пин — это ~7k токенов: с боевым conversation_store он лёг бы в каталог пользователя и вытеснил
+# настоящий чат.  Warm-check проверяет warm_start, а не хранилище - снимаем его на время проверки.
+for k in ("conversation_store", "conversation_store_slots", "conversation_store_max_mib",
+          "conversation_store_idle_s"):
+    cfg.pop(k, None)
 with open(sys.argv[1] + ".tmp", "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=1)
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
