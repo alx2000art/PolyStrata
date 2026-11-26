@@ -3923,7 +3923,8 @@ class Service:
 
         def run():
             while not self.store_idle_stop.wait(5.0):
-                if time.time() - self.last_request_at >= self.store_idle_s:
+                last = self.last_request_at    # None until the first request: no chat to save yet
+                if last is not None and time.time() - last >= self.store_idle_s:
                     self.store_save_live(0.0)   # non-blocking: a request in flight is skipped, the next round retries
 
         self.store_idle_thread = threading.Thread(target=run, name="conversation-store-idle", daemon=True)
