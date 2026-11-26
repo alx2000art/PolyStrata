@@ -338,9 +338,10 @@ VARIANTS+=("47-spin20|$LOSSLESS_BASE ENV:STRATA_POLY_SPIN=400000")
 VARIANTS+=("48-prompskip|$LOSSLESS_BASE ENV:STRATA_POLY_PROMPT_SKIP=2668")
 # 49/50 — то, что карта держит свободным.  49 — выключить дотягивание пула (STRATA_POLY_POOL_TOPUP=0:
 # память, освобождённая самой загрузкой, остаётся у карты) — контроль для 80, где дотягивание включено.
-# 50 — резерв 320 вместо 512 МиБ: +192 МиБ кэшу (~21 эксперт), ступенька ночного бенча 256 давала +1.9%,
-# но графам при 131k нужно 512; у нас ctx-cap 32k — проверяем, хватает ли 320 (смотреть на
-# cudaGraphInstantiate: out of memory в логе движка).
+# 50 — резерв 320 вместо 512 МиБ: +192 МиБ кэшу (~21 эксперт), ступенька ночного бенча 256 давала +1.9%.
+# Теперь ctx 131072, как в проде, но графы в этой базе выключены (--no-graphs из конфига), так что 320
+# проверяется без графов; 94 вернёт графы на резерве 512 — если 50 выигрывает, графам придётся искать
+# свои 512 из другого места (смотреть cudaGraphInstantiate: out of memory в логе движка).
 VARIANTS+=("49-pooleveloff|$LOSSLESS_BASE ENV:STRATA_POLY_POOL_TOPUP=0")
 VARIANTS+=("50-reserve320|$LOSSLESS_BASE ENV:STRATA_POLY_VRAM_RESERVE=320")
 VARIANTS+=("96-graph-tail|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=t DEL:--no-graphs")
