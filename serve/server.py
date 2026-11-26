@@ -3911,7 +3911,7 @@ class Service:
             return
         try:
             if self.loaded():
-                st.save_live(self.engine, IDLE_GROW if timeout <= 0 else MIN_GROW)
+                st.save_live(self.engine, IDLE_GROW if timeout <= 0 else 0)   # at exit: any token newer than the file
         finally:
             self.fifo.release()
 

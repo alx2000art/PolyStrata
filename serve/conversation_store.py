@@ -54,11 +54,14 @@ class ConversationStore:
         return self.file(key).is_file()
 
     def worth_saving(self, key, tokens, min_grow=MIN_GROW):
-        """Есть ли смысл писать файл сейчас: разговор достаточно длинный, а с прошлой записи заметно вырос."""
+        """Есть ли смысл писать файл сейчас: разговор достаточно длинный, а с прошлой записи заметно вырос
+        (min_grow 0 - на выходе сервера - хватает одного нового токена: файл пишется, только если он устарел)."""
         if tokens < MIN_TOKENS:
             return False
         was = self.saved.get(key)
-        return was is None or tokens - was >= min_grow
+        if was is None:
+            return True
+        return tokens - was >= max(1, min_grow)
 
     def switch(self, engine, ids):
         """Перед запросом: прежний разговор уходит в файл, этот поднимается из своего, если файл есть.

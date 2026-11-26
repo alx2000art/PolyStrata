@@ -33,6 +33,16 @@
 # Переопределение настроек — переменными окружения, напр.:
 #   SUITE=poly OUT_DIR=~/bench2 ./bench_sweep.sh
 #   FORCE=1 ./bench_sweep.sh        # перезаписать уже готовые прогоны
+#   FULL=1 ./bench_sweep.sh         # все варианты (ночной обзор), а не необходимый набор
+#   STORE_CHECK=0 ./bench_sweep.sh  # без HTTP-проверки дискового кэша разговоров (~4 мин в конце)
+#
+# Спека варианта — пары "ключ значение" для args движка, а кроме них:
+#   ENV:NAME=VALUE / ENV:NAME=   переменная окружения движка, поставить/снять
+#   DEL:--flag                   убрать аргумент из args (с его значением, если оно есть)
+#   CFG:key=value / CFG:key=     ключ ВЕРХНЕГО уровня конфига (число/строка), поставить/снять — так
+#                                включается серверное хранилище разговоров (conversation_store);
+#                                ключи conversation_store* по умолчанию снимаются у каждой ячейки,
+#                                чтобы прод-хранилище не писало файлы под весь свип
 #
 # Результаты: OUT_DIR/<вариант>.json, OUT_DIR/summary.md, OUT_DIR/sweep.log
 # Конфиг strata-*.json на время свипа переписывается, в конце восстанавливается
@@ -71,6 +81,8 @@ WARM_CHECK="${WARM_CHECK:-1}"       # префлайт: файл-режим warm
 BUDGET_CHECK="${BUDGET_CHECK:-1}"   # гейт скорости после свипа: steady-state мс/токен и префилл на прод-конфиге
                                     # (tools/decode_budget.py; MS_TOKEN / FLOOR_PREFILL_TPS задают пол)
 WARM_CHECK_ONLY="${WARM_CHECK_ONLY:-0}"
+STORE_CHECK="${STORE_CHECK:-1}"   # после ячеек: HTTP-сценарий хранилища разговоров (два чата, возврат,
+                                  # простой, остановка сервера; tools/session_store_check.py). 0 = пропустить
 WARM_CHECK_PROMPT="${WARM_CHECK_PROMPT:-}"   # текстовый файл для пина (>= 2048 токенов); иначе синтетический
 
 # ------------------------- фичи форка (docs/FORK_FEATURES.ru.md) ------------
@@ -144,6 +156,13 @@ VARIANTS=()
 VARIANTS+=("00-all-off|$(all_off_spec)")     # ЭТАЛОН: всё выключено
 VARIANTS+=("01-all-off-b|$(all_off_spec)")   # эталон ещё раз — пол шума
 VARIANTS+=("10-all-on|$WORKING_SPEC")       # рабочий конфиг 2026-11-02 (эталон набора)
+# --- дисковый кэш разговоров (серверный ключ conversation_store; в спеке — CFG:key=value): ячейки проверяют,
+# что включённое хранилище не ломает запросы, не съезжает по ответам (детерминизм повторов) и попадает в
+# бюджеты.  Свип гасит --prompt-cache, поэтому возврат идёт по живому концу файла, а не по чекпоинтам.
+# Механику save/restore/idle/exit проверяет store_check() после ячеек.  Каталоги — свои у каждой ячейки и
+# чистятся на старте свипа (иначе прошлый прогон подставил бы свои чаты вместо чтения).
+VARIANTS+=("11-store|$WORKING_SPEC CFG:conversation_store=$OUT_DIR/store CFG:conversation_store_idle_s=-1 CFG:conversation_store_max_mib=4096")
+VARIANTS+=("12-store-idle|$WORKING_SPEC CFG:conversation_store=$OUT_DIR/store-idle CFG:conversation_store_idle_s=2 CFG:conversation_store_max_mib=4096")
 # Драфтер и расширенный вокаб: 10-all-on уже несёт драфтер (он в args конфига);
 # 16 снимает его для прямого A/B скорости с/без; 17 — сайдкар расширенного
 # вокаба (--vocab-ext), 18 — явный путь драфтера (если конфиг без него).
@@ -331,10 +350,11 @@ VARIANTS+=("68-eta-ram0|$WORKING_SPEC --ram-experts-mib 0")
 # 79 логиты, 95 card_moe.  Часть, которая одна меняет ответ, и есть подозреваемая.
 VARIANTS+=("95-graph-cardmo|$LOSSLESS_BASE ENV:STRATA_GRAPH_PARTS=c DEL:--no-graphs")
 
-# По умолчанию — только необходимый набор: эталон и ручки, решения по которым ещё нет.  FULL=1 гоняет
-# все варианты (ночной обзор).  ONLY по-прежнему выбирает из этого списка.
+# По умолчанию — только необходимый набор: эталон и ручки, решения по которым ещё нет, и ячейка хранилища
+# разговоров (11-store: включённый кэш не должен ломать запросы и ответы).  FULL=1 гоняет все варианты
+# (ночной обзор).  ONLY по-прежнему выбирает из этого списка.
 if [[ "${FULL:-0}" != "1" ]]; then
-    _essential=$'\n80-eta-iq256off\n53-eta-nographs\n44-readheat\n45-readfill\n47-spin20\n87-reserve256\n54-eta-tailskipall\n39-eta-pb4096\n36-eta-pb2048\n'
+    _essential=$'\n80-eta-iq256off\n53-eta-nographs\n44-readheat\n45-readfill\n47-spin20\n87-reserve256\n54-eta-tailskipall\n39-eta-pb4096\n36-eta-pb2048\n11-store\n'
     keep=()
     for entry in "${VARIANTS[@]}"; do
         name="${entry%%|*}"
@@ -508,6 +528,13 @@ MANAGED = ("STRATA_POLY_SCORE_CONTEXT", "STRATA_FREEZE_EXPERTS", "STRATA_POLY_ST
 for k in list(env):
     if k in MANAGED or k.startswith("STRATA_EAGLE_"):
         del env[k]
+# The conversation store is the sweep's own switch: a prod config's store dir must not write files under every
+# cell (and the idle saver would race the suite).  A cell that wants it names it itself:
+#   CFG:conversation_store=/path CFG:conversation_store_idle_s=-1 CFG:conversation_store_max_mib=4096
+STORE_KEYS = ("conversation_store", "conversation_store_slots", "conversation_store_max_mib",
+              "conversation_store_idle_s")
+for key in STORE_KEYS:
+    cfg.pop(key, None)
 toks = spec.split()
 bad = []
 explicit = set()   # the env keys this cell names itself (ENV:NAME=... or ENV:NAME=), so a default cannot undo it
@@ -535,6 +562,17 @@ while i < len(toks):
             del args[idx:(idx + 2 if has_val else idx + 1)]
         if name in args:
             bad.append(k)
+        i += 1
+        continue
+    if k.startswith("CFG:"):                 # CFG:key=value sets a top-level config key (a number/bool/JSON if it
+        key, _, value = k[4:].partition("=")  # parses, else the text); CFG:key= removes it
+        if value:
+            try:
+                cfg[key] = json.loads(value)
+            except ValueError:
+                cfg[key] = value
+        else:
+            cfg.pop(key, None)
         i += 1
         continue
     v = (toks[i + 1] if i + 1 < len(toks) else "")
@@ -837,6 +875,48 @@ PY
   return $verdict
 }
 
+# ------------------------- проверка хранилища разговоров ---------------------
+# conversation_store (серверный ключ): два чата, возврат в первый (RESTORE вместо чтения), сохранение по
+# простою и при остановке сервера.  Ставится своим конфигом, как warm_check; конфиг восстанавливается.
+store_check() {
+  local spec="$WORKING_SPEC CFG:conversation_store=$OUT_DIR/store-check CFG:conversation_store_idle_s=3 CFG:conversation_store_slots=5 CFG:conversation_store_max_mib=2048"
+  local rc=0 saves_before=0 saves_after=0
+  log "  store-check: конфиг с хранилищем ($OUT_DIR/store-check), рестарт ..."
+  rm -rf "$OUT_DIR/store-check"
+  if ! apply_variant "$spec"; then
+    log "  !!! store-check: спека не применилась"
+    restore_config
+    return 1
+  fi
+  stop_server
+  start_server
+  if ! wait_ready; then
+    log "  !!! store-check: сервер не поднялся с хранилищем (лог: $OUT_DIR/server.log.last)"
+    restore_config
+    return 1
+  fi
+  if python3 "$STRATA_DIR/tools/session_store_check.py" --base "$BASE_URL" --key "$API_KEY"         --model "$MODEL" --store "$OUT_DIR/store-check" --log "$OUT_DIR/server.log.last" --idle 3; then
+    log "  store-check: сценарий PASS"
+  else
+    log "  !!! store-check: сценарий FAIL (см. вывод выше)"
+    rc=1
+  fi
+  # Сохранение при остановке сервера: сценарий оставил последний ход новее файла, значит сейв при
+  # выходе обязан дать ещё одну строку "-> conv-" в логе.  stop_server шлёт SIGTERM — это и есть путь выхода.
+  saves_before=$(grep -c "conversation store:.*-> conv-" "$OUT_DIR/server.log.last" 2>/dev/null || true)
+  stop_server
+  saves_after=$(grep -c "conversation store:.*-> conv-" "$OUT_DIR/server.log.last" 2>/dev/null || true)
+  if (( ${saves_after:-0} > ${saves_before:-0} )); then
+    log "  store-check: сохранение при остановке сервера — есть (+$(( saves_after - saves_before )) строк)"
+    log "  последняя: $(grep "conversation store:.*-> conv-" "$OUT_DIR/server.log.last" | tail -1)"
+  else
+    log "  !!! store-check: при остановке сервера чат не сохранён (строк '-> conv-' не прибавилось)"
+    rc=1
+  fi
+  restore_config
+  return $rc
+}
+
 # ------------------------- главный цикл -------------------------------------
 restore_config() { cp "$BACKUP" "$CONFIG"; }
 on_interrupt() {
@@ -860,6 +940,8 @@ cp "$CONFIG" "$PRISTINE" || die "не смог снять чистый сним�
 export PRISTINE
 log "бэкап конфига: $BACKUP"
 [[ "$FORCE" == "1" ]] && rm -f "$OUT_DIR"/*.json
+# каталоги хранилища — свои у каждого прогона: чаты прошлого прогона подставились бы вместо чтения
+rm -rf "$OUT_DIR"/store "$OUT_DIR"/store-idle "$OUT_DIR"/store-check
 failed=()
 
 warm_check_rc=0
@@ -938,6 +1020,18 @@ for entry in "${VARIANTS[@]}"; do
     failed+=("$name")
   fi
 done
+
+# ------------------------- проверка хранилища разговоров --------------------
+if [[ "$STORE_CHECK" == "1" ]]; then
+  log ""
+  log "=== проверка дискового кэша разговоров (conversation_store) ==="
+  if store_check; then
+    log "store-check: ПРОЙДЕНА"
+  else
+    failed+=("store-check")
+    log "store-check: ПРОВАЛ (свип продолжается, конфиг восстановлен)"
+  fi
+fi
 
 # ------------------------- финал: конфиг назад, сервер вверх, сводка --------
 log ""

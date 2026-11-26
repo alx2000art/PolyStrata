@@ -126,6 +126,11 @@ class Store(unittest.TestCase):
         self.assertIsNone(s.save_live(e))                 # nothing new since: no write
         s.touch(5000 + MIN_GROW)                          # it grew by the floor since the file
         self.assertIsNotNone(s.save_live(e))
+        # at exit any growth is enough: the last state must land, but an already current file is not rewritten
+        s.touch(5000)                                     # the file the fake wrote says 5000 tokens
+        self.assertIsNone(s.save_live(e, 0))
+        s.touch(5001)
+        self.assertIsNotNone(s.save_live(e, 0))
 
     def test_one_file_bigger_than_the_budget_stays(self):
         d = tempfile.mkdtemp()

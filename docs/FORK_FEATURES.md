@@ -72,7 +72,10 @@ in order; the later ones depend on the earlier ones.
    (`checkpoints=POS,POS,...`, read from its template's turn markers), beside the one before the prompt's last
    token: `--prompt-cache N` (default 6) keeps the last N of them, and `--prompt-cache-every N` (default 0)
    adds a token-interval rule on top. `tools/session_roundtrip.py` walks the whole path over HTTP: save,
-   restart the engine, restore, and compare the answer with a live control.
+   restart the engine, restore, and compare the answer with a live control; `tools/session_store_check.py`
+   does the store's own: two chats, a return (a restore instead of a read), an idle save and the save at
+   exit. `bench_sweep.sh` runs both: cells `11-store` (in the default set) and `12-store-idle` keep the
+   store on through a whole suite, and its `STORE_CHECK` phase runs the HTTP scenario at the end.
 
 ## The base layer
 
