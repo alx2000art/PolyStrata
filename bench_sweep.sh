@@ -84,6 +84,23 @@ if [[ "$NIGHT" == "1" && -z "$ONLY" ]]; then
   # Полные имена, а не номера: ONLY совпадает подстрокой, и "50" поймало бы 50-on-stage2-512,
   # "10" — 57-on-share100, "12" — 73-on-stage128 и т.д.
   ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,15-all-off-m,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,94-graphs,99-all-off-c"
+  # Прод не фризит кэш экспертов: ночной набор меряет прод-подобную скорость (без фриза decode ~+18%).
+  # Повторы тогда дрейфуют по раскладке кэша, поэтому детерминизм в этом режиме не проверяется
+  # (см. SWEEP_DET_SKIP в цикле); decode в сводке и так берётся максимумом по повторам.
+  SWEEP_FREEZE="${SWEEP_FREEZE:-0}"
+  export SWEEP_FREEZE
+fi
+# Отладочные ключи движка, экспортированные в оболочке (STAGE2_DEBUG и т.п.), протекают в сервер и
+# движок всех ячеек: они стоят синки и печатают мусор в лог, к тому же сравнивают «включённый дебаг» с
+# самим собой.  Свип их снимает у себя; ячейка, которой ключ нужен, задаёт его через ENV: в спеке.
+# SWEEP_STRIP_DEBUG=0 оставляет как есть.
+SWEEP_STRIP_DEBUG="${SWEEP_STRIP_DEBUG:-1}"
+if [[ "$SWEEP_STRIP_DEBUG" == "1" ]]; then
+  unset STRATA_POLY_STAGE2_DEBUG STRATA_POLY_SAMPLE_DEBUG STRATA_POLY_GRAPH_STATS STRATA_EAGLE_DEBUG \
+        STRATA_REQUEST_LINES STRATA_POLY_LOOP_WATCH STRATA_POLY_MMQ_DEBUG STRATA_POLY_MMQ_TYPES \
+        STRATA_POLY_ROUTE_DUMP STRATA_POLY_TOPK_STATS STRATA_POLY_POOL_SELFTEST STRATA_FATTN STRATA_FDEC \
+        STRATA_NO_MMVQ_ROWS2 STRATA_POLY_SCORE_CONTEXT STRATA_POLY_SCORE_MIB STRATA_LOGP_DEBUG \
+        STRATA_FREEZE_EXPERTS
 fi
 WARM_CHECK="${WARM_CHECK:-1}"       # префлайт: файл-режим warm_start — пин читается на старте, запрос с
                                     # совпадающим префиксом переиспользует его (reused >= 2048). 0 = пропустить;
@@ -1002,6 +1019,9 @@ for entry in "${VARIANTS[@]}"; do
   # A cell that removes STRATA_FREEZE_EXPERTS drifts between repeats by design (the cache's placement moves
   # while the answer is written): run_capture then records it as "not checked" instead of failing the cell.
   if [[ "$spec" == *"ENV:STRATA_FREEZE_EXPERTS="* ]]; then export SWEEP_DET_SKIP=1; else unset SWEEP_DET_SKIP; fi
+  # SWEEP_FREEZE=0 (ночной набор, прод-подобная скорость): повторы дрейфуют по раскладке кэша у всех
+  # ячеек - детерминизм не проверяется, дельта считается (decode и так берётся максимумом по повторам).
+  if [[ "${SWEEP_FREEZE:-1}" == "0" ]]; then export SWEEP_DET_SKIP=1; fi
   if variant_done "$name" && [[ "$FORCE" != "1" ]]; then
     log "  уже есть $OUT_DIR/$name.json — пропускаю (FORCE=1, чтобы переделать)"
     continue
