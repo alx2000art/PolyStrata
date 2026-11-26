@@ -895,7 +895,9 @@ store_check() {
     restore_config
     return 1
   fi
-  if python3 "$STRATA_DIR/tools/session_store_check.py" --base "$BASE_URL" --key "$API_KEY"         --model "$MODEL" --store "$OUT_DIR/store-check" --log "$OUT_DIR/server.log.last" --idle 3; then
+  if python3 "$STRATA_DIR/tools/session_store_check.py" \
+        --base "$BASE_URL" --key "$API_KEY" --model "$MODEL" \
+        --store "$OUT_DIR/store-check" --log "$OUT_DIR/server.log.last" --idle 3 --restart; then
     log "  store-check: сценарий PASS"
   else
     log "  !!! store-check: сценарий FAIL (см. вывод выше)"

@@ -100,6 +100,9 @@ def main():
     ap.add_argument("--store", required=True, help="каталог conversation_store (его файлы проверяются)")
     ap.add_argument("--log", required=True, help="лог сервера (строки conversation store)")
     ap.add_argument("--idle", type=float, default=3.0, help="conversation_store_idle_s этого прогона")
+    ap.add_argument("--restart", action="store_true",
+                    help="между сохранением A и возвратом в него выгрузить и снова загрузить движок "
+                         "(/unload + /load): путь после рестарта сервера или выгрузки модели")
     a = ap.parse_args()
     cli = Client(a.base, a.key, a.model)
     fails = []
@@ -135,6 +138,20 @@ def main():
         print(f"2) B: A сохранён — {m.group(1)} токенов, {m.group(2)} MiB, {m.group(3)}, {m.group(4)} с", flush=True)
     else:
         fails.append("смена чата A->B не сохранила A (нет строки '-> conv-' в логе)")
+
+    # 2b) перезапуск движка: файлы A и B переживают процесс, и RESTORE проверяет их с нуля
+    if a.restart:
+        print("2b) /unload + /load: проверяю файлы на свежем процессе движка ...", flush=True)
+        st, doc = cli._do("POST", "/unload?wait=1", {}, timeout=600)
+        if st != 200:
+            fails.append(f"/unload отказал ({st}): {str(doc)[:200]}")
+        else:
+            t0 = time.time()
+            st, doc = cli._do("POST", "/load", {}, timeout=1800)
+            if st != 200:
+                fails.append(f"/load отказал ({st}): {str(doc)[:200]}")
+            else:
+                print(f"    движок загружен заново за {time.time() - t0:.0f} с", flush=True)
 
     # 3) назад в A: RESTORE и продолжение
     msgs_a2 = msgs_a + [{"role": "assistant", "content": a1},
