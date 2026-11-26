@@ -83,7 +83,7 @@ if [[ "$NIGHT" == "1" && -z "$ONLY" ]]; then
   FULL=1
   # Полные имена, а не номера: ONLY совпадает подстрокой, и "50" поймало бы 50-on-stage2-512,
   # "10" — 57-on-share100, "12" — 73-on-stage128 и т.д.
-  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,94-graphs,99-all-off-c"
+  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,90-idx-mma2,94-graphs,99-all-off-c"
   # Прод не фризит кэш экспертов: ночной набор меряет прод-подобную скорость (без фриза decode ~+18%).
   # Повторы тогда дрейфуют по раскладке кэша, поэтому детерминизм в этом режиме не проверяется
   # (см. SWEEP_DET_SKIP в цикле); decode в сводке и так берётся максимумом по повторам.
