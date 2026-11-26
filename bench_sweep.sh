@@ -863,9 +863,25 @@ r = json.load(urllib.request.urlopen(req, timeout=600))
 print("ok" if r.get("choices") else "no-answer")
 PY
 )
-  sleep 2   # строка «... tokens = N reused» печатается сервером после ответа
-  reuse_count=$(grep -oE "prompt [0-9]+ tokens = [0-9]+ reused" "$OUT_DIR/server.log.last" | tail -1 \
-                | grep -oE "[0-9]+ reused" | grep -oE "^[0-9]+")
+  sleep 2
+  # Сколько токенов запрос переиспользовал.  Строку «prompt N tokens = M reused + K read in ...» печатает
+  # только ядро (strata --serve); strata-poly её не печатает вовсе, поэтому берём счётчик из /metrics
+  # (requests[0].reused — то же число, что сервер выводит в карточке кэша).  Лог остаётся как резерв.
+  reuse_count=$(python3 - "$BASE_URL" "$API_KEY" <<'PY'
+import json, sys, urllib.request
+base, key = sys.argv[1].rstrip("/"), sys.argv[2]
+if base.endswith("/v1"):
+    base = base[:-3]
+req = urllib.request.Request(base + "/metrics", headers={"Authorization": "Bearer " + key})
+try:
+    doc = json.load(urllib.request.urlopen(req, timeout=60))
+except Exception:
+    print(0)
+    raise SystemExit
+reqs = doc.get("requests") or []
+print(int((reqs[0] or {}).get("reused") or 0) if reqs else 0)
+PY
+)
   reuse_count=${reuse_count:-0}
   local srv_line
   srv_line=$(grep -oE "prompt [0-9]+ tokens = [0-9]+ reused.*" "$OUT_DIR/server.log.last" | tail -1)
@@ -874,7 +890,7 @@ PY
   else
     verdict=1
     log "  !!! warm-check: ПРОВАЛ (прочитано: $okboot, ответ: $reused, reused: $reuse_count) — лог: $OUT_DIR/server.log.last"
-    log "      сервер сказал: ${srv_line:-<строки reused нет>}"
+    log "      сервер сказал: ${srv_line:-<строки reused нет: у poly её не бывает, счётчик выше — из /metrics>}"
   fi
   rm -f "$pin"
   log "  warm-check: восстанавливаю конфиг и сервер ..."
