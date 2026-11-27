@@ -4733,6 +4733,19 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         ~BellOff() { on = false; }
     } bell_off{bell_};
     const bool card = n < kStageRows && card_moe(n);
+    // The bell's own trace: the first step's verdict on why the bell is off (the env asked for it, the
+    // allocation is there, and still the layers go through moe()).
+    int bell_rang = 0;
+    if (h_bell_ && !bell_) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            std::fprintf(stderr,
+                         "strata-poly: [bell] the bell is off this step (n %d, all_cached %d, dump %d, "
+                         "tail_skip_all %d)\n",
+                         n, (int) all_cached(), (int) opt_.dump, (int) opt_.tail_skip_all);
+        }
+    }
     // an architecture that takes the rows in one head: their sequences and positions while it does
     std::vector<Row> rows;
     if (batch_heads())
@@ -4788,17 +4801,27 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
             if (!capped && card && L.card == 1 && replay && graph_part('c')) {
                 replayed(L.card_moe, rec + (bell_ ? recs : 0), [&] { moe_card(L, il, n); });
                 stats_.gpu_experts += n * n_used_;
-                if (bell_) bell_serve();
+                if (bell_) { bell_serve(); ++bell_rang; }
             } else if (!capped && card && moe_card(L, il, n)) {
                 stats_.gpu_experts += n * n_used_;
-                if (bell_) bell_serve();   // what this thread does next (a recording, a moe() that waits for
-                                           // the router) may wait for the card
+                if (bell_) {   // what this thread does next (a recording, a moe() that waits for
+                    ++bell_rang;   // the router) may wait for the card
+                    bell_serve();
+                }
             } else if (moe(L, il, n)) {
                 moe_add(n);
             }
         }
         if (replay && L.fixed && graph_part('t')) replayed(L.tail, rec, [&] { layer_tail(L, il, n); });
         else layer_tail(L, il, n);
+    }
+    if (h_bell_ && n == 1) {   // the bell's per-token trace: how many layers rang, how many went to moe()
+        static int said = 0;
+        if (said < 3) {
+            ++said;
+            std::fprintf(stderr, "strata-poly: [bell] step: bell_ %d, card %d, layers rang %d of %d MoE\n",
+                         (int) bell_, (int) card, bell_rang, n_moe_);
+        }
     }
 
     if (next_) {
