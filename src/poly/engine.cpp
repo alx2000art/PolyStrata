@@ -2748,8 +2748,8 @@ void Engine::alloc() {
                 cudaEvent_t ev = nullptr;
                 ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
                 ev_bell_ = ev;
-                std::fprintf(stderr, "strata-poly: the doorbell is on: a token's misses ring the host's workers
-");
+                std::fprintf(stderr,
+                             "strata-poly: the doorbell is on: a token's misses ring the host's workers\n");
             }
         }
         tab_ = (int32_t*) dmalloc(tab, "scratch");
