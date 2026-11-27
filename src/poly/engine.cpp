@@ -2920,6 +2920,15 @@ std::vector<uint8_t*> Engine::stage_marks(const Mark* marks, int n_marks) {
         ++with_state;
         if (k < h_marks_.size()) staged[(size_t) m] = h_marks_[k++];
     }
+    if (k) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            std::fprintf(stderr, "strata-poly: a read's checkpoints stage through pinned buffers (%.0f MiB each; "
+                                 "%zu of %zu this read)\n",
+                         (double) bytes / (1 << 20), k, with_state);
+        }
+    }
     marks_wanted_ = std::max(marks_wanted_, with_state);
     return staged;
 }
