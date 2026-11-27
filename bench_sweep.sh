@@ -83,7 +83,7 @@ if [[ "$NIGHT" == "1" && -z "$ONLY" ]]; then
   FULL=1
   # Полные имена, а не номера: ONLY совпадает подстрокой, и "50" поймало бы 50-on-stage2-512,
   # "10" — 57-on-share100, "12" — 73-on-stage128 и т.д.
-  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,14-no-x4,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,90-idx-mma2,94-graphs,99-all-off-c"
+  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,13-cache-pin,14-no-x4,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,90-idx-mma2,94-graphs,99-all-off-c"
   # Прод не фризит кэш экспертов: ночной набор меряет прод-подобную скорость (без фриза decode ~+18%).
   # Повторы тогда дрейфуют по раскладке кэша, поэтому детерминизм в этом режиме не проверяется
   # (см. SWEEP_DET_SKIP в цикле); decode в сводке и так берётся максимумом по повторам.
@@ -195,6 +195,11 @@ VARIANTS+=("12-store-idle|$WORKING_SPEC CFG:conversation_store=$OUT_DIR/store-id
 # первый вызов сверяет биты с vec_dot на реальных строках и при расхождении сам откатывается
 # (в логе строка "the four-row kernel for expert type N").  Ячейка гасит их для A/B с 10-all-on.
 VARIANTS+=("14-no-x4|$WORKING_SPEC ENV:STRATA_POLY_X4=0")
+# --- стейджинг чекпоинтов через pinned-буферы (порт #298): эффект виден только при живом
+# --prompt-cache (чекпоинты = отметки turn-opener'ов).  Ячейка называет ключ сама, и force
+# уступает ей.  Сравнение с 10-all-on по префиллу повтора 0 (холодное чтение с чекпоинтами
+# и стейджингом в обоих; повторы 1+ этой ячейки попадают в чекпоинты и отсеиваются гардом).
+VARIANTS+=("13-cache-pin|$WORKING_SPEC --prompt-cache 6")
 # Драфтер и расширенный вокаб: 10-all-on уже несёт драфтер (он в args конфига);
 # 16 снимает его для прямого A/B скорости с/без; 17 — сайдкар расширенного
 # вокаба (--vocab-ext), 18 — явный путь драфтера (если конфиг без него).
@@ -645,8 +650,12 @@ while i < len(toks):
 # платит больше - при включённом lookup часть раундов уходит n-граммам, и приём
 # драфтера в ячейке получается смешанным.  Для свипа гасим его во всех вариантах;
 # продовое значение вернёт финальный restore_config.  Вернуть: SWEEP_LOOKUP=3
-force = {"--prompt-cache": os.environ.get("SWEEP_PROMPT_CACHE", "0"),
-         "--lookup": os.environ.get("SWEEP_LOOKUP", "0")}
+force = {"--lookup": os.environ.get("SWEEP_LOOKUP", "0")}
+# Ячейка, которая сама назвала --prompt-cache, оставляет его себе (правило STRATA_FREEZE_EXPERTS):
+# 13-cache-pin меряет стейджинг чекпоинтов через pinned-буферы — без живого --prompt-cache чекпоинтов
+# не бывает, и стейджинг в ячейках не включается вовсе.  Остальным гасим как раньше.
+if "--prompt-cache" not in toks:
+    force["--prompt-cache"] = os.environ.get("SWEEP_PROMPT_CACHE", "0")
 for k, v in force.items():
     idx = args.index(k) if k in args else -1
     if idx >= 0 and idx + 1 < len(args):
@@ -868,6 +877,17 @@ with open(sys.argv[1] + ".tmp", "w", encoding="utf-8") as f:
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
 PY
   log "  warm-check: конфиг warm_start -> $pin; рестарт ..."
+  # --- гейт доработок 2026-11-27, часть 1: сколько строк-маркеров уже есть в движковом логе
+  # (лог persists между запусками, так что мерится ДЕЛЬТА за warm-check, не само наличие)
+  local engine_log x4_before differs_before staged_before
+  engine_log=$(python3 - "$CONFIG" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("log") or "")
+PY
+)
+  x4_before=$(grep -c "the four-row kernel for expert type" "$engine_log" 2>/dev/null || true)
+  differs_before=$(grep -c "DIFFERS, the one-row dots stay" "$engine_log" 2>/dev/null || true)
+  staged_before=$(grep -c "checkpoints stage through pinned buffers" "$engine_log" 2>/dev/null || true)
   stop_server
   start_server
   if ! wait_ready; then
@@ -926,6 +946,36 @@ PY
     verdict=1
     log "  !!! warm-check: ПРОВАЛ (прочитано: $okboot, ответ: $reused, reused: $reuse_count) — лог: $OUT_DIR/server.log.last"
     log "      сервер сказал: ${srv_line:-<строки reused нет: у poly её не бывает, счётчик выше — из /metrics>}"
+  fi
+  # --- гейт доработок 2026-11-27, часть 2: дельта строк-маркеров за warm-check.
+  # Четырёхстрочные ядра (dot_x4) обязаны отметиться оба типа (17 = IQ2_XS, 6 = Q5_0) на первом чтении:
+  # если строк нет — бинарник без доработки, и 10-vs-14 меряет одно и то же (как это случилось при
+  # запуске 11-27, когда доработки не доехали).  DIFFERS = движок сам откатил ядра по битам: ответы
+  # корректны, но A/B ничего не меряет.  Стейджинг чекпоинтов виден на первом длинном промпте с
+  # чекпоинтом — warm-пин им и является (--prompt-cache в базе живой, force гасит его только в ячейках).
+  if [[ -n "$engine_log" && -f "$engine_log" ]]; then
+    local x4_after differs_after staged_after x4_new differs_new staged_new
+    x4_after=$(grep -c "the four-row kernel for expert type" "$engine_log" 2>/dev/null || true)
+    differs_after=$(grep -c "DIFFERS, the one-row dots stay" "$engine_log" 2>/dev/null || true)
+    staged_after=$(grep -c "checkpoints stage through pinned buffers" "$engine_log" 2>/dev/null || true)
+    x4_new=$(( ${x4_after:-0} - ${x4_before:-0} ))
+    differs_new=$(( ${differs_after:-0} - ${differs_before:-0} ))
+    staged_new=$(( ${staged_after:-0} - ${staged_before:-0} ))
+    if (( x4_new >= 2 && differs_new == 0 )); then
+      log "  warm-check: dot_x4 включён — оба типа (17 IQ2_XS, 6 Q5_0), биты сошлись с ggml-cpu"
+    elif (( differs_new > 0 )); then
+      log "  (!) warm-check: четырёхстрочные ядра ОТКЛОНЕНЫ по битам движком ($differs_new шт) — ответы корректны, но A/B 10-vs-14 ничего не меряет"
+    else
+      verdict=1
+      log "  !!! warm-check: строк четырёхстрочных ядер нет ($x4_new за прогон) — бинарник без dot_x4, ячейки 10/14 одно и то же"
+    fi
+    if (( staged_new > 0 )); then
+      log "  warm-check: staging чекпоинтов через pinned-буферы включён"
+    else
+      log "  (!) warm-check: staging чекпоинтов не увиден (нужен --prompt-cache в базе и чтение с чекпоинтом; в ячейках свипа prompt-cache=0 — там его и не должно быть)"
+    fi
+  else
+    log "  (!) warm-check: в конфиге нет ключа log — гейт доработок пропущен (смотреть строки four-row/staging руками)"
   fi
   rm -f "$pin"
   log "  warm-check: восстанавливаю конфиг и сервер ..."
