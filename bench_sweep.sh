@@ -885,7 +885,8 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("log") or "")
 PY
 )
-  x4_before=$(grep -c "the four-row kernel for expert type" "$engine_log" 2>/dev/null || true)
+  x4_before=$(grep -c "the four-row kernel for expert type 17" "$engine_log" 2>/dev/null || true)
+  x4_6_before=$(grep -c "the four-row kernel for expert type 6" "$engine_log" 2>/dev/null || true)
   differs_before=$(grep -c "DIFFERS, the one-row dots stay" "$engine_log" 2>/dev/null || true)
   staged_before=$(grep -c "checkpoints stage through pinned buffers" "$engine_log" 2>/dev/null || true)
   stop_server
@@ -955,19 +956,26 @@ PY
   # чекпоинтом — warm-пин им и является (--prompt-cache в базе живой, force гасит его только в ячейках).
   if [[ -n "$engine_log" && -f "$engine_log" ]]; then
     local x4_after differs_after staged_after x4_new differs_new staged_new
-    x4_after=$(grep -c "the four-row kernel for expert type" "$engine_log" 2>/dev/null || true)
+    x4_after=$(grep -c "the four-row kernel for expert type 17" "$engine_log" 2>/dev/null || true)
+    x4_6_after=$(grep -c "the four-row kernel for expert type 6" "$engine_log" 2>/dev/null || true)
     differs_after=$(grep -c "DIFFERS, the one-row dots stay" "$engine_log" 2>/dev/null || true)
     staged_after=$(grep -c "checkpoints stage through pinned buffers" "$engine_log" 2>/dev/null || true)
     x4_new=$(( ${x4_after:-0} - ${x4_before:-0} ))
+    x4_6_new=$(( ${x4_6_after:-0} - ${x4_6_before:-0} ))
     differs_new=$(( ${differs_after:-0} - ${differs_before:-0} ))
     staged_new=$(( ${staged_after:-0} - ${staged_before:-0} ))
-    if (( x4_new >= 2 && differs_new == 0 )); then
-      log "  warm-check: dot_x4 включён — оба типа (17 IQ2_XS, 6 Q5_0), биты сошлись с ggml-cpu"
+    # Обязательна только строка типа 17 (IQ2_XS, 41 из 43 слоёв - она появляется на первом же чтении);
+    # тип 6 (Q5_0, down-проекции двух слоёв) виден, когда маршрутизация отдаст CPU эксперта именно тех
+    # слоёв - на коротком warm-пине его может не быть, и это не фейл.
+    if (( x4_new >= 1 && differs_new == 0 )); then
+      local x4_6_note="ещё не задействован (норма)"
+      (( x4_6_new > 0 )) && x4_6_note="тоже включён"
+      log "  warm-check: dot_x4 включён - тип 17 (IQ2_XS) сошёлся с ggml-cpu по битам; тип 6 (Q5_0): $x4_6_note"
     elif (( differs_new > 0 )); then
-      log "  (!) warm-check: четырёхстрочные ядра ОТКЛОНЕНЫ по битам движком ($differs_new шт) — ответы корректны, но A/B 10-vs-14 ничего не меряет"
+      log "  (!) warm-check: четырёхстрочные ядра ОТКЛОНЕНЫ по битам движком ($differs_new шт) - ответы корректны, но A/B 10-vs-14 ничего не меряет"
     else
       verdict=1
-      log "  !!! warm-check: строк четырёхстрочных ядер нет ($x4_new за прогон) — бинарник без dot_x4, ячейки 10/14 одно и то же"
+      log "  !!! warm-check: строки четырёхстрочных ядер (тип 17) нет ($x4_new за прогон) - бинарник без dot_x4, ячейки 10/14 одно и то же"
     fi
     if (( staged_new > 0 )); then
       log "  warm-check: staging чекпоинтов через pinned-буферы включён"
