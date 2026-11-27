@@ -83,7 +83,7 @@ if [[ "$NIGHT" == "1" && -z "$ONLY" ]]; then
   FULL=1
   # Полные имена, а не номера: ONLY совпадает подстрокой, и "50" поймало бы 50-on-stage2-512,
   # "10" — 57-on-share100, "12" — 73-on-stage128 и т.д.
-  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,90-idx-mma2,94-graphs,99-all-off-c"
+  ONLY="00-all-off,01-all-off-b,10-all-on,11-store,12-store-idle,14-no-x4,15-all-off-m,37-on-lossless,36-eta-pb2048,38-eta-pb4096-read,39-eta-pb4096,44-readheat,45-readfill,46-pcie35,47-spin20,49-pooleveloff,50-reserve320,53-eta-nographs,54-eta-tailskipall,67-eta-threads20,68-eta-ram0,69-eta-graphs,80-eta-iq256off,87-reserve256,90-idx-mma2,94-graphs,99-all-off-c"
   # Прод не фризит кэш экспертов: ночной набор меряет прод-подобную скорость (без фриза decode ~+18%).
   # Повторы тогда дрейфуют по раскладке кэша, поэтому детерминизм в этом режиме не проверяется
   # (см. SWEEP_DET_SKIP в цикле); decode в сводке и так берётся максимумом по повторам.
@@ -190,6 +190,11 @@ VARIANTS+=("10-all-on|$WORKING_SPEC")       # рабочий конфиг 2026-1
 # чистятся на старте свипа (иначе прошлый прогон подставил бы свои чаты вместо чтения).
 VARIANTS+=("11-store|$WORKING_SPEC CFG:conversation_store=$OUT_DIR/store CFG:conversation_store_idle_s=-1 CFG:conversation_store_max_mib=4096")
 VARIANTS+=("12-store-idle|$WORKING_SPEC CFG:conversation_store=$OUT_DIR/store-idle CFG:conversation_store_idle_s=2 CFG:conversation_store_max_mib=4096")
+# --- четырёхстрочные ядра CPU-экспертов (порт #298-серии апстрима, dot_x4): декод загружает активацию
+# один раз на 4 весовых строки (Q8_K — байт на значение, IQ2_XS — 2.3 бита).  Включены по умолчанию,
+# первый вызов сверяет биты с vec_dot на реальных строках и при расхождении сам откатывается
+# (в логе строка "the four-row kernel for expert type N").  Ячейка гасит их для A/B с 10-all-on.
+VARIANTS+=("14-no-x4|$WORKING_SPEC ENV:STRATA_POLY_X4=0")
 # Драфтер и расширенный вокаб: 10-all-on уже несёт драфтер (он в args конфига);
 # 16 снимает его для прямого A/B скорости с/без; 17 — сайдкар расширенного
 # вокаба (--vocab-ext), 18 — явный путь драфтера (если конфиг без него).

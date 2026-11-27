@@ -127,6 +127,7 @@ fork extends to DeepSeek V4 (it was qwen35moe-only before).
 | `STRATA_POLY_SCORE_CONTEXT=<N>` | the indexer's score stride covers N/4+1 entries instead of max_context/4+1. A 26k-token prompt needs stride 6501, not 33193 — the score tensor's HBM traffic drops proportionally. Set to the expected prompt's token count | max_context |
 | `STRATA_POLY_SCORE_MIB=<N>` | the indexer's score buffer budget in MiB: a bigger budget fits more tokens per launch, fewer launches, a steadier read | 128 |
 | `STRATA_POLY_STAGE2_DEBUG=1` | prints each staging round's copy time, each layer's route/card/copies split, and each prompt batch's attention phase (`[att] il=.. qkv .., squeeze .., idx .., score+sel .., attend .. ms` - the GPU time of the q/kv half, the compressor, the indexer's preparation, the indexer's score+select, and the attend's own; CUDA events, prompt batches only) to stderr | off |
+| `STRATA_POLY_X4=0` | keeps the CPU experts' four-row dot kernels off: the one-row vec_dots as before (the A/B for the four-row lane; the kernels are bit-exact to ggml-cpu's dots and checked against them on the first rows they see, so off is only for measuring) | on |
 
 The staging reads by position (pread) instead of memcpy through the mapping: a steady channel the
 page cache's state does not bend. The mapper's whole-file warmer stays off when the staging's
@@ -141,6 +142,29 @@ stream. Single-batch calls keep the old one-stream path.
 
 The idx scorer's mma runs at the decode windows' shapes only (n ≤ 16 tokens, +17% decode): the
 prompt batches' 6500-token calls take the scalar dp4a scorer they win with (−8% of the read).
+
+## Two ports from upstream's November series (2026-11-27)
+
+**Pinned buffers for a read's checkpoints' states.** A checkpoint of a read (the prompt cache's, one per
+turn opener with the semantic checkpoints) used to copy its layers' slices behind a full drain of the
+card's stream - a `cudaStreamSynchronize` at every checkpoint of every read, then synchronous per-layer
+copies. Now `stage_marks()` hands each checkpoint one of the pinned buffers made between reads
+(`mark_buffers()`, as many as the busiest read has had checkpoints, sized by `card_state_bytes()`), the
+slices leave through `save_layer_async()` on the stream while the read goes on, and the read's end hands
+each checkpoint its bytes with one sync and a memcpy. A checkpoint without a buffer keeps the old direct
+path. The buffers stay pinned, so they are made between reads, guarded by the RAM free.
+
+**Four-row dot kernels for the CPU experts** (`src/kernels/cpu/dot_x4.cpp`, `dot_x4.hpp`). The decode's
+expert products share their activation row: the one-row vec_dots load it for every weight row, these load
+it once for four (Q8_K is a byte a value where the IQ2_XS weights are 2.3 bits). `dot_x4_kernel(type)`
+has GGML_TYPE_IQ2_XS and GGML_TYPE_Q5_0 - the expert types of the UD-IQ2_XXS file - each value the bits
+ggml-cpu's vec_dot gives for that pair: the integer sums are exact, and the float part keeps ggml's AVX2
+sequence block by block (the maddubs pair sums wrap in int16 exactly as ggml's do - a pair of an IQ2_XS
+grid byte and a q8 value reaches 65280). `dot_x4_parity` compares the kernels bit for bit against a
+verbatim copy of ggml's chains and, where ggml-cpu is linked, against its own vec_dot; `cpu_experts()`
+checks them again on the first real rows they see and falls back to the one-row dots if they ever
+disagree on a machine (the line `the four-row kernel for expert type N` in the engine's log). Sweep cell
+`14-no-x4` is the A/B against `10-all-on`.
 
 ## Verdicts of the live checks (DeepSeek V4 Flash 0731, one RTX 4080 SUPER, November 2026)
 

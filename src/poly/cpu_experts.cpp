@@ -7,6 +7,7 @@
 #include "ggml-cpu.h"
 
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/cpu/dot_x4.hpp"
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/iq_avx512.hpp"
 
@@ -72,6 +73,30 @@ constexpr int kRowsPerDownTask = 16;
 constexpr int kSpinsBeforeSleep = 20000;   // about a millisecond of pause instructions
 
 const ggml_type_traits_cpu* traits(int type) { return ggml_get_type_traits_cpu((ggml_type) type); }
+
+// The four-row expert kernels (dot_x4.hpp): four weight rows load their activation row once, where the one-row
+// vec_dots load it for every row - and the activation is the bigger operand (Q8_K is a byte a value where the
+// IQ2_XS weights are 2.3 bits).  Taken only when they give this machine's ggml-cpu bits: the first task that
+// can compares them on real rows and keeps the type's verdict (STRATA_POLY_X4=0 keeps the kernels off).
+// 0 unchecked, 1 exact, -1 differs, 2 a check in flight.
+std::atomic<int>& x4_verdict(int type) {
+    static std::atomic<int> v[32];
+    return v[type & 31];
+}
+
+// The kernel's four values for the four weight rows at w against the activation a, against the one-row dots'.
+bool x4_exact(int type, const ggml_type_traits_cpu* t, int n, const void* w, size_t row_bytes, const void* a) {
+    const cpu::DotX4Fn k = cpu::dot_x4_kernel(type);
+    if (!k) return false;
+    float o[4];
+    k(n, o, w, row_bytes, a);
+    for (int r = 0; r < 4; ++r) {
+        float s = 0.f;
+        t->vec_dot(n, &s, 0, (const uint8_t*) w + (size_t) r * row_bytes, 0, a, 0, 1);
+        if (std::memcmp(&s, &o[r], 4) != 0) return false;
+    }
+    return true;
+}
 
 void init_once() {
     static std::once_flag once;
@@ -231,6 +256,10 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const size_t a_bytes = ggml_row_size(tg->vec_dot_type, n_embd);
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
     static const Iq256 kIq;
+    static const bool x4_on = [] {
+        const char* v = std::getenv("STRATA_POLY_X4");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
     const bool iq = kIq.use(gu_type, d_type, (int) tg->vec_dot_type, (int) td->vec_dot_type);
 
     // The workers get these through the pointers below: a thread_local named in their code would be their own.
@@ -376,7 +405,42 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 }
                 return;
             }
-            for (int r = tk.r0; r < tk.r1; ++r) {
+            // The four-row kernel of the gate/up type: checked against the one-row dots on the first task that
+            // has four rows and a use, and taken from then on (four weight rows load the activation once).
+            std::atomic<int>& v = x4_verdict(gu_type);
+            const cpu::DotX4Fn kx4 = cpu::dot_x4_kernel(gu_type);
+            int want = v.load(std::memory_order_acquire);
+            if (kx4 && x4_on && want == 0 && tk.r1 - tk.r0 >= 4 && i1 > i0 && v.compare_exchange_strong(want, 2)) {
+                const uint8_t* a0 = actp + (size_t) experts[byp[i0]].row * a_bytes;
+                const bool ok = x4_exact(gu_type, tg, n_embd, e.gate + (size_t) tk.r0 * gu_row, gu_row, a0);
+                v.store(ok ? 1 : -1, std::memory_order_release);
+                std::fprintf(stderr, "strata-poly: the four-row kernel for expert type %d: %s\n", gu_type,
+                             ok ? "the one-row dots' bits" : "DIFFERS, the one-row dots stay");
+            }
+            const bool x4g = kx4 && x4_on && v.load(std::memory_order_acquire) == 1;
+            for (int r = tk.r0; r < tk.r1;) {
+                if (x4g && r + 4 <= tk.r1) {
+                    float g4[4], u4[4];
+                    for (int i = i0; i < i1; ++i) {
+                        const int j = byp[i];
+                        const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
+                        kx4(n_embd, g4, e.gate + (size_t) r * gu_row, gu_row, a);
+                        kx4(n_embd, u4, e.up + (size_t) r * gu_row, gu_row, a);
+                        float* hrow = hp + (size_t) j * n_ff;
+                        for (int q = 0; q < 4; ++q) {
+                            const float gv = g4[q], uv = u4[q];
+                            if (gelu) {
+                                hrow[r + q] =
+                                    0.5f * gv * (1.f + std::tanh(0.7978845608f * gv * (1.f + 0.044715f * gv * gv))) * uv;
+                                continue;
+                            }
+                            const float gc = std::min(gv, limit);
+                            hrow[r + q] = gc / (1.f + std::exp(-gc)) * std::clamp(uv, -limit, limit);
+                        }
+                    }
+                    r += 4;
+                    continue;
+                }
                 const uint8_t* gate = e.gate + (size_t) r * gu_row;
                 const uint8_t* up = e.up + (size_t) r * gu_row;
                 for (int i = i0; i < i1; ++i) {
@@ -394,6 +458,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                     u = std::clamp(u, -limit, limit);
                     hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;
                 }
+                ++r;
             }
         });
     }
@@ -531,7 +596,46 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             }
             return;
         }
-        for (int r = r0; r < r1; ++r) {
+        // The four-row kernel of the down type: checked like the gate/up one, then four output rows a step
+        // (the use's hidden row is loaded once for the four).
+        std::atomic<int>& v = x4_verdict(d_type);
+        const cpu::DotX4Fn kx4d = cpu::dot_x4_kernel(d_type);
+        int want = v.load(std::memory_order_acquire);
+        if (kx4d && x4_on && want == 0 && r1 - r0 >= 4 && v.compare_exchange_strong(want, 2)) {
+            const uint8_t* down0 = experts[byp[runp[0]]].down + (size_t) r0 * d_row;
+            const uint8_t* a0 = hqp + (size_t) byp[runp[0]] * h_bytes;
+            const bool ok = x4_exact(d_type, td, n_ff, down0, d_row, a0);
+            v.store(ok ? 1 : -1, std::memory_order_release);
+            std::fprintf(stderr, "strata-poly: the four-row kernel for expert type %d: %s\n", d_type,
+                         ok ? "the one-row dots' bits" : "DIFFERS, the one-row dots stay");
+        }
+        const bool x4d = kx4d && x4_on && v.load(std::memory_order_acquire) == 1;
+        for (int r = r0; r < r1;) {
+            if (x4d && r + 4 <= r1) {
+                static thread_local std::vector<float> s4v;
+                s4v.resize((size_t) 4 * n);
+                float* s4 = s4v.data();
+                for (int u = 0; u < n_run; ++u) {
+                    const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
+                    for (int i = runp[u]; i < runp[u + 1]; ++i) {
+                        const int j = byp[i];
+                        float o[4];
+                        kx4d(n_ff, o, down, d_row, hqp + (size_t) j * h_bytes);
+                        for (int q = 0; q < 4; ++q) s4[(size_t) q * n + j] = o[q];
+                    }
+                }
+                // a token's sum in the order its experts were given, each of the four rows
+                for (int q = 0; q < 4; ++q) {
+                    int j = 0;
+                    for (int row = 0; row < rows; ++row) {
+                        float acc = 0.f;
+                        for (; j < n && experts[j].row == row; ++j) acc += experts[j].weight * s4[(size_t) q * n + j];
+                        out[(size_t) row * n_embd + r + q] = acc;
+                    }
+                }
+                r += 4;
+                continue;
+            }
             for (int u = 0; u < n_run; ++u) {
                 const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
                 for (int i = runp[u]; i < runp[u + 1]; ++i)
@@ -544,6 +648,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 for (; j < n && experts[j].row == row; ++j) acc += experts[j].weight * s[j];
                 out[(size_t) row * n_embd + r] = acc;
             }
+            ++r;
         }
     });
 }
