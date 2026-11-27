@@ -792,14 +792,15 @@ void DeepSeek4::save_layer_async(int il, int64_t pos, uint8_t* dst) {
 // `async`: the copies go on the card's stream and return at once - the destination is a pinned staging buffer
 // (stage_marks()), and the read keeps issuing launches while the state leaves.  The default stream's order makes
 // the copies land behind the layer's work and ahead of the next turn's, as the checkpoints' own synchronous ones
-// did behind a full drain of the stream.
+// did behind a full drain of the stream.  The zeroing stays a host std::memset in both modes: the destination is
+// HOST memory either way (the checkpoint's own state or the pinned staging), and a cudaMemset on a host pointer
+// answers "invalid argument".
 void DeepSeek4::save_layer_async_impl(int il, int64_t pos, uint8_t* dst, bool async) {
     dst += state_n_ * sizeof(float);
     for (int j = 0; j < il; ++j) dst += layer_extra(blocks_[(size_t) j]);
     const Block& B = blocks_[(size_t) il];
     if (!B.raw && !B.k_codes) return;
-    async ? ck(cudaMemsetAsync(dst, 0, layer_extra(B), cs(st_)), "save state")
-          : ck(cudaMemset(dst, 0, layer_extra(B)), "save state");
+    std::memset(dst, 0, layer_extra(B));
     if (opt_.kv_format == KvFmt::kQ8_0) {
         const size_t crow = (size_t) head_dim_;
         const size_t srow = (size_t) (head_dim_ / 32) * sizeof(uint16_t);
