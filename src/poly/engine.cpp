@@ -3420,8 +3420,7 @@ bool Engine::card_moe(int n) {
                 said = true;
                 std::fprintf(stderr,
                              "strata-poly: the doorbell: card_moe declined (all_cached %d, d_slots_ %p, rows %d of "
-                             "kSumRows %d, dump %d)
-",
+                             "kSumRows %d, dump %d)\n",
                              (int) all_cached(), (void*) d_slots_, n * n_used_, kSumRows, (int) opt_.dump);
             }
         }
@@ -3464,10 +3463,9 @@ bool Engine::moe_card(Layer& L, int il, int n) {
                 said = true;
                 std::fprintf(stderr,
                              "strata-poly: the doorbell: route_card refused at layer %d (route_used_ %d of n_used_ "
-                             "%d, by_token %d, gu %d d %d supported %d/%d)
-",
-                             il, route_used_, n_used_, (int) !blocks_[(size_t) il].by_token.empty(), (int) L.gu_type,
-                             (int) L.d_type, (int) kernels::native_mmvq_ids_supported((int) L.gu_type),
+                             "%d, gu %d d %d supported %d/%d)\n",
+                             il, route_used_, n_used_, (int) L.gu_type, (int) L.d_type,
+                             (int) kernels::native_mmvq_ids_supported((int) L.gu_type),
                              (int) kernels::native_mmvq_ids_supported((int) L.d_type));
             }
         }
