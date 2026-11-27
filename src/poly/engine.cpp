@@ -3477,9 +3477,9 @@ bool Engine::moe_card(Layer& L, int il, int n) {
     L.card = 1;
     const int rr = n * n_used_;
     const void* const* table = d_slots_ + (size_t) il * n_expert_;
-    const bool rings = bell_ && n == 1;
-    if (rings) {   // the doorbell: the misses to the host, a token's place under --tail-skip's
-        // The routing: a hash layer's ids come from the file's by-token table (the token is on the host: no
+    const bool rings = bell_;
+    if (rings) {   // the doorbell: the call's misses to the host, a pick's place under --tail-skip's
+        // The routing: a hash layer's ids come from the file's by-token tables (the tokens are on the host: no
         // router wait, the weights are gathered on the card), the others route on the card from the scores.
         if (!route_token_card(il, tok_ ? tok_[0] : -1, h_ids_pick_, d_ids_, d_wts_, st_) &&
             !route_card(il, n, d_ids_, d_wts_)) {
@@ -3489,7 +3489,7 @@ bool Engine::moe_card(Layer& L, int il, int n) {
         }
         count_picks(d_ids_, rr, n_expert_, d_use_ + (size_t) il * n_expert_, st_);
         bell_ring(table, d_ids_, d_wts_, n_used_, opt_.tail_skip > 0 ? opt_.tail_skip : n_used_, il, xn_, h_x_,
-                  n_embd_, h_bell_, d_bell_seq_, st_);
+                  n_embd_ * n, h_bell_, d_bell_seq_, st_);
         table = d_zslots_ + (size_t) il * n_expert_;
     } else if (!route_card(il, n, d_ids_, d_wts_)) {   // the non-bell path routes as it did
         refused("route_card");
@@ -3511,7 +3511,7 @@ bool Engine::moe_card(Layer& L, int il, int n) {
 }
 
 bool Engine::bell_on(int n) const {
-    return n == 1 && h_bell_ && !all_cached() && !split_ && !opt_.dump && !opt_.tail_skip_all;
+    return n >= 1 && n <= 16 && h_bell_ && !all_cached() && !split_ && !opt_.dump && !opt_.tail_skip_all;
 }
 
 // The doorbell's host side, after a token's launches: each ring is a layer's experts that the card lacks, computed by
@@ -3545,20 +3545,25 @@ void Engine::bell_serve() {
     }
 }
 
-// One ring: a layer's misses, computed as moe() computes its CPU experts, the weights the card routed with.
+// One ring: a call's misses, computed as moe() computes its CPU experts (the window's rows in h_x_, their sums
+// into h_cpu_ at each pick's row), the weights the card routed with.
 void Engine::bell_job() {
     const int il = h_bell_->layer, n = std::min<int>(h_bell_->n, kBellJobs);
     const Layer& L = layers_[(size_t) il];
     CpuExpert host[kBellJobs];
+    int rows = 0;
     for (int j = 0; j < n; ++j) {
         const size_t e = (size_t) h_bell_->e[j];
+        const int row = h_bell_->row[j];
+        rows = std::max(rows, row + 1);
         host[j] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride, L.exp_down + e * L.d_bytes,
-                   h_bell_->w[j], 0};
+                   h_bell_->w[j], row};
     }
-    cpu_experts(*workers_, host, n, 1, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, h_x_,
+    h_bell_->rows = rows;   // bell_add adds these rows only; the rest of the call has no misses
+    cpu_experts(*workers_, host, n, rows, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, h_x_,
                 clamp_exp_[(size_t) il], gelu_, h_cpu_, opt_.cpu_tiled != 0, nullptr);
     stats_.cpu_experts += n;
-    stats_.gpu_experts -= n;   // run() counted every pick of the token as the card's
+    stats_.gpu_experts -= n;   // the caller counted every pick of the call as the card's
 }
 
 // m experts into the staging buffer: gate and up of each back to back from the start, the downs after them.

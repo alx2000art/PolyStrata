@@ -337,7 +337,7 @@ void permute_groups(const float* x, float* y, int n, int groups, int rows, bool 
 /// and the token's input into the struct and rings, the card multiplies the cached ones (a miss reads an expert of
 /// zeros), and bell_add() waits for the host's answer and adds its sum - so the host never waits for the router,
 /// and its workers compute the misses while the card works.  The fields are each a cache line apart.
-constexpr int kBellJobs = 32;
+constexpr int kBellJobs = 96;   // a decode window's misses: 16 tokens x 6 picks, most of them cached
 struct ExpertBell {
     volatile uint32_t ring;    ///< the card's rings so far; a new value is a new job
     uint32_t pad0[15];
@@ -346,12 +346,14 @@ struct ExpertBell {
     volatile uint32_t abort;   ///< the host gave up: every wait ends at once
     uint32_t pad2[15];
     int32_t layer, n;          ///< the job: the layer and how many experts
+    int32_t rows;              ///< the call's rows the host's answer covers (host-written, before ack)
     int32_t e[kBellJobs];      ///< their ids
+    int32_t row[kBellJobs];    ///< the call's token each pick belongs to (k / n_used)
     float w[kBellJobs];        ///< their router weights
 };
-/// One token's picks ids[0..n_used) with weights w at layer `layer`: the ones whose slots[] entry is null, at a
-/// place under skip_from, go into the bell, x (n floats) into hx, and the bell rings (seq[0] counts the rings;
-/// seq[1] is this one, or 0 when there is none).  One block.  CUDA only.
+/// A call's picks ids[0..n * n_used) with weights w at layer `layer`: the ones whose slots[] entry is null, at a
+/// place (k % n_used) under skip_from, go into the bell, the input rows (n * n floats) into hx, and the bell
+/// rings (seq[0] counts the rings; seq[1] is this one, or 0 when there is none).  One block.  CUDA only.
 void bell_ring(const void* const* slots, const int32_t* ids, const float* w, int n_used, int skip_from, int layer,
                const float* x, float* hx, int n, ExpertBell* bell, uint32_t* seq, void* stream);
 /// Where seq[1] is a ring: wait until the bell's ack is that ring (or abort is set), then acc += hy (n floats).
