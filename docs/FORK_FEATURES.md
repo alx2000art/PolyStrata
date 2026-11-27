@@ -161,6 +161,10 @@ picks are counted on the device (count_picks) and folded into use_/recent_ at fo
 signal. `bell_on()` refuses everything but one token on one card with a bell allocated; STRATA_POLY_BELL unset or
 0 leaves the old path byte for byte, and the tail-skip-rank mode (STRATA_POLY_TAIL_SKIP_ALL) keeps it off.
 
+The server's decode goes a row a step, so step() rings too (the upstream follow-up a71b7506e): bell_on(n) for
+its rows, the card_moe recording keyed by the bell, and bell_serve() after each layer's card experts. Without
+it step() would run moe() with its router wait - the live log showed exactly that before the fix.
+
 Expect: the line `the doorbell is on` at load, and the [moe] lines replaced by the bell path's on the layers it
 took. Verify the answers unchanged (the lossless gate: the sum's order is the card's cached sum + the bell's
 addition, the same order moe_add used), then the token's wall time. The sweep cell is `96-bell`

@@ -4685,6 +4685,15 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         if (!made[key]) made[key] = record(work);
         ck(cudaGraphLaunch((cudaGraphExec_t) made[key], cs(st_)), "layer graph");
     };
+    // A step of one row rings the doorbell as run() rings it for a token (the server's decode goes a row a
+    // step): its misses go to this thread's workers from inside the launches, which bell_serve() answers once
+    // they are handed to the card.  The card_moe recording is keyed by the bell too: its graph carries the
+    // ring and the wait, and a step without the bell must not replay it.
+    bell_ = bell_on(n);
+    struct BellOff {
+        bool& on;
+        ~BellOff() { on = false; }
+    } bell_off{bell_};
     const bool card = n < kStageRows && card_moe(n);
     // an architecture that takes the rows in one head: their sequences and positions while it does
     std::vector<Row> rows;
@@ -4739,10 +4748,13 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
             if (replay && graph_part('s')) replayed(L.shared, rec, [&] { moe_shared(L, il, n); });
             else moe_shared(L, il, n);
             if (!capped && card && L.card == 1 && replay && graph_part('c')) {
-                replayed(L.card_moe, rec, [&] { moe_card(L, il, n); });
+                replayed(L.card_moe, rec + (bell_ ? recs : 0), [&] { moe_card(L, il, n); });
                 stats_.gpu_experts += n * n_used_;
+                if (bell_) bell_serve();
             } else if (!capped && card && moe_card(L, il, n)) {
                 stats_.gpu_experts += n * n_used_;
+                if (bell_) bell_serve();   // what this thread does next (a recording, a moe() that waits for
+                                           // the router) may wait for the card
             } else if (moe(L, il, n)) {
                 moe_add(n);
             }
