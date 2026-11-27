@@ -3415,8 +3415,8 @@ void Engine::moe_add(int n) { axpy(h_cpu_, 1.f, fo_, n * n_embd_, true, st_); }
 // (moe_card()), so a layer never waits for the host.  The cache's slots go to the card again when they changed.
 bool Engine::card_moe(int n) {
     if (!(all_cached() || bell_) || !d_slots_ || n * n_used_ > kSumRows || opt_.dump) {
-        if (bell_ && n == 1) {   // the doorbell was armed but the card path declined: say which gate, once
-            static bool said = false;
+        if (bell_) {   // the doorbell was armed but the card path declined: say which gate, once.  The call the
+            static bool said = false;   // live run hits first is a window's, not a token's - n == 1 kept it silent
             if (!said) {
                 said = true;
                 std::fprintf(stderr,
@@ -4820,12 +4820,18 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         if (replay && L.fixed && graph_part('t')) replayed(L.tail, rec, [&] { layer_tail(L, il, n); });
         else layer_tail(L, il, n);
     }
-    if (h_bell_ && n == 1) {   // the bell's per-token trace: how many layers rang, how many went to moe()
-        static int said = 0;
-        if (said < 3) {
-            ++said;
-            std::fprintf(stderr, "strata-poly: [bell] step: bell_ %d, card %d, layers rang %d of %d MoE\n",
-                         (int) bell_, (int) card, bell_rang, n_moe_);
+    if (h_bell_) {   // the bell's trace: the first one-row steps, then the first windows.  The decode goes
+        static int said = 0, winsaid = 0;   // windows of rows, and the token-only gate kept the live run silent
+        if (n == 1) {
+            if (said < 3) {
+                ++said;
+                std::fprintf(stderr, "strata-poly: [bell] step: bell_ %d, card %d, layers rang %d of %d MoE\n",
+                             (int) bell_, (int) card, bell_rang, n_moe_);
+            }
+        } else if (winsaid < 2) {
+            ++winsaid;
+            std::fprintf(stderr, "strata-poly: [bell] window: rows %d, bell_ %d, card %d, layers rang %d of %d MoE\n",
+                         n, (int) bell_, (int) card, bell_rang, n_moe_);
         }
     }
 
