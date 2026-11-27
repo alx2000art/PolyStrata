@@ -33,6 +33,8 @@ protected:
     size_t extra_bytes() const override;
     void load_extra(const uint8_t* src, int64_t pos) override;
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
+    void save_layer_async(int il, int64_t pos, uint8_t* dst) override;
+    void save_layer_async_impl(int il, int64_t pos, uint8_t* dst, bool async);
     void alloc_caches() override;
     void assign_scratch() override;
     int widest() const override;

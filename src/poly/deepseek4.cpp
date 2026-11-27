@@ -782,32 +782,54 @@ size_t DeepSeek4::extra_bytes() const {
 // A layer's part, behind the recurrent state (which this architecture has none of) and the layers before it.  A
 // position before the sequence's start leaves zeros.
 void DeepSeek4::save_layer(int il, int64_t pos, uint8_t* dst) {
+    save_layer_async_impl(il, pos, dst, false);
+}
+
+void DeepSeek4::save_layer_async(int il, int64_t pos, uint8_t* dst) {
+    save_layer_async_impl(il, pos, dst, true);
+}
+
+// `async`: the copies go on the card's stream and return at once - the destination is a pinned staging buffer
+// (stage_marks()), and the read keeps issuing launches while the state leaves.  The default stream's order makes
+// the copies land behind the layer's work and ahead of the next turn's, as the checkpoints' own synchronous ones
+// did behind a full drain of the stream.
+void DeepSeek4::save_layer_async_impl(int il, int64_t pos, uint8_t* dst, bool async) {
     dst += state_n_ * sizeof(float);
     for (int j = 0; j < il; ++j) dst += layer_extra(blocks_[(size_t) j]);
     const Block& B = blocks_[(size_t) il];
     if (!B.raw && !B.k_codes) return;
-    std::memset(dst, 0, layer_extra(B));
+    async ? ck(cudaMemsetAsync(dst, 0, layer_extra(B), cs(st_)), "save state")
+          : ck(cudaMemset(dst, 0, layer_extra(B)), "save state");
     if (opt_.kv_format == KvFmt::kQ8_0) {
         const size_t crow = (size_t) head_dim_;
         const size_t srow = (size_t) (head_dim_ / 32) * sizeof(uint16_t);
         ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
-            ck(cudaMemcpy(dst + slot * crow, (const uint8_t*) B.k_codes + at * crow, m * crow,
-                          cudaMemcpyDeviceToHost),
-               "save state");
+            async ? ck(cudaMemcpyAsync(dst + slot * crow, (const uint8_t*) B.k_codes + at * crow, m * crow,
+                                       cudaMemcpyDeviceToHost, cs(st_)),
+                       "save state")
+                  : ck(cudaMemcpy(dst + slot * crow, (const uint8_t*) B.k_codes + at * crow, m * crow,
+                                  cudaMemcpyDeviceToHost),
+                       "save state");
         });
         dst += (size_t) window_ * crow;
         ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
-            ck(cudaMemcpy(dst + slot * srow, (const uint8_t*) B.k_scales + at * srow, m * srow,
-                          cudaMemcpyDeviceToHost),
-               "save state");
+            async ? ck(cudaMemcpyAsync(dst + slot * srow, (const uint8_t*) B.k_scales + at * srow, m * srow,
+                                       cudaMemcpyDeviceToHost, cs(st_)),
+                       "save state")
+                  : ck(cudaMemcpy(dst + slot * srow, (const uint8_t*) B.k_scales + at * srow, m * srow,
+                                  cudaMemcpyDeviceToHost),
+                       "save state");
         });
         dst += (size_t) window_ * srow;
     } else {
         const size_t raw_row = (size_t) head_dim_ * sizeof(uint16_t);
         ring_runs(pos, window_, raw_ring_, [&](size_t slot, size_t at, size_t m) {
-            ck(cudaMemcpy(dst + slot * raw_row, (const uint8_t*) B.raw + at * raw_row, m * raw_row,
-                          cudaMemcpyDeviceToHost),
-               "save state");
+            async ? ck(cudaMemcpyAsync(dst + slot * raw_row, (const uint8_t*) B.raw + at * raw_row, m * raw_row,
+                                       cudaMemcpyDeviceToHost, cs(st_)),
+                       "save state")
+                  : ck(cudaMemcpy(dst + slot * raw_row, (const uint8_t*) B.raw + at * raw_row, m * raw_row,
+                                  cudaMemcpyDeviceToHost),
+                       "save state");
         });
         dst += (size_t) window_ * raw_row;
     }
@@ -816,8 +838,12 @@ void DeepSeek4::save_layer(int il, int64_t pos, uint8_t* dst) {
         const size_t row = (size_t) S->width * sizeof(float);
         for (const float* ring : {S->kv, S->score}) {
             ring_runs(pos, keep_rows(B), B.ring, [&](size_t slot, size_t at, size_t m) {
-                ck(cudaMemcpy(dst + slot * row, (const uint8_t*) ring + at * row, m * row, cudaMemcpyDeviceToHost),
-                   "save state");
+                async ? ck(cudaMemcpyAsync(dst + slot * row, (const uint8_t*) ring + at * row, m * row,
+                                           cudaMemcpyDeviceToHost, cs(st_)),
+                           "save state")
+                      : ck(cudaMemcpy(dst + slot * row, (const uint8_t*) ring + at * row, m * row,
+                                      cudaMemcpyDeviceToHost),
+                           "save state");
             });
             dst += (size_t) keep_rows(B) * row;
         }

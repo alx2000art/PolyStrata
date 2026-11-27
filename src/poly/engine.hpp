@@ -495,6 +495,10 @@ protected:
     /// done with the layer when this is called.  save_state() is this for every layer; read() calls it for a
     /// layer when the layer gets to a checkpoint, which is before the layers after it do.
     virtual void save_layer(int il, int64_t pos, uint8_t* dst) = 0;
+    /// save_layer() whose copies go on the card's stream and return at once: the destination is a pinned staging
+    /// buffer (stage_marks()), so the read's launches keep flowing while the state leaves.  The base falls back to
+    /// the synchronous one (the staging is then worth nothing and stage_marks() stages nothing).
+    virtual void save_layer_async(int il, int64_t pos, uint8_t* dst) { save_layer(il, pos, dst); }
     /// The draft block's attention for n tokens from position `pos`.  xn_ and xq_ hold its normed input; ao_ gets
     /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
     virtual void block_attend(int64_t pos, int n) { (void) pos, (void) n; }
@@ -582,7 +586,11 @@ protected:
     bool pick_way(int t);
     void took_way(int t, double ms);
     void layer(int il, int n);
-    void save_last(uint8_t* dst);
+    void save_last(uint8_t* dst, bool async = false);
+    /// Pinned buffers for a read's checkpoints' states, made between reads (mark_buffers()), handed out by
+    /// stage_marks() at the read's start.
+    void mark_buffers();
+    std::vector<uint8_t*> stage_marks(const Mark* marks, int n_marks);
     void moe_router(const Layer& L, int n);
     bool moe(Layer& L, int il, int n, const std::function<void()>* first = nullptr);
     bool card_moe(int n);
@@ -727,6 +735,12 @@ protected:
     std::vector<Call> calls_;
     float* h_res_ = nullptr;  ///< h_res_rows_ tokens' rows, pinned: as many as the longest read so far that needed it
     int h_res_rows_ = 0;
+    // A read's checkpoints' states leave in the stream into these (stage_marks()), one card_state_bytes() each;
+    // the read's end hands them to the checkpoints' own (pageable) states.  Made between reads: cudaMallocHost()
+    // of a few hundred MiB holds the card's calls up for hundreds of ms.
+    std::vector<uint8_t*> h_marks_;
+    size_t h_mark_bytes_ = 0;
+    size_t marks_wanted_ = 0; ///< the most checkpoints after staging one read has had
     void* rs_ = nullptr;      ///< the stream of those copies
     void* ev_in_[2] = {};     ///< marks a call's rows in each half of r_
     void* ev_out_[2] = {};    ///< marks the card done with a call in each half

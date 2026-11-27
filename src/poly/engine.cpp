@@ -2865,10 +2865,63 @@ void Engine::save_state(uint8_t* dst) {
 
 // What the state has that is no layer's: the model's output for the last token, which the draft block pairs the
 // next one with.  It lies behind the layers' state.
-void Engine::save_last(uint8_t* dst) {
+void Engine::save_last(uint8_t* dst, bool async) {
     if (!draft_) return;
+    if (async) {
+        ck(cudaMemcpyAsync(dst + rec_n_ * sizeof(float), hn_, (size_t) n_embd_ * sizeof(float),
+                           cudaMemcpyDeviceToHost, cs(st_)),
+           "save state");
+        return;
+    }
     ck(cudaMemcpy(dst + rec_n_ * sizeof(float), hn_, (size_t) n_embd_ * sizeof(float), cudaMemcpyDeviceToHost),
        "save state");
+}
+
+// Pinned buffers for the states of a read's checkpoints, where the layers' copies go in the stream
+// (save_layer_async()).  A copy into pageable memory returns only once the card has done the work queued before
+// it - ours stopped at each layer of each checkpoint behind a stream sync outright - so the card waited at every
+// checkpoint of every read.  The buffers are made between reads, as many as a read has had checkpoints:
+// cudaMallocHost() of a few hundred MiB holds the card's calls up for hundreds of ms, and on a thread of its own
+// it held the read's CUDA calls up as long.  They stay pinned, so one is made only while the RAM free holds the
+// ones still to make, the checkpoints' own (pageable) states the next read fills, and two states more.
+void Engine::mark_buffers() {
+    const size_t bytes = card_state_bytes();
+    if (h_mark_bytes_ < bytes) {   // the states grew: the buffers made for the smaller ones go
+        for (uint8_t* p : h_marks_) {
+            host_allocs_.erase(std::find(host_allocs_.begin(), host_allocs_.end(), (void*) p));
+            ck(cudaFreeHost(p), "freeing a checkpoint's pinned buffer");
+        }
+        h_marks_.clear();
+        h_mark_bytes_ = bytes;
+    }
+    if (h_marks_.size() >= marks_wanted_) return;
+    OnCard here(device_, split_);
+    while (h_marks_.size() < marks_wanted_ && ram_available() >= (2 * (marks_wanted_ - h_marks_.size()) + 2) * bytes) {
+        void* p = nullptr;
+        if (cudaMallocHost(&p, bytes) != cudaSuccess) {
+            cudaGetLastError();
+            break;
+        }
+        host_allocs_.push_back(p);
+        h_marks_.push_back((uint8_t*) p);
+    }
+}
+
+// Each checkpoint with a state gets a pinned buffer of stage_marks()'s, or null: it goes straight to its
+// (pageable) state, as before the staging.  The most checkpoints one read has had since the load is what
+// mark_buffers() makes buffers for.
+std::vector<uint8_t*> Engine::stage_marks(const Mark* marks, int n_marks) {
+    std::vector<uint8_t*> staged((size_t) n_marks, nullptr);
+    const size_t bytes = card_state_bytes();
+    if (h_mark_bytes_ < bytes) return staged;   // no buffers of this size yet
+    size_t k = 0, with_state = 0;
+    for (int m = 0; m < n_marks; ++m) {
+        if (!marks[m].state) continue;
+        ++with_state;
+        if (k < h_marks_.size()) staged[(size_t) m] = h_marks_[k++];
+    }
+    marks_wanted_ = std::max(marks_wanted_, with_state);
+    return staged;
 }
 
 void Engine::load_state(const uint8_t* src, int64_t pos) {
@@ -5001,6 +5054,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     }
     // a turn for each layer, and one for the model's output, which the draft block keeps a row of
     const int turns = hi_ - lo_ + (draft_ ? 1 : 0);
+    // A checkpoint's layers are copied in the stream, behind the call before it and ahead of the next one's turn
+    // at the layer, so the card goes on.  They go to pinned memory, at the card's speed, and to their states
+    // after the read; a checkpoint without a buffer goes straight to its state, behind a stream sync, as before.
+    const std::vector<uint8_t*> staged = stage_marks(marks, n_marks);
     shared_ahead_ = true;
     try {
         for (int k = 0; k < turns; ++k) {
@@ -5037,12 +5094,20 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                     ++read_draft_calls_;
                 }
                 if (uint8_t* state = call.mark >= 0 ? marks[call.mark].state : nullptr) {
-                    ck(cudaStreamSynchronize(cs(st_)), "read");
+                    uint8_t* const to = staged[(size_t) call.mark] ? staged[(size_t) call.mark] : state;
+                    const bool in_stream = to != state;
+                    if (!in_stream) ck(cudaStreamSynchronize(cs(st_)), "read");
                     const int64_t pos = pos_ + call.m;
-                    if (il < n_layer_ && !skip) save_layer(il, pos, state);
+                    if (il < n_layer_ && !skip) {
+                        if (in_stream) save_layer_async(il, pos, to);
+                        else save_layer(il, pos, to);
+                    }
                     if (k == turns - 1) {   // what no turn is for: a layer behind the model's, the last output
-                        for (int j = n_layer_; j < (int) layers_.size(); ++j) save_layer(j, pos, state);
-                        save_last(state);
+                        for (int j = n_layer_; j < (int) layers_.size(); ++j) {
+                            if (in_stream) save_layer_async(j, pos, to);
+                            else save_layer(j, pos, to);
+                        }
+                        save_last(to, in_stream);
                     }
                 }
                 // The card's work on the next call starts now.  This call's rows leave beside it, unless this was
@@ -5067,6 +5132,17 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                                    cudaMemcpyDeviceToHost, cs(st_)),
                    "the next card");
             ck(cudaStreamSynchronize(cs(st_)), "the next card");
+        }
+        // The staged checkpoints' copies are in the stream: wait for the read's own work and give each
+        // checkpoint its bytes.  The turns loop wrote every layer's slice for every marked call, so a staged
+        // buffer is whole; what the skip left out is rows no restore attends (the window is shorter than the
+        // distance), as with the direct copies.
+        bool staged_any = false;
+        for (int m = 0; m < n_marks; ++m) staged_any = staged_any || staged[(size_t) m] != nullptr;
+        if (staged_any) {
+            ck(cudaStreamSynchronize(cs(st_)), "read");
+            for (int m = 0; m < n_marks; ++m)
+                if (staged[(size_t) m]) std::memcpy(marks[m].state, staged[(size_t) m], card_state_bytes());
         }
         // What the read leaves running on st_ is its tail: the event tells the next read's copies where to stop,
         // and is fresh even when nothing at all is behind it.
@@ -5148,6 +5224,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     }
     pos_ = pos0 + n;
     stats_.tokens += n;
+    mark_buffers();   // between reads: the next read's checkpoints all go through pinned memory
     return true;
 }
 
