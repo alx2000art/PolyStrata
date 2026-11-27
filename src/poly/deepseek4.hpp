@@ -48,6 +48,10 @@ protected:
     /// The doorbell (STRATA_POLY_BELL=1): DeepSeek V4 routes on the card (route_card()) and sums a token's
     /// experts in moe_card() itself, so its misses can ring the host's workers.
     bool bells() const override { return true; }
+    /// A hash layer's ids for the token, from the file's tid2eid table (host-side: the token is here), uploaded
+    /// to the card, their weights gathered from the card's router scores (no host wait for the router).
+    bool route_token_card(int il, int32_t token, int32_t* ids_scratch, int32_t* ids_dev, float* w_dev,
+                          void* stream) override;
     void moe_shared(const Layer& L, int il, int n) override;
     int head_key(int il, int n) const override;
     int window_only_from() const override;

@@ -600,6 +600,14 @@ protected:
     /// A token's experts outside VRAM may go to the host's threads through the doorbell (h_bell_): the
     /// architecture routes on the card (route_card()) and sums a token's experts in moe_card() itself.
     virtual bool bells() const { return false; }
+    /// The hash layers' by-token routing, computed for the card: the ids for `token` copied into the pinned
+    /// `ids_scratch` and uploaded to `ids_dev`, their weights gathered from the card's router scores into
+    /// `w_dev` on the card's stream.  False when the layer routes by its scores instead.
+    virtual bool route_token_card(int il, int32_t token, int32_t* ids_scratch, int32_t* ids_dev, float* w_dev,
+                                  void* stream) {
+        (void) il, (void) token, (void) ids_scratch, (void) ids_dev, (void) w_dev, (void) stream;
+        return false;
+    }
     /// Whether n tokens ring (h_bell_ set, one token, one card, not a dump).  The env switch STRATA_POLY_BELL=1
     /// turns the whole mechanism on; without it h_bell_ is null and this is false.
     bool bell_on(int n) const;
@@ -932,6 +940,7 @@ protected:
     int32_t* d_use_ = nullptr;                    ///< the card's routed picks per (layer, expert), when it routes
     std::vector<int32_t> h_use_;                  ///< and their copy off the card (follow())
     void* ev_bell_ = nullptr;                     ///< the end of a token's launches, for bell_serve()
+    int32_t* h_ids_pick_ = nullptr;               ///< pinned: the by-token table's ids for the token under way
     bool bell_ = false;                           ///< this call rings (run())
     uint8_t* stage_ = nullptr;                    ///< experts that are not cached, on their way through VRAM
     uint8_t* h_stage_[2] = {};                    ///< pinned; filled in turn

@@ -2741,6 +2741,7 @@ void Engine::alloc() {
                 ck(cudaMemset(d_bell_seq_, 0, 2 * sizeof(uint32_t)), "the doorbell");
                 d_zslots_ = (void**) dmalloc((size_t) n_layer_ * n_expert_ * sizeof(void*), "scratch");
                 d_use_ = (int32_t*) dmalloc(layers_.size() * (size_t) n_expert_ * sizeof(int32_t), "scratch");
+                h_ids_pick_ = (int32_t*) hmalloc((size_t) n_used_ * sizeof(int32_t), "pinned memory");
                 ck(cudaMemset(d_use_, 0, layers_.size() * (size_t) n_expert_ * sizeof(int32_t)), "expert uses");
                 most = (most + kTail + 4096) / 256 * 256;   // past an expert's bytes, as far as a slot's padding goes
                 zero_slot_ = (uint8_t*) dmalloc(most, "scratch");
@@ -3455,20 +3456,21 @@ bool Engine::card_moe(int n) {
 // on the host, or its formats have no kernel for picks on the card.
 bool Engine::moe_card(Layer& L, int il, int n) {
     if (L.card == 0) return false;
-    if (!kernels::native_mmvq_ids_supported((int) L.gu_type) || !kernels::native_mmvq_ids_supported((int) L.d_type) ||
-        !route_card(il, n, d_ids_, d_wts_)) {
-        if (bell_ && n == 1) {   // the doorbell's first ring refused: say why, once
+    const auto refused = [&](const char* what) {   // the doorbell's first ring refused: say why, once
+        if (bell_ && n == 1) {
             static bool said = false;
             if (!said) {
                 said = true;
                 std::fprintf(stderr,
-                             "strata-poly: the doorbell: route_card refused at layer %d (route_used_ %d of n_used_ "
-                             "%d, gu %d d %d supported %d/%d)\n",
-                             il, route_used_, n_used_, (int) L.gu_type, (int) L.d_type,
+                             "strata-poly: the doorbell: %s refused at layer %d (gu %d d %d supported %d/%d)\n",
+                             what, il, (int) L.gu_type, (int) L.d_type,
                              (int) kernels::native_mmvq_ids_supported((int) L.gu_type),
                              (int) kernels::native_mmvq_ids_supported((int) L.d_type));
             }
         }
+    };
+    if (!kernels::native_mmvq_ids_supported((int) L.gu_type) || !kernels::native_mmvq_ids_supported((int) L.d_type)) {
+        refused("pick kernels");
         L.card = 0;
         return false;
     }
@@ -3477,10 +3479,22 @@ bool Engine::moe_card(Layer& L, int il, int n) {
     const void* const* table = d_slots_ + (size_t) il * n_expert_;
     const bool rings = bell_ && n == 1;
     if (rings) {   // the doorbell: the misses to the host, a token's place under --tail-skip's
+        // The routing: a hash layer's ids come from the file's by-token table (the token is on the host: no
+        // router wait, the weights are gathered on the card), the others route on the card from the scores.
+        if (!route_token_card(il, tok_ ? tok_[0] : -1, h_ids_pick_, d_ids_, d_wts_, st_) &&
+            !route_card(il, n, d_ids_, d_wts_)) {
+            refused("route_card");
+            L.card = 0;
+            return false;
+        }
         count_picks(d_ids_, rr, n_expert_, d_use_ + (size_t) il * n_expert_, st_);
         bell_ring(table, d_ids_, d_wts_, n_used_, opt_.tail_skip > 0 ? opt_.tail_skip : n_used_, il, xn_, h_x_,
                   n_embd_, h_bell_, d_bell_seq_, st_);
         table = d_zslots_ + (size_t) il * n_expert_;
+    } else if (!route_card(il, n, d_ids_, d_wts_)) {   // the non-bell path routes as it did
+        refused("route_card");
+        L.card = 0;
+        return false;
     }
     const kernels::MmvqIds gate_up{table, d_ids_, 0, xq_, kernels::native_q8_1_bytes(n_embd_), n_used_, g_,
                                    2 * (size_t) n_ff_exp_};

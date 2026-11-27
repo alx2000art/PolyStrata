@@ -2873,4 +2873,29 @@ void count_picks(const int32_t* ids, int rr, int n_expert, int32_t* uses, void* 
         throw std::runtime_error(std::string("count_picks: ") + cudaGetErrorString(e));
 }
 
+__global__ void route_weights_from_ids_kernel(const float* __restrict__ logits, const int32_t* __restrict__ ids,
+                                              int n_used, bool norm, float w_scale, float* __restrict__ w) {
+    __shared__ float picked[32];
+    const int k = threadIdx.x;
+    if (k < n_used) {
+        const float x = logits[ids[k]];
+        picked[k] = sqrtf(x > 20.0f ? x : logf(1.0f + expf(x)));   // route_kernel's gate 2, the same instructions
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sum = 0.0f;
+        for (int j = 0; j < n_used; ++j) sum += picked[j];
+        const float denom = norm ? fmaxf(sum, 6.103515625e-5f) : 1.0f;   // ggml's floor under the gate sum
+        const float scale = w_scale != 0.0f ? w_scale : 1.0f;
+        for (int j = 0; j < n_used; ++j) w[j] = picked[j] / denom * scale;
+    }
+}
+
+void route_weights_from_ids(const float* logits, const int32_t* ids, int n_used, bool norm, float w_scale,
+                            float* w, void* stream) {
+    route_weights_from_ids_kernel<<<1, 32, 0, cs(stream)>>>(logits, ids, n_used, norm, w_scale, w);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("route_weights_from_ids: ") + cudaGetErrorString(e));
+}
+
 }  // namespace strata::poly

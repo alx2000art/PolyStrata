@@ -359,5 +359,10 @@ void bell_add(const ExpertBell* bell, const uint32_t* seq, const float* hy, floa
 /// uses[id] += 1 for every pick of ids[0..rr): the card's routing, counted where the host's route() would have
 /// counted it (the profile and the trades' recency).  CUDA only.
 void count_picks(const int32_t* ids, int rr, int n_expert, int32_t* uses, void* stream);
+/// The router's weights for GIVEN expert ids (the hash layers' by-token routing): the same gate-2 probabilities
+/// route_rows() computes, gathered for the ids, their sum floored (ggml's 2^-14 under the gate sum) and
+/// normalized by norm, times w_scale (0: not).  One block.  CUDA only.
+void route_weights_from_ids(const float* logits, const int32_t* ids, int n_used, bool norm, float w_scale,
+                            float* w, void* stream);
 
 }  // namespace strata::poly

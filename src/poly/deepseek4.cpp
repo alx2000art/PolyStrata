@@ -722,6 +722,17 @@ void DeepSeek4::route(int il, const float* logits, int32_t token, int* ids, floa
     }
 }
 
+bool DeepSeek4::route_token_card(int il, int32_t token, int32_t* ids_scratch, int32_t* ids_dev, float* w_dev,
+                                 void* stream) {
+    const Block& B = blocks_[(size_t) il];
+    if (B.by_token.empty() || token < 0 || token >= n_vocab_) return false;
+    for (int k = 0; k < n_used_; ++k) ids_scratch[k] = B.by_token[(size_t) token * n_used_ + k];
+    ck(cudaMemcpyAsync(ids_dev, ids_scratch, (size_t) n_used_ * sizeof(int32_t), cudaMemcpyHostToDevice, cs(stream)),
+       "the doorbell ids");
+    route_weights_from_ids(rl_, ids_dev, n_used_, w_norm_, w_scale_, w_dev, stream);
+    return true;
+}
+
 bool DeepSeek4::route_card(int il, int n, int32_t* ids, float* w) {
     const Block& B = blocks_[(size_t) il];
     if (!B.by_token.empty()) return false;
