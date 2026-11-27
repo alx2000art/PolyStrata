@@ -3413,7 +3413,20 @@ void Engine::moe_add(int n) { axpy(h_cpu_, 1.f, fo_, n * n_embd_, true, st_); }
 // With every routed expert in VRAM, a few tokens' experts are routed on the card and found there by its picks
 // (moe_card()), so a layer never waits for the host.  The cache's slots go to the card again when they changed.
 bool Engine::card_moe(int n) {
-    if (!(all_cached() || bell_) || !d_slots_ || n * n_used_ > kSumRows || opt_.dump) return false;
+    if (!(all_cached() || bell_) || !d_slots_ || n * n_used_ > kSumRows || opt_.dump) {
+        if (bell_ && n == 1) {   // the doorbell was armed but the card path declined: say which gate, once
+            static bool said = false;
+            if (!said) {
+                said = true;
+                std::fprintf(stderr,
+                             "strata-poly: the doorbell: card_moe declined (all_cached %d, d_slots_ %p, rows %d of "
+                             "kSumRows %d, dump %d)
+",
+                             (int) all_cached(), (void*) d_slots_, n * n_used_, kSumRows, (int) opt_.dump);
+            }
+        }
+        return false;
+    }
     bool same = !h_slots_.empty();
     for (int il = lo_; il < hi_ && same; ++il) {
         const Layer& L = layers_[(size_t) il];
@@ -3445,6 +3458,19 @@ bool Engine::moe_card(Layer& L, int il, int n) {
     if (L.card == 0) return false;
     if (!kernels::native_mmvq_ids_supported((int) L.gu_type) || !kernels::native_mmvq_ids_supported((int) L.d_type) ||
         !route_card(il, n, d_ids_, d_wts_)) {
+        if (bell_ && n == 1) {   // the doorbell's first ring refused: say why, once
+            static bool said = false;
+            if (!said) {
+                said = true;
+                std::fprintf(stderr,
+                             "strata-poly: the doorbell: route_card refused at layer %d (route_used_ %d of n_used_ "
+                             "%d, by_token %d, gu %d d %d supported %d/%d)
+",
+                             il, route_used_, n_used_, (int) !blocks_[(size_t) il].by_token.empty(), (int) L.gu_type,
+                             (int) L.d_type, (int) kernels::native_mmvq_ids_supported((int) L.gu_type),
+                             (int) kernels::native_mmvq_ids_supported((int) L.d_type));
+            }
+        }
         L.card = 0;
         return false;
     }
