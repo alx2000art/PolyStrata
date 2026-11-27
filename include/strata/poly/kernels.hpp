@@ -332,4 +332,32 @@ void dsv4_attend(const float* q, const uint16_t* raw, int ring, int window, cons
 /// y[g][t] = x[t][g] for `rows` tokens of `groups` groups of n values; with back, y[t][g] = x[g][t].
 void permute_groups(const float* x, float* y, int n, int groups, int rows, bool back, void* stream);
 
+/// The doorbell (STRATA_POLY_BELL=1): a pinned struct between the card and the host for a token's routed experts
+/// outside the VRAM cache.  The card routes the layer itself (route_card()), bell_ring() puts the picks it lacks
+/// and the token's input into the struct and rings, the card multiplies the cached ones (a miss reads an expert of
+/// zeros), and bell_add() waits for the host's answer and adds its sum - so the host never waits for the router,
+/// and its workers compute the misses while the card works.  The fields are each a cache line apart.
+constexpr int kBellJobs = 32;
+struct ExpertBell {
+    volatile uint32_t ring;    ///< the card's rings so far; a new value is a new job
+    uint32_t pad0[15];
+    volatile uint32_t ack;     ///< the ring the host has answered
+    uint32_t pad1[15];
+    volatile uint32_t abort;   ///< the host gave up: every wait ends at once
+    uint32_t pad2[15];
+    int32_t layer, n;          ///< the job: the layer and how many experts
+    int32_t e[kBellJobs];      ///< their ids
+    float w[kBellJobs];        ///< their router weights
+};
+/// One token's picks ids[0..n_used) with weights w at layer `layer`: the ones whose slots[] entry is null, at a
+/// place under skip_from, go into the bell, x (n floats) into hx, and the bell rings (seq[0] counts the rings;
+/// seq[1] is this one, or 0 when there is none).  One block.  CUDA only.
+void bell_ring(const void* const* slots, const int32_t* ids, const float* w, int n_used, int skip_from, int layer,
+               const float* x, float* hx, int n, ExpertBell* bell, uint32_t* seq, void* stream);
+/// Where seq[1] is a ring: wait until the bell's ack is that ring (or abort is set), then acc += hy (n floats).
+void bell_add(const ExpertBell* bell, const uint32_t* seq, const float* hy, float* acc, int n, void* stream);
+/// uses[id] += 1 for every pick of ids[0..rr): the card's routing, counted where the host's route() would have
+/// counted it (the profile and the trades' recency).  CUDA only.
+void count_picks(const int32_t* ids, int rr, int n_expert, int32_t* uses, void* stream);
+
 }  // namespace strata::poly

@@ -45,6 +45,9 @@ protected:
     void output_rows(int first, int rows, float* h) override;
     void route(int il, const float* logits, int32_t token, int* ids, float* w, float* tmp) const override;
     bool route_card(int il, int n, int32_t* ids, float* w) override;
+    /// The doorbell (STRATA_POLY_BELL=1): DeepSeek V4 routes on the card (route_card()) and sums a token's
+    /// experts in moe_card() itself, so its misses can ring the host's workers.
+    bool bells() const override { return true; }
     void moe_shared(const Layer& L, int il, int n) override;
     int head_key(int il, int n) const override;
     int window_only_from() const override;

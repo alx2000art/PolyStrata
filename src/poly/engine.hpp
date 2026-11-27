@@ -35,6 +35,8 @@ class GgufFile;
 
 namespace strata::poly {
 
+struct ExpertBell;   // kernels.hpp: the doorbell's pinned struct (h_bell_)
+
 class Eagle3;   // the EAGLE-3 draft head (eagle3.hpp) - the Engine's --draft-model drafter
 
 class Shards;
@@ -595,6 +597,14 @@ protected:
     bool moe(Layer& L, int il, int n, const std::function<void()>* first = nullptr);
     bool card_moe(int n);
     bool moe_card(Layer& L, int il, int n);
+    /// A token's experts outside VRAM may go to the host's threads through the doorbell (h_bell_): the
+    /// architecture routes on the card (route_card()) and sums a token's experts in moe_card() itself.
+    virtual bool bells() const { return false; }
+    /// Whether n tokens ring (h_bell_ set, one token, one card, not a dump).  The env switch STRATA_POLY_BELL=1
+    /// turns the whole mechanism on; without it h_bell_ is null and this is false.
+    bool bell_on(int n) const;
+    void bell_serve();
+    void bell_job();
     /// Whether n tokens take layer L's routed experts as a prompt batch, through MMQ (moe_rows()), and not a few at
     /// a time (moe()).
     bool batched(const Layer& L, int n) const;
@@ -909,6 +919,20 @@ protected:
     int32_t* h_ids_ = nullptr;                    ///< pinned: the experts, back from the card
     void** d_slots_ = nullptr;                    ///< every layer's L.slot on the card, n_expert_ a layer (moe_card())
     std::vector<void*> h_slots_;                  ///< what d_slots_ holds
+    // The doorbell (STRATA_POLY_BELL=1, bells() architectures): a token routed on the card with experts outside
+    // the VRAM cache.  moe_card() rings h_bell_ with the ones the card lacks and multiplies the others, their
+    // misses reading zero_slot_ (d_zslots_); the host's workers compute the misses (bell_serve()) while the card
+    // goes on, and the card adds their sum (bell_add()) before the layer's tail.  No host wait inside the token,
+    // so its layers stay one recording.
+    ExpertBell* h_bell_ = nullptr;                ///< pinned, the card's and the host's
+    uint32_t* d_bell_seq_ = nullptr;              ///< the card's rings so far, and the ring of the layer under way
+    uint32_t bell_seen_ = 0;                      ///< the last ring the host answered
+    void** d_zslots_ = nullptr;                   ///< d_slots_ with zero_slot_ for every expert outside VRAM
+    uint8_t* zero_slot_ = nullptr;                ///< an expert of zeros: a miss's products are 0 on the card
+    int32_t* d_use_ = nullptr;                    ///< the card's routed picks per (layer, expert), when it routes
+    std::vector<int32_t> h_use_;                  ///< and their copy off the card (follow())
+    void* ev_bell_ = nullptr;                     ///< the end of a token's launches, for bell_serve()
+    bool bell_ = false;                           ///< this call rings (run())
     uint8_t* stage_ = nullptr;                    ///< experts that are not cached, on their way through VRAM
     uint8_t* h_stage_[2] = {};                    ///< pinned; filled in turn
     void* ev_stage_[2] = {};                      ///< marks the upload out of each

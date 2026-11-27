@@ -143,6 +143,29 @@ stream. Single-batch calls keep the old one-stream path.
 The idx scorer's mma runs at the decode windows' shapes only (n ≤ 16 tokens, +17% decode): the
 prompt batches' 6500-token calls take the scalar dp4a scorer they win with (−8% of the read).
 
+## The doorbell (branch feat/doorbell, experimental)
+
+**`STRATA_POLY_BELL=1` in the config's env block turns it on; nothing else.** Ported from the Strata project's
+series (their 202c1ad84 + a71b7506e + ffc577610), where it is Inkling 2's hybrid mode: during a decode token the
+CARD routes the layer itself (route_card(), which DeepSeek V4 already had for the all-cached path), `bell_ring()`
+puts the picks it lacks - the misses of the VRAM cache, a token's places under --tail-skip - and the token's input
+into a pinned `ExpertBell`, and the card multiplies the cached ones, a miss reading an expert of zeros. This
+thread's workers compute the misses (bell_serve(), the same cpu_experts moe() runs) while the card works, and
+`bell_add()` waits for their sum and adds it before the layer's tail. The host's router wait - the D2H of the
+scores and the routing that started every layer's host work - is gone from the token's critical path; the whole
+pass stays one recording.
+
+What the card cannot reach, the CPU computes - which on this fork is every VRAM-cache miss (the decode's misses
+are cpu_experts work already; the RAM pool serves the swaps and the staging, not the decode misses). The card's
+picks are counted on the device (count_picks) and folded into use_/recent_ at follow(), so the trades keep their
+signal. `bell_on()` refuses everything but one token on one card with a bell allocated; STRATA_POLY_BELL unset or
+0 leaves the old path byte for byte, and the tail-skip-rank mode (STRATA_POLY_TAIL_SKIP_ALL) keeps it off.
+
+Expect: the line `the doorbell is on` at load, and the [moe] lines replaced by the bell path's on the layers it
+took. Verify the answers unchanged (the lossless gate: the sum's order is the card's cached sum + the bell's
+addition, the same order moe_add used), then the token's wall time. The sweep cell is `96-bell`
+(`ONLY=96-bell ./bench_sweep.sh`); the A/B is `10-all-on` with STRATA_POLY_BELL unset.
+
 ## Two ports from upstream's November series (2026-11-27)
 
 **Pinned buffers for a read's checkpoints' states.** A checkpoint of a read (the prompt cache's, one per
