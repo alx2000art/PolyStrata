@@ -341,6 +341,9 @@ void permute_groups(const float* x, float* y, int n, int groups, int rows, bool 
 /// and its workers compute the misses while the card works.  The fields are each a cache line apart.
 constexpr int kBellJobs = 96;   // a decode window's misses: 16 tokens x 6 picks, most of them cached
 constexpr int kBellRows = 16;   // a bell call's rows: bell_on() takes 16 rows at most, so its answer buffers hold
+constexpr int kBellW = 8;       // the layers the host may run ahead of the card (the watermark's width): past it
+                                // the launch queue fills while a bell_add spins, and the host blocks in a launch
+                                // before any pump that would answer the ring - the graph-less run's deadlock
 struct ExpertBell {
     volatile uint32_t ring;    ///< the card's rings so far; a new value is a new job
     uint32_t pad0[15];

@@ -2741,6 +2741,11 @@ void Engine::alloc() {
                 ck(cudaMemset(d_bell_seq_, 0, 2 * sizeof(uint32_t)), "the doorbell");
                 h_bell_out_[0] = (float*) hmalloc((size_t) kBellRows * n_embd_ * sizeof(float), "pinned memory");
                 h_bell_out_[1] = (float*) hmalloc((size_t) kBellRows * n_embd_ * sizeof(float), "pinned memory");
+                for (int w = 0; w < kBellW; ++w) {
+                    cudaEvent_t ev = nullptr;
+                    ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+                    ev_bw_[w] = ev;
+                }
                 d_zslots_ = (void**) dmalloc((size_t) n_layer_ * n_expert_ * sizeof(void*), "scratch");
                 d_use_ = (int32_t*) dmalloc(layers_.size() * (size_t) n_expert_ * sizeof(int32_t), "scratch");
                 h_ids_pick_ = (int32_t*) hmalloc((size_t) n_used_ * sizeof(int32_t), "pinned memory");
@@ -3586,6 +3591,21 @@ void Engine::bell_pump() {
         }
         std::atomic_thread_fence(std::memory_order_release);
         h_bell_->ack = r;
+    }
+}
+
+// The run-ahead's bound.  The host queues layer `il` only once the card is past layer `il` - kBellW (its mark's
+// event fired), pumping while it waits: a ring the layer's own pump missed (the card had not posted it yet) is
+// answered here, within kBellW layers, and the launch queue never fills behind a spinning bell_add.  The mark of
+// layer `il` - kBellW sits in the slot layer `il` records into, and the wait runs before that record.
+void Engine::bell_watermark(int il) {
+    const int slot = ((il - kBellW) % kBellW + kBellW) % kBellW;
+    for (;;) {
+        const cudaError_t q = cudaEventQuery((cudaEvent_t) ev_bw_[slot]);
+        if (q == cudaSuccess) return;   // an event never recorded is complete: the first kBellW layers pass free
+        if (q != cudaErrorNotReady) ck(q, "the doorbell's watermark");
+        bell_pump();
+        _mm_pause();
     }
 }
 
@@ -4698,6 +4718,7 @@ void Engine::run(const int32_t* tokens, int n) {
         up(lo_, n, (size_t) n - 1);
         for (int il = lo_; il < hi_; ++il) {
             Layer& L = layers_[(size_t) il];
+            if (bell_ && card) bell_watermark(il);
             if (L.moe) {
                 if (batched(L, n)) moe_rows(L, il, n);
                 else if (!on_card(il, n, (size_t) n - 1)) {
@@ -4730,6 +4751,7 @@ void Engine::run(const int32_t* tokens, int n) {
                 tail(il, n, (size_t) n - 1);
                 up_body(il + 1, n);
             }
+            if (bell_ && card) ck(cudaEventRecord((cudaEvent_t) ev_bw_[il % kBellW], cs(st_)), "the doorbell's mark");
         }
         if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
             const Clock::time_point t_bell = Clock::now();
@@ -4741,6 +4763,7 @@ void Engine::run(const int32_t* tokens, int n) {
     }
     for (int il = lo_; il < hi_; ++il) {
         Layer& L = layers_[(size_t) il];
+        if (bell_ && card) bell_watermark(il);
         up(il, n, (size_t) n - 1);
         if (!L.moe) continue;
         if (batched(L, n)) moe_rows(L, il, n);
@@ -4755,6 +4778,7 @@ void Engine::run(const int32_t* tokens, int n) {
             bell_ms += ms_since(t_bell);
         }
         tail(il, n, (size_t) n - 1);
+        if (bell_ && card) ck(cudaEventRecord((cudaEvent_t) ev_bw_[il % kBellW], cs(st_)), "the doorbell's mark");
     }
     if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
         const Clock::time_point t_bell = Clock::now();
@@ -4890,6 +4914,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         if (batched(L, n)) {
             moe_rows(L, il, n);
         } else {
+            if (bell_ && card) bell_watermark(il);
             ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
             if (replay && graph_part('s')) replayed(L.shared, rec, [&] { moe_shared(L, il, n); });
             else moe_shared(L, il, n);
@@ -4914,6 +4939,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         }
         if (replay && L.fixed && graph_part('t')) replayed(L.tail, rec, [&] { layer_tail(L, il, n); });
         else layer_tail(L, il, n);
+        if (bell_ && card) ck(cudaEventRecord((cudaEvent_t) ev_bw_[il % kBellW], cs(st_)), "the doorbell's mark");
     }
     if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
         const Clock::time_point t_bell = Clock::now();

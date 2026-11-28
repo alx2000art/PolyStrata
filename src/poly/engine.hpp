@@ -15,6 +15,7 @@
 #pragma once
 
 #include "cpu_experts.hpp"
+#include "strata/poly/kernels.hpp"   // the bell's constants (kBellJobs, kBellRows, kBellW) for the members below
 
 #include <condition_variable>
 #include <cstddef>
@@ -616,6 +617,10 @@ protected:
     /// runs ahead and queues the next layers while the card's waits are answered from further along (the whole
     /// token's one serve of the recorded path, cut into the per-layer sites a graph-less run needs).
     void bell_pump();
+    /// The run-ahead's bound: wait until the card is past the layer `il` - kBellW of the bell path, pumping beside
+    /// the wait - before queuing layer `il`'s own work.  Without it the host outruns the card, a bell_add spins for
+    /// a ring no pump will ever see (the pumps sit behind the launch that filled the queue), and the call freezes.
+    void bell_watermark(int il);
     /// The card's waits end at once (abort); what it adds is spoiled.  Then the bell as the card left it.
     void bell_unwind();
     void bell_job(uint32_t seq);
@@ -943,6 +948,7 @@ protected:
     uint32_t bell_seen_ = 0;                      ///< the last ring the host answered
     float* h_bell_out_[2] = {};                   ///< the rings' sums, two of them: the host serves the next ring
                                                   ///< while the card's block adds the previous one's
+    void* ev_bw_[kBellW] = {};                    ///< the card's progress marks, one every layer: the watermark's
     void** d_zslots_ = nullptr;                   ///< d_slots_ with zero_slot_ for every expert outside VRAM
     uint8_t* zero_slot_ = nullptr;                ///< an expert of zeros: a miss's products are 0 on the card
     int32_t* d_use_ = nullptr;                    ///< the card's routed picks per (layer, expert), when it routes
