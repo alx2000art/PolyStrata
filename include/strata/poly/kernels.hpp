@@ -144,12 +144,14 @@ void axpy(const float* x, float a, float* acc, int n, bool add, void* stream);
 /// and write too, and a kernel's copy to or from it has none of the wait that a copy engine's has on Windows,
 /// some 25 microseconds between it and the launches beside it.
 void copy2(const void* x0, void* y0, int n0, const void* x1, void* y1, int n1, void* stream);
-/// Up to 32 vectors of n values, each times its weight into its own sum, one after the other: acc[k] += x[k] * w[k]
-/// for k = 0, 1, ...  Two of them may have the same sum.
+/// Up to kSumRows vectors of n values, each times its weight into its own sum, one after the other:
+/// acc[k] += x[k] * w[k] for k = 0, 1, ...  Two of them may have the same sum.  The 96 slots follow
+/// runtime.hpp's kSumRows: the staged sum's ring was widened to a window's picks, and the old 32 kept
+/// throwing on the flushes that the wider ring now ends with (the warm and store replays' 400s).
 struct ScaledRows {
-    const float* x[32];
-    float* acc[32];
-    float w[32];
+    const float* x[96];
+    float* acc[96];
+    float w[96];
 };
 void add_scaled(const ScaledRows& rows, int count, int n, void* stream);
 /// acc[row] += b for each of the rows of n values.

@@ -2467,7 +2467,7 @@ void copy2(const void* x0, void* y0, int n0, const void* x1, void* y1, int n1, v
 }
 
 void add_scaled(const ScaledRows& rows, int count, int n, void* stream) {
-    if (count < 1 || count > 32) throw std::invalid_argument("add_scaled: 1 to 32 vectors");
+    if (count < 1 || count > 96) throw std::invalid_argument("add_scaled: 1 to 96 vectors");   // kSumRows
     add_scaled_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(rows, count, n);
 }
 
