@@ -4572,12 +4572,33 @@ void Engine::run(const int32_t* tokens, int n) {
     // shown it routes there (Layer::card).  With the doorbell (bells(), STRATA_POLY_BELL=1) a token's misses go
     // to this thread's workers from inside the launches, which bell_serve() answers once they are all handed
     // over to the card.
+    const uint32_t ring0 = h_bell_ ? h_bell_->ring : 0;   // the call's rings: the card's counter moves per ring
+    double bell_ms = 0;   // the host's time in bell_serve: the serve the card's bell_add waits out
     bell_ = bell_on(n);
     struct BellOff {
         bool& on;
         ~BellOff() { on = false; }
     } bell_off{bell_};
     const bool card = n < kStageRows && card_moe(n);
+    const auto bell_say = [&]() {   // the decode's run() never goes through step(), whose trace never fired:
+        if (!h_bell_) return;       // this one sits on this function's three exits
+        static int said = 0, winsaid = 0;
+        const uint32_t rings = h_bell_->ring - ring0;
+        if (n == 1) {
+            if (said < 3) {
+                ++said;
+                std::fprintf(stderr,
+                             "strata-poly: [bell] step: bell_ %d, card %d, rings %u of %d MoE, serve %.1f ms\n",
+                             (int) bell_, (int) card, rings, n_moe_, bell_ms);
+            }
+        } else if (winsaid < 2) {
+            ++winsaid;
+            std::fprintf(stderr,
+                         "strata-poly: [bell] window: rows %d, bell_ %d, card %d, rings %u of %d MoE, "
+                         "serve %.1f ms\n",
+                         n, (int) bell_, (int) card, rings, n_moe_, bell_ms);
+        }
+    };
     const auto on_card = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         if (!card) return false;
@@ -4610,7 +4631,12 @@ void Engine::run(const int32_t* tokens, int n) {
             });
         ck(cudaGraphLaunch((cudaGraphExec_t) pass, cs(st_)), "layer graph");
         for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += layers_[(size_t) il].moe ? n * n_used_ : 0;
-        if (bell_) bell_serve();
+        if (bell_) {
+            const Clock::time_point t_bell = Clock::now();
+            bell_serve();
+            bell_ms += ms_since(t_bell);
+        }
+        bell_say();
         return;
     }
     // STRATA_POLY_MERGE=1: one recording for the previous layer's tail and this layer's head + shared expert.
@@ -4633,7 +4659,9 @@ void Engine::run(const int32_t* tokens, int n) {
                     // Layer by layer (the first tokens, before the whole pass is recorded): the ring is answered
                     // here, since what this thread does next (a recording, a moe() that waits for the router)
                     // may wait for the card.
+                    const Clock::time_point t_bell = Clock::now();
                     bell_serve();
+                    bell_ms += ms_since(t_bell);
                 }
             }
             if (il + 1 >= hi_) { tail(il, n, (size_t) n - 1); continue; }
@@ -4656,6 +4684,7 @@ void Engine::run(const int32_t* tokens, int n) {
                 up_body(il + 1, n);
             }
         }
+        bell_say();
         return;
     }
     for (int il = lo_; il < hi_; ++il) {
@@ -4669,10 +4698,13 @@ void Engine::run(const int32_t* tokens, int n) {
             // Layer by layer (the first tokens, before the whole pass is recorded): the ring is answered here,
             // since what this thread does next (a recording, a moe() that waits for the router) may wait for
             // the card.
+            const Clock::time_point t_bell = Clock::now();
             bell_serve();
+            bell_ms += ms_since(t_bell);
         }
         tail(il, n, (size_t) n - 1);
     }
+    bell_say();
 }
 
 // A row a sequence.  A layer's head is the sequence's own: its row of the buffers (shift_rows()) with the sequence
