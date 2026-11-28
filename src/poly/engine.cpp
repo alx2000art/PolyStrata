@@ -4740,7 +4740,8 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
     const bool card = n < kStageRows && card_moe(n);
     // The bell's own trace: the first step's verdict on why the bell is off (the env asked for it, the
     // allocation is there, and still the layers go through moe()).
-    int bell_rang = 0;
+    const uint32_t ring0 = h_bell_ ? h_bell_->ring : 0;   // the step's rings: the card's counter moves per ring
+    double bell_ms = 0;   // the host's time in bell_serve: the serve the card's bell_add waits out
     if (h_bell_ && !bell_) {
         static bool said = false;
         if (!said) {
@@ -4806,12 +4807,17 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
             if (!capped && card && L.card == 1 && replay && graph_part('c')) {
                 replayed(L.card_moe, rec + (bell_ ? recs : 0), [&] { moe_card(L, il, n); });
                 stats_.gpu_experts += n * n_used_;
-                if (bell_) { bell_serve(); ++bell_rang; }
+                if (bell_) {
+                    const Clock::time_point t_bell = Clock::now();
+                    bell_serve();
+                    bell_ms += ms_since(t_bell);
+                }
             } else if (!capped && card && moe_card(L, il, n)) {
                 stats_.gpu_experts += n * n_used_;
                 if (bell_) {   // what this thread does next (a recording, a moe() that waits for
-                    ++bell_rang;   // the router) may wait for the card
+                    const Clock::time_point t_bell = Clock::now();   // the router) may wait for the card
                     bell_serve();
+                    bell_ms += ms_since(t_bell);
                 }
             } else if (moe(L, il, n)) {
                 moe_add(n);
@@ -4822,16 +4828,20 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
     }
     if (h_bell_) {   // the bell's trace: the first one-row steps, then the first windows.  The decode goes
         static int said = 0, winsaid = 0;   // windows of rows, and the token-only gate kept the live run silent
+        const uint32_t rings = h_bell_->ring - ring0;   // the card rang this many times over the step
         if (n == 1) {
             if (said < 3) {
                 ++said;
-                std::fprintf(stderr, "strata-poly: [bell] step: bell_ %d, card %d, layers rang %d of %d MoE\n",
-                             (int) bell_, (int) card, bell_rang, n_moe_);
+                std::fprintf(stderr,
+                             "strata-poly: [bell] step: bell_ %d, card %d, rings %u of %d MoE, serve %.1f ms\n",
+                             (int) bell_, (int) card, rings, n_moe_, bell_ms);
             }
         } else if (winsaid < 2) {
             ++winsaid;
-            std::fprintf(stderr, "strata-poly: [bell] window: rows %d, bell_ %d, card %d, layers rang %d of %d MoE\n",
-                         n, (int) bell_, (int) card, bell_rang, n_moe_);
+            std::fprintf(stderr,
+                         "strata-poly: [bell] window: rows %d, bell_ %d, card %d, rings %u of %d MoE, "
+                         "serve %.1f ms\n",
+                         n, (int) bell_, (int) card, rings, n_moe_, bell_ms);
         }
     }
 
