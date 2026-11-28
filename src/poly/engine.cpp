@@ -3543,12 +3543,14 @@ void Engine::bell_serve() {
         if (r != bell_seen_) {
             std::atomic_thread_fence(std::memory_order_acquire);
             bell_seen_ = r;
+            const Clock::time_point t_job = Clock::now();
             try {
                 bell_job(r);
             } catch (...) {
                 bell_unwind();   // the card's waits end; what it adds is spoiled, and the call throws
                 throw;
             }
+            bell_ms_ += ms_since(t_job);
             std::atomic_thread_fence(std::memory_order_release);
             h_bell_->ack = r;
             moved = Clock::now();
@@ -3583,12 +3585,14 @@ void Engine::bell_pump() {
         if (r == bell_seen_) return;
         std::atomic_thread_fence(std::memory_order_acquire);
         bell_seen_ = r;
+        const Clock::time_point t_job = Clock::now();
         try {
             bell_job(r);
         } catch (...) {
             bell_unwind();
             throw;
         }
+        bell_ms_ += ms_since(t_job);
         std::atomic_thread_fence(std::memory_order_release);
         h_bell_->ack = r;
     }
@@ -4639,7 +4643,7 @@ void Engine::run(const int32_t* tokens, int n) {
     // to this thread's workers from inside the launches, which bell_serve() answers once they are all handed
     // over to the card.
     const uint32_t ring0 = h_bell_ ? h_bell_->ring : 0;   // the call's rings: the card's counter moves per ring
-    double bell_ms = 0;   // the host's time in bell_serve: the serve the card's bell_add waits out
+    bell_ms_ = 0;   // the trace's serve: every pump and the drain's jobs count themselves
     bell_ = bell_on(n);
     struct BellOff {
         bool& on;
@@ -4656,14 +4660,14 @@ void Engine::run(const int32_t* tokens, int n) {
                 std::fprintf(                     // shows as the rings' and the serve's decline over a run
                     stderr,
                     "strata-poly: [bell] step %d: bell_ %d, card %d, rings %u of %d MoE, serve %.1f ms\n",
-                    said, (int) bell_, (int) card, rings, n_moe_, bell_ms);
+                    said, (int) bell_, (int) card, rings, n_moe_, bell_ms_);
             }
         } else if (winsaid < 2) {
             ++winsaid;
             std::fprintf(stderr,
                          "strata-poly: [bell] window: rows %d, bell_ %d, card %d, rings %u of %d MoE, "
                          "serve %.1f ms\n",
-                         n, (int) bell_, (int) card, rings, n_moe_, bell_ms);
+                         n, (int) bell_, (int) card, rings, n_moe_, bell_ms_);
         }
     };
     const auto on_card = [&](int il, int m, size_t rec) {
@@ -4698,11 +4702,7 @@ void Engine::run(const int32_t* tokens, int n) {
             });
         ck(cudaGraphLaunch((cudaGraphExec_t) pass, cs(st_)), "layer graph");
         for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += layers_[(size_t) il].moe ? n * n_used_ : 0;
-        if (bell_) {
-            const Clock::time_point t_bell = Clock::now();
-            bell_serve();
-            bell_ms += ms_since(t_bell);
-        }
+        if (bell_) bell_serve();
         bell_say();
         return;
     }
@@ -4727,9 +4727,7 @@ void Engine::run(const int32_t* tokens, int n) {
                     // The pump answers the rings that are pending and runs on: what this thread does next (a
                     // recording, a moe() that waits for the router) pumps the bell beside its wait, so the card's
                     // waits end while the layers keep queuing, not at each layer's serve.
-                    const Clock::time_point t_bell = Clock::now();
                     bell_pump();
-                    bell_ms += ms_since(t_bell);
                 }
             }
             if (il + 1 >= hi_) { tail(il, n, (size_t) n - 1); continue; }
@@ -4754,9 +4752,7 @@ void Engine::run(const int32_t* tokens, int n) {
             if (bell_ && card) ck(cudaEventRecord((cudaEvent_t) ev_bw_[il % kBellW], cs(st_)), "the doorbell's mark");
         }
         if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
-            const Clock::time_point t_bell = Clock::now();
             bell_serve();
-            bell_ms += ms_since(t_bell);
         }
         bell_say();
         return;
@@ -4773,17 +4769,13 @@ void Engine::run(const int32_t* tokens, int n) {
             // The pump answers the rings that are pending and runs on: what this thread does next (a recording,
             // a moe() that waits for the router) pumps the bell beside its wait, so the card's waits end while
             // the layers keep queuing, not at each layer's serve.
-            const Clock::time_point t_bell = Clock::now();
             bell_pump();
-            bell_ms += ms_since(t_bell);
         }
         tail(il, n, (size_t) n - 1);
         if (bell_ && card) ck(cudaEventRecord((cudaEvent_t) ev_bw_[il % kBellW], cs(st_)), "the doorbell's mark");
     }
     if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
-        const Clock::time_point t_bell = Clock::now();
         bell_serve();
-        bell_ms += ms_since(t_bell);
     }
     bell_say();
 }
@@ -4854,7 +4846,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
     // The bell's own trace: the first step's verdict on why the bell is off (the env asked for it, the
     // allocation is there, and still the layers go through moe()).
     const uint32_t ring0 = h_bell_ ? h_bell_->ring : 0;   // the step's rings: the card's counter moves per ring
-    double bell_ms = 0;   // the host's time in bell_serve: the serve the card's bell_add waits out
+    bell_ms_ = 0;   // the trace's serve: every pump and the drain's jobs count themselves
     if (h_bell_ && !bell_) {
         static bool said = false;
         if (!said) {
@@ -4922,16 +4914,12 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
                 replayed(L.card_moe, rec + (bell_ ? recs : 0), [&] { moe_card(L, il, n); });
                 stats_.gpu_experts += n * n_used_;
                 if (bell_) {
-                    const Clock::time_point t_bell = Clock::now();
                     bell_pump();
-                    bell_ms += ms_since(t_bell);
                 }
             } else if (!capped && card && moe_card(L, il, n)) {
                 stats_.gpu_experts += n * n_used_;
                 if (bell_) {   // what this thread does next (a recording, a moe() that waits for
-                    const Clock::time_point t_bell = Clock::now();   // the router) pumps beside its wait
-                    bell_pump();
-                    bell_ms += ms_since(t_bell);
+                    bell_pump();   // the router) pumps beside its wait
                 }
             } else if (moe(L, il, n)) {
                 moe_add(n);
@@ -4942,9 +4930,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         if (bell_ && card) ck(cudaEventRecord((cudaEvent_t) ev_bw_[il % kBellW], cs(st_)), "the doorbell's mark");
     }
     if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
-        const Clock::time_point t_bell = Clock::now();
         bell_serve();
-        bell_ms += ms_since(t_bell);
     }
     if (h_bell_) {   // the bell's trace: the first one-row steps, then the first windows.  The decode goes
         static int said = 0, winsaid = 0;   // windows of rows, and the token-only gate kept the live run silent
@@ -4954,14 +4940,14 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
                 ++said;
                 std::fprintf(stderr,
                              "strata-poly: [bell] step: bell_ %d, card %d, rings %u of %d MoE, serve %.1f ms\n",
-                             (int) bell_, (int) card, rings, n_moe_, bell_ms);
+                             (int) bell_, (int) card, rings, n_moe_, bell_ms_);
             }
         } else if (winsaid < 2) {
             ++winsaid;
             std::fprintf(stderr,
                          "strata-poly: [bell] window: rows %d, bell_ %d, card %d, rings %u of %d MoE, "
                          "serve %.1f ms\n",
-                         n, (int) bell_, (int) card, rings, n_moe_, bell_ms);
+                         n, (int) bell_, (int) card, rings, n_moe_, bell_ms_);
         }
     }
 

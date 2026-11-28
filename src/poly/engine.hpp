@@ -946,6 +946,8 @@ protected:
     ExpertBell* h_bell_ = nullptr;                ///< pinned, the card's and the host's
     uint32_t* d_bell_seq_ = nullptr;              ///< the card's rings so far, and the ring of the layer under way
     uint32_t bell_seen_ = 0;                      ///< the last ring the host answered
+    double bell_ms_ = 0;                          ///< this call's time in bell_job(): every pump and the drain
+                                                  ///< count their own, so the trace's serve is the whole serve
     float* h_bell_out_[2] = {};                   ///< the rings' sums, two of them: the host serves the next ring
                                                   ///< while the card's block adds the previous one's
     void* ev_bw_[kBellW] = {};                    ///< the card's progress marks, one every layer: the watermark's
