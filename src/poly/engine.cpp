@@ -4585,11 +4585,12 @@ void Engine::run(const int32_t* tokens, int n) {
         static int said = 0, winsaid = 0;
         const uint32_t rings = h_bell_->ring - ring0;
         if (n == 1) {
-            if (said < 3) {
-                ++said;
-                std::fprintf(stderr,
-                             "strata-poly: [bell] step: bell_ %d, card %d, rings %u of %d MoE, serve %.1f ms\n",
-                             (int) bell_, (int) card, rings, n_moe_, bell_ms);
+            ++said;
+            if (said <= 3 || said % 128 == 0) {   // the first steps, then every 128th: the cache's warming
+                std::fprintf(                     // shows as the rings' and the serve's decline over a run
+                    stderr,
+                    "strata-poly: [bell] step %d: bell_ %d, card %d, rings %u of %d MoE, serve %.1f ms\n",
+                    said, (int) bell_, (int) card, rings, n_moe_, bell_ms);
             }
         } else if (winsaid < 2) {
             ++winsaid;
