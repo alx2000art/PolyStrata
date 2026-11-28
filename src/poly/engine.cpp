@@ -2739,6 +2739,8 @@ void Engine::alloc() {
                 std::memset((void*) h_bell_, 0, sizeof(ExpertBell));
                 d_bell_seq_ = (uint32_t*) dmalloc(2 * sizeof(uint32_t), "scratch");
                 ck(cudaMemset(d_bell_seq_, 0, 2 * sizeof(uint32_t)), "the doorbell");
+                h_bell_out_[0] = (float*) hmalloc((size_t) kBellRows * n_embd_ * sizeof(float), "pinned memory");
+                h_bell_out_[1] = (float*) hmalloc((size_t) kBellRows * n_embd_ * sizeof(float), "pinned memory");
                 d_zslots_ = (void**) dmalloc((size_t) n_layer_ * n_expert_ * sizeof(void*), "scratch");
                 d_use_ = (int32_t*) dmalloc(layers_.size() * (size_t) n_expert_ * sizeof(int32_t), "scratch");
                 h_ids_pick_ = (int32_t*) hmalloc((size_t) n_used_ * sizeof(int32_t), "pinned memory");
@@ -3166,7 +3168,17 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
     static const bool dbg_ = std::getenv("STRATA_POLY_STAGE2_DEBUG") != nullptr;
     const Clock::time_point t_enter = Clock::now();
     Clock::time_point t0 = Clock::now();
-    ck(cudaEventSynchronize((cudaEvent_t) ev_), "router sync");
+    if (bell_) {   // the card may be stalled at an earlier layer's bell_add: its ring is answered from here, or
+        for (;;) {   // this wait never ends (the end drain sits behind the layers this loop is inside of)
+            const cudaError_t q = cudaEventQuery((cudaEvent_t) ev_);
+            if (q == cudaSuccess) break;
+            if (q != cudaErrorNotReady) ck(q, "router sync");
+            bell_pump();
+            _mm_pause();
+        }
+    } else {
+        ck(cudaEventSynchronize((cudaEvent_t) ev_), "router sync");
+    }
     const Clock::time_point t_wait_end = Clock::now();
     stats_.route_wait_ms += ms_since(t0);
     double route_host_ms = 0, cpu_ms = 0;
@@ -3514,40 +3526,72 @@ bool Engine::bell_on(int n) const {
     return n >= 1 && n <= 16 && h_bell_ && !all_cached() && !split_ && !opt_.dump && !opt_.tail_skip_all;
 }
 
-// The doorbell's host side, after a token's launches: each ring is a layer's experts that the card lacks, computed by
-// the workers as moe() computes its CPU experts (the token's input in h_x_, their sum into h_cpu_) and answered,
-// until the card is past the token's last launch.  Here, not on threads of its own: the token's launches are all
-// handed over by then, and this thread would wait for the card anyway.
+// The doorbell's host side, after a call's launches: each ring is a layer's experts that the card lacks, computed by
+// the workers as moe() computes its CPU experts (the call's input in h_x_, their sum into one of the two bell
+// buffers) and answered, until the card is past the call's last launch.  The recorded path serves here once, the
+// card and the host running the token together; a graph-less run's layer sites take bell_pump() instead.
 void Engine::bell_serve() {
     ck(cudaEventRecord((cudaEvent_t) ev_bell_, cs(st_)), "the doorbell");
-    for (;;) {
+    Clock::time_point moved = Clock::now();
+    for (unsigned spins = 0;; ++spins) {
         const uint32_t r = h_bell_->ring;
         if (r != bell_seen_) {
             std::atomic_thread_fence(std::memory_order_acquire);
             bell_seen_ = r;
             try {
-                bell_job();
+                bell_job(r);
             } catch (...) {
-                h_bell_->abort = 1;   // the card's waits end; what it adds is spoiled, and the call throws
-                cudaStreamSynchronize(cs(st_));
-                h_bell_->abort = 0;
-                bell_seen_ = h_bell_->ring;
+                bell_unwind();   // the card's waits end; what it adds is spoiled, and the call throws
                 throw;
             }
             std::atomic_thread_fence(std::memory_order_release);
             h_bell_->ack = r;
+            moved = Clock::now();
             continue;
         }
         const cudaError_t q = cudaEventQuery((cudaEvent_t) ev_bell_);
         if (q == cudaSuccess) return;
         if (q != cudaErrorNotReady) ck(q, "the doorbell");
+        if (spins % 4096 == 0 && Clock::now() - moved > std::chrono::seconds(60)) {
+            bell_unwind();
+            throw std::runtime_error("the doorbell: no ring and no end from the card in 60 s");
+        }
         _mm_pause();
     }
 }
 
-// One ring: a call's misses, computed as moe() computes its CPU experts (the window's rows in h_x_, their sums
-// into h_cpu_ at each pick's row), the weights the card routed with.
-void Engine::bell_job() {
+// The card's waits on the bell end at once (abort): what it adds is spoiled.  Then the bell as the card left it.
+void Engine::bell_unwind() {
+    h_bell_->abort = 1;
+    cudaStreamSynchronize(cs(st_));
+    h_bell_->abort = 0;
+    bell_seen_ = h_bell_->ring;
+}
+
+// The pump: every ring that is pending, answered, and back - no wait for the card, so the layer loop runs ahead and
+// queues the next layers while the card's waits are answered from further along (a ring this call never sees is the
+// end drain's: bell_serve() after the layers).  A ring's data stays the host's until the card's next bell_ring():
+// the stream runs in order, so bell_add(ring) finishes before ring+1 exists, and one buffer each of two is enough.
+void Engine::bell_pump() {
+    for (;;) {
+        const uint32_t r = h_bell_->ring;
+        if (r == bell_seen_) return;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        bell_seen_ = r;
+        try {
+            bell_job(r);
+        } catch (...) {
+            bell_unwind();
+            throw;
+        }
+        std::atomic_thread_fence(std::memory_order_release);
+        h_bell_->ack = r;
+    }
+}
+
+// One ring: a call's misses, computed as moe() computes its CPU experts (the call's rows in h_x_, their sums into
+// this ring's bell buffer at each pick's row), the weights the card routed with.
+void Engine::bell_job(uint32_t seq) {
     const int il = h_bell_->layer, n = std::min<int>(h_bell_->n, kBellJobs);
     const Layer& L = layers_[(size_t) il];
     CpuExpert host[kBellJobs];
@@ -3559,9 +3603,11 @@ void Engine::bell_job() {
         host[j] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride, L.exp_down + e * L.d_bytes,
                    h_bell_->w[j], row};
     }
-    h_bell_->rows = rows;   // bell_add adds these rows only; the rest of the call has no misses
+    float* out = h_bell_out_[seq & 1];   // the card's block reads the buffer bell->buf names after the ack
+    h_bell_->rows = rows;                // bell_add adds these rows only; the rest of the call has no misses
+    h_bell_->buf = (uint32_t) (seq & 1);
     cpu_experts(*workers_, host, n, rows, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, h_x_,
-                clamp_exp_[(size_t) il], gelu_, h_cpu_, opt_.cpu_tiled != 0, nullptr);
+                clamp_exp_[(size_t) il], gelu_, out, opt_.cpu_tiled != 0, nullptr);
     stats_.cpu_experts += n;
     stats_.gpu_experts -= n;   // the caller counted every pick of the call as the card's
 }
@@ -4657,11 +4703,11 @@ void Engine::run(const int32_t* tokens, int n) {
                 else if (!on_card(il, n, (size_t) n - 1)) {
                     if (moe(L, il, n)) moe_add(n);
                 } else if (bell_) {
-                    // Layer by layer (the first tokens, before the whole pass is recorded): the ring is answered
-                    // here, since what this thread does next (a recording, a moe() that waits for the router)
-                    // may wait for the card.
+                    // The pump answers the rings that are pending and runs on: what this thread does next (a
+                    // recording, a moe() that waits for the router) pumps the bell beside its wait, so the card's
+                    // waits end while the layers keep queuing, not at each layer's serve.
                     const Clock::time_point t_bell = Clock::now();
-                    bell_serve();
+                    bell_pump();
                     bell_ms += ms_since(t_bell);
                 }
             }
@@ -4685,6 +4731,11 @@ void Engine::run(const int32_t* tokens, int n) {
                 up_body(il + 1, n);
             }
         }
+        if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
+            const Clock::time_point t_bell = Clock::now();
+            bell_serve();
+            bell_ms += ms_since(t_bell);
+        }
         bell_say();
         return;
     }
@@ -4696,14 +4747,19 @@ void Engine::run(const int32_t* tokens, int n) {
         else if (!on_card(il, n, (size_t) n - 1)) {
             if (moe(L, il, n)) moe_add(n);
         } else if (bell_) {
-            // Layer by layer (the first tokens, before the whole pass is recorded): the ring is answered here,
-            // since what this thread does next (a recording, a moe() that waits for the router) may wait for
-            // the card.
+            // The pump answers the rings that are pending and runs on: what this thread does next (a recording,
+            // a moe() that waits for the router) pumps the bell beside its wait, so the card's waits end while
+            // the layers keep queuing, not at each layer's serve.
             const Clock::time_point t_bell = Clock::now();
-            bell_serve();
+            bell_pump();
             bell_ms += ms_since(t_bell);
         }
         tail(il, n, (size_t) n - 1);
+    }
+    if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
+        const Clock::time_point t_bell = Clock::now();
+        bell_serve();
+        bell_ms += ms_since(t_bell);
     }
     bell_say();
 }
@@ -4842,14 +4898,14 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
                 stats_.gpu_experts += n * n_used_;
                 if (bell_) {
                     const Clock::time_point t_bell = Clock::now();
-                    bell_serve();
+                    bell_pump();
                     bell_ms += ms_since(t_bell);
                 }
             } else if (!capped && card && moe_card(L, il, n)) {
                 stats_.gpu_experts += n * n_used_;
                 if (bell_) {   // what this thread does next (a recording, a moe() that waits for
-                    const Clock::time_point t_bell = Clock::now();   // the router) may wait for the card
-                    bell_serve();
+                    const Clock::time_point t_bell = Clock::now();   // the router) pumps beside its wait
+                    bell_pump();
                     bell_ms += ms_since(t_bell);
                 }
             } else if (moe(L, il, n)) {
@@ -4858,6 +4914,11 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n) {
         }
         if (replay && L.fixed && graph_part('t')) replayed(L.tail, rec, [&] { layer_tail(L, il, n); });
         else layer_tail(L, il, n);
+    }
+    if (bell_) {   // the call's drain: the rings the pumps left pending, and the card past every bell_add
+        const Clock::time_point t_bell = Clock::now();
+        bell_serve();
+        bell_ms += ms_since(t_bell);
     }
     if (h_bell_) {   // the bell's trace: the first one-row steps, then the first windows.  The decode goes
         static int said = 0, winsaid = 0;   // windows of rows, and the token-only gate kept the live run silent

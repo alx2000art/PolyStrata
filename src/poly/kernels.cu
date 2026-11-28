@@ -2833,7 +2833,9 @@ __global__ void bell_ring_kernel(const void* const* __restrict__ slots, const in
 }
 
 // One block: one thread asks the bell every half microsecond or so, the others sleep at the barrier (a spinning
-// card draws power that a CPU computing the experts meanwhile would rather have).
+// card draws power that a CPU computing the experts meanwhile would rather have).  The answer waits in one of the
+// two bell buffers (bell->buf, the host's pick for this ring): the host serves the next ring while this block adds
+// this one's, so a buffer is read long before the ring two steps later writes it again.
 __global__ void bell_add_kernel(const ExpertBell* bell, const uint32_t* __restrict__ seq, const float* hy,
                                 float* __restrict__ acc, int per_row) {
     const uint32_t s = seq[1];
@@ -2845,9 +2847,10 @@ __global__ void bell_add_kernel(const ExpertBell* bell, const uint32_t* __restri
 #endif
         }
     __syncthreads();
-    __threadfence_system();   // the host's answer (and its rows) are this block's before the adds
+    __threadfence_system();   // the host's answer (and its rows and buffer) are this block's before the adds
     const int total = bell->rows * per_row;
-    for (int i = threadIdx.x; i < total; i += blockDim.x) acc[i] += *(volatile const float*) (hy + i);
+    const float* from = hy + (size_t) bell->buf * total;
+    for (int i = threadIdx.x; i < total; i += blockDim.x) acc[i] += *(volatile const float*) (from + i);
 }
 
 void bell_ring(const void* const* slots, const int32_t* ids, const float* w, int n_used, int skip_from, int layer,

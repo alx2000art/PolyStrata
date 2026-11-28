@@ -340,6 +340,7 @@ void permute_groups(const float* x, float* y, int n, int groups, int rows, bool 
 /// zeros), and bell_add() waits for the host's answer and adds its sum - so the host never waits for the router,
 /// and its workers compute the misses while the card works.  The fields are each a cache line apart.
 constexpr int kBellJobs = 96;   // a decode window's misses: 16 tokens x 6 picks, most of them cached
+constexpr int kBellRows = 16;   // a bell call's rows: bell_on() takes 16 rows at most, so its answer buffers hold
 struct ExpertBell {
     volatile uint32_t ring;    ///< the card's rings so far; a new value is a new job
     uint32_t pad0[15];
@@ -349,6 +350,7 @@ struct ExpertBell {
     uint32_t pad2[15];
     int32_t layer, n;          ///< the job: the layer and how many experts
     int32_t rows;              ///< the call's rows the host's answer covers (host-written, before ack)
+    volatile uint32_t buf;     ///< which of the two answer buffers holds this ring's sum (host-written, before ack)
     int32_t e[kBellJobs];      ///< their ids
     int32_t row[kBellJobs];    ///< the call's token each pick belongs to (k / n_used)
     float w[kBellJobs];        ///< their router weights

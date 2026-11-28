@@ -612,7 +612,13 @@ protected:
     /// turns the whole mechanism on; without it h_bell_ is null and this is false.
     bool bell_on(int n) const;
     void bell_serve();
-    void bell_job();
+    /// The bell's pump: answer every ring that is pending, and return - no wait for the card, so the layer loop
+    /// runs ahead and queues the next layers while the card's waits are answered from further along (the whole
+    /// token's one serve of the recorded path, cut into the per-layer sites a graph-less run needs).
+    void bell_pump();
+    /// The card's waits end at once (abort); what it adds is spoiled.  Then the bell as the card left it.
+    void bell_unwind();
+    void bell_job(uint32_t seq);
     /// Whether n tokens take layer L's routed experts as a prompt batch, through MMQ (moe_rows()), and not a few at
     /// a time (moe()).
     bool batched(const Layer& L, int n) const;
@@ -935,6 +941,8 @@ protected:
     ExpertBell* h_bell_ = nullptr;                ///< pinned, the card's and the host's
     uint32_t* d_bell_seq_ = nullptr;              ///< the card's rings so far, and the ring of the layer under way
     uint32_t bell_seen_ = 0;                      ///< the last ring the host answered
+    float* h_bell_out_[2] = {};                   ///< the rings' sums, two of them: the host serves the next ring
+                                                  ///< while the card's block adds the previous one's
     void** d_zslots_ = nullptr;                   ///< d_slots_ with zero_slot_ for every expert outside VRAM
     uint8_t* zero_slot_ = nullptr;                ///< an expert of zeros: a miss's products are 0 on the card
     int32_t* d_use_ = nullptr;                    ///< the card's routed picks per (layer, expert), when it routes
